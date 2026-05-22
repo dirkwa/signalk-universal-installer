@@ -1,5 +1,5 @@
 # SignalK Universal Installer (v2) — Windows (WSL2) scaffold
-$InstallerVersion = if ($env:INSTALLER_VERSION) { $env:INSTALLER_VERSION } else { 'e503f8e' }
+$InstallerVersion = if ($env:INSTALLER_VERSION) { $env:INSTALLER_VERSION } else { 'cae291e' }
 
 $ErrorActionPreference = 'Stop'
 

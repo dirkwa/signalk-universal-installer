@@ -1,18 +1,271 @@
 #!/usr/bin/env bash
-# SignalK Universal Installer (v2) — Linux scaffold
-# INSTALLER_VERSION will be substituted by .github/workflows/pages.yml at deploy time.
-INSTALLER_VERSION="${INSTALLER_VERSION:-e503f8e}"
+# SignalK Universal Installer (v2) — Linux bootstrap.
+#
+# One-shot installer. After it finishes, systemd-user owns the runtime
+# and the updater container takes over signalk-server's lifecycle. The
+# installer never runs continuously.
+#
+# Steps (idempotent; safe to re-run after partial failures):
+#   1. Detect distro + arch + sanity-check the host
+#   2. Pre-flight checks (RAM, disk, ports, cgroups v2, podman, linger, legacy)
+#   3. Install podman if absent
+#   4. Enable linger
+#   5. Ensure group memberships (dialout, gpio, netdev)
+#   6. Generate auth tokens for updater and doctor
+#   7. Initialize ~/.signalk-doctor/{snapshots,last-good.json}
+#   8. Detect hardware → ~/.signalk-updater/hardware.json
+#   9. Pull all three images
+#  10. Render and atomic-write three Quadlets
+#  11. systemctl --user daemon-reload
+#  12. Start doctor + updater services
+#  13. Wait for doctor + updater health
+#  14. Ask the updater to start signalk-server (with systemctl fallback)
+#  15. Wait for signalk-server health
+#  16. Install ~/.local/bin/signalk-recovery
+#  17. Journald drop-in (sudo)
+#  18. Mark bootstrap-complete in last-good.json
+#  19. Print success URLs
+
+INSTALLER_VERSION="${INSTALLER_VERSION:-cae291e}"
+INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 set -euo pipefail
 
-cat <<EOF
-SignalK Universal Installer v${INSTALLER_VERSION} (Linux) — SCAFFOLD ONLY.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$HERE/lib/colors.sh"
+# shellcheck disable=SC1091
+. "$HERE/lib/distro.sh"
+# shellcheck disable=SC1091
+. "$HERE/lib/http.sh"
 
-This release of the script does not install anything yet. The real flow
-(Podman + Quadlet bootstrap + updater/doctor peer containers) is being
-built in the signalk-universal-installer repo.
+REPO_OWNER=${REPO_OWNER:-dirkwa}
+SK_IMAGE=${SK_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-server:latest}
+UPDATER_IMAGE=${UPDATER_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-updater-server:latest}
+DOCTOR_IMAGE=${DOCTOR_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-doctor-server:latest}
 
-Status: https://github.com/dirkwa/signalk-universal-installer
+QUADLET_DIR="${HOME}/.config/containers/systemd"
+UPDATER_DATA="${HOME}/.signalk-updater"
+DOCTOR_DATA="${HOME}/.signalk-doctor"
+
+UPDATER_URL="http://127.0.0.1:3003"
+DOCTOR_URL="http://127.0.0.1:3004"
+SIGNALK_URL="http://127.0.0.1:3000/signalk"
+
+# 1. Detect host
+detect_os
+section "SignalK Universal Installer v${INSTALLER_VERSION}"
+info "Host: ${DISTRO_PRETTY} (${ARCH_NORM})"
+
+# 2. Pre-flight
+section "Pre-flight"
+bash "$HERE/preflight.sh"
+
+# 3. Install podman if absent
+section "Podman"
+if ! command -v podman >/dev/null 2>&1; then
+    info "Installing podman + uidmap + slirp4netns (requires sudo)"
+    sudo apt-get update
+    sudo apt-get install -y podman uidmap slirp4netns
+fi
+ok "$(podman --version)"
+
+# 4. Linger
+section "systemd-user linger"
+if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+    info "Enabling linger for $USER (requires sudo)"
+    sudo loginctl enable-linger "$USER"
+fi
+ok "linger enabled"
+
+# Re-establish XDG_RUNTIME_DIR if linger was just enabled; the user-bus
+# socket may not exist until the next login otherwise. Defensive nudge:
+systemctl --user daemon-reload || true
+
+# 5. Groups
+section "Group memberships"
+for g in dialout gpio netdev; do
+    if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
+        info "Adding $USER to $g (requires sudo)"
+        sudo usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
+    fi
+done
+ok "groups: dialout, gpio, netdev (ensured if present on host)"
+
+# 6. Tokens
+section "Authentication tokens"
+mkdir -p "$UPDATER_DATA" "$DOCTOR_DATA"
+for path in "$UPDATER_DATA/token" "$DOCTOR_DATA/token"; do
+    if [[ ! -f "$path" ]]; then
+        umask 077
+        openssl rand -base64 32 | tr -d '\n' >"$path"
+        chmod 0600 "$path"
+        ok "generated $path"
+    else
+        ok "preserved existing $path"
+    fi
+done
+
+# 7. Doctor state init
+section "Recovery state"
+mkdir -p "$DOCTOR_DATA/snapshots"
+if [[ ! -f "$DOCTOR_DATA/last-good.json" ]]; then
+    echo '{"updatedAt":null,"quadlets":{}}' >"$DOCTOR_DATA/last-good.json"
+fi
+ok "snapshots dir and last-good.json present"
+
+# 8. Hardware detection
+section "Hardware detection"
+"$HERE/detect-hardware.sh" >"$UPDATER_DATA/hardware.json"
+ok "wrote $UPDATER_DATA/hardware.json"
+
+# 9. Pull images
+section "Image pulls"
+for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
+    info "pulling $img"
+    podman pull "$img"
+done
+ok "all images pulled"
+
+# 10. Quadlet rendering
+section "Quadlet rendering"
+mkdir -p "$QUADLET_DIR"
+
+snapshot_existing() {
+    local name=$1
+    local src="$QUADLET_DIR/$name"
+    [[ -f "$src" ]] || return 0
+    local ts
+    ts=$(date -u +"%Y%m%dT%H%M%SZ")
+    cp -p "$src" "$DOCTOR_DATA/snapshots/${ts}-${name}"
+}
+
+atomic_write() {
+    local target=$1
+    local body=$2
+    local tmp
+    tmp=$(mktemp "${target}.XXXXXX")
+    printf '%s\n' "$body" >"$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$target"
+}
+
+snapshot_existing signalk-server.container
+snapshot_existing signalk-updater-server.container
+snapshot_existing signalk-doctor-server.container
+
+SERVER_QUADLET=$("$HERE/render-server-quadlet.sh" "$UPDATER_DATA/hardware.json" "$HERE/../../quadlets/signalk-server.container.template")
+atomic_write "$QUADLET_DIR/signalk-server.container" "$SERVER_QUADLET"
+
+UPDATER_QUADLET=$(cat "$HERE/../../quadlets/signalk-updater-server.container.template")
+atomic_write "$QUADLET_DIR/signalk-updater-server.container" "$UPDATER_QUADLET"
+
+DOCTOR_QUADLET=$(cat "$HERE/../../quadlets/signalk-doctor-server.container.template")
+atomic_write "$QUADLET_DIR/signalk-doctor-server.container" "$DOCTOR_QUADLET"
+
+ok "Quadlets written to $QUADLET_DIR"
+
+# 11. daemon-reload
+section "systemd-user daemon-reload"
+systemctl --user daemon-reload
+ok "daemon-reload OK"
+
+# 12. Start doctor + updater
+section "Starting peer containers"
+systemctl --user start signalk-doctor-server.service
+systemctl --user start signalk-updater-server.service
+ok "doctor and updater units started"
+
+# 13. Wait for health (first-boot tolerant per R1.3)
+section "Health checks"
+if wait_for_http "${DOCTOR_URL}/api/health" 180; then
+    ok "doctor responding on ${DOCTOR_URL}"
+else
+    warn "doctor did not respond within 180s; check 'journalctl --user -u signalk-doctor-server.service'"
+fi
+if wait_for_http "${UPDATER_URL}/api/health" 180; then
+    ok "updater responding on ${UPDATER_URL}"
+else
+    warn "updater did not respond within 180s; check 'journalctl --user -u signalk-updater-server.service'"
+fi
+
+# 14. Bring up signalk-server (prefer updater REST, fall back to systemctl)
+section "Starting signalk-server"
+UP_TOKEN=$(cat "$UPDATER_DATA/token" 2>/dev/null || echo "")
+if [[ -n "$UP_TOKEN" ]]; then
+    if curl -fsS -X POST -H "Authorization: Bearer $UP_TOKEN" "${UPDATER_URL}/api/signalk/start" >/dev/null 2>&1; then
+        ok "updater started signalk-server"
+    else
+        warn "updater REST start failed; falling back to systemctl"
+        systemctl --user start signalk-server.service
+    fi
+else
+    warn "no updater token; using systemctl"
+    systemctl --user start signalk-server.service
+fi
+
+# 15. Wait for signalk-server health
+if wait_for_http "$SIGNALK_URL" 180; then
+    ok "signalk-server responding on ${SIGNALK_URL}"
+else
+    warn "signalk-server did not respond within 180s"
+    warn "open ${DOCTOR_URL} or run ~/.local/bin/signalk-recovery doctor"
+fi
+
+# 16. Recovery script
+section "Host recovery script"
+bash "$HERE/install-recovery-script.sh"
+
+# 17. Journald limits (sudo)
+section "Journald retention drop-in"
+SUDO_OK=1
+sudo -n true 2>/dev/null || SUDO_OK=0
+if (( SUDO_OK )); then
+    sudo install -d -m 0755 /etc/systemd/journald.conf.d
+    sudo tee /etc/systemd/journald.conf.d/signalk.conf >/dev/null <<EOF
+# Installed by signalk-universal-installer
+[Journal]
+SystemMaxUse=500M
+MaxRetentionSec=14day
 EOF
+    sudo systemctl restart systemd-journald
+    ok "journald limits applied"
+else
+    warn "sudo not available without prompt; skipping journald limits"
+    warn "to apply later: see docs/recovery.md 'Journald retention'"
+fi
 
-exit 0
+# 18. Mark bootstrap-complete
+section "Recording bootstrap state"
+python3 - "$DOCTOR_DATA/last-good.json" <<'PY' 2>/dev/null || true
+import json, sys, datetime
+path = sys.argv[1]
+try:
+    with open(path) as fh:
+        data = json.load(fh)
+except Exception:
+    data = {"quadlets": {}}
+data.setdefault("quadlets", {})
+data["updatedAt"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+data["bootstrappedAt"] = data["updatedAt"]
+with open(path, "w") as fh:
+    json.dump(data, fh, indent=2)
+PY
+
+# 19. Success
+cat <<EOF
+
+${C_GREEN}${C_BOLD}OK — SignalK is up.${C_RESET}
+
+  SignalK admin UI : http://localhost:3000
+  Updater Console  : ${UPDATER_URL}
+  Doctor Console   : ${DOCTOR_URL}
+  Recovery script  : \$HOME/.local/bin/signalk-recovery
+
+Auth tokens are at:
+  Updater : ${UPDATER_DATA}/token  (mode 0600)
+  Doctor  : ${DOCTOR_DATA}/token   (mode 0600)
+
+Next: install plugins from the SignalK appstore. To check stack health any time:
+  ~/.local/bin/signalk-recovery status
+EOF

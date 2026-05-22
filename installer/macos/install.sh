@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SignalK Universal Installer (v2) — macOS scaffold
-INSTALLER_VERSION="${INSTALLER_VERSION:-e503f8e}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-cae291e}"
 
 set -euo pipefail
 
