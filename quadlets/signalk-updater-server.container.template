@@ -8,13 +8,6 @@ Image=ghcr.io/dirkwa/signalk-updater-server:latest
 ContainerName=signalk-updater-server
 PublishPort=127.0.0.1:3003:3003
 
-# Run as in-container uid 0. Under rootless podman that maps to the
-# host invoking user (the same uid that owns ~/.signalk-updater/token
-# at mode 0600). Without this the container runs as the Chainguard
-# image's `node` user (uid 65532), which falls in a subuid range and
-# can't read the host-uid-1000-owned token file.
-User=0:0
-
 Volume=%h/.signalk-updater:/data:Z
 Volume=%h/.config/containers/systemd:/quadlets:Z
 Volume=%t/podman/podman.sock:/var/run/docker.sock

@@ -26,7 +26,7 @@
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-2-g32ef781}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-3-g0fc21b7}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 set -euo pipefail
