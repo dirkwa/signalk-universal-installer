@@ -26,7 +26,7 @@
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-1-ged15e91}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-2-g32ef781}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 set -euo pipefail
@@ -222,11 +222,26 @@ else
     warn "updater did not respond within 180s; check 'journalctl --user -u signalk-updater-server.service'"
 fi
 
-# 14. Bring up signalk-server (prefer updater REST, fall back to systemctl)
+# 14. Bring up signalk-server (prefer updater REST, fall back to systemctl).
+# The updater may have JUST been restarted by the daemon-reload above and
+# need a few seconds to settle dockerode against the podman socket — retry
+# briefly before declaring REST broken.
 section "Starting signalk-server"
 UP_TOKEN=$(cat "$UPDATER_DATA/token" 2>/dev/null || echo "")
+updater_rest_start() {
+    local attempt
+    for attempt in 1 2 3 4 5 6; do
+        if curl -fsS -X POST \
+            -H "Authorization: Bearer $UP_TOKEN" \
+            "${UPDATER_URL}/api/signalk/start" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
 if [[ -n "$UP_TOKEN" ]]; then
-    if curl -fsS -X POST -H "Authorization: Bearer $UP_TOKEN" "${UPDATER_URL}/api/signalk/start" >/dev/null 2>&1; then
+    if updater_rest_start; then
         ok "updater started signalk-server"
     else
         warn "updater REST start failed; falling back to systemctl"
