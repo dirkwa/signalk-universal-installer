@@ -26,10 +26,43 @@
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-4e8ead7}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-c634fe9}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 set -euo pipefail
+
+# Resolve own location. When invoked as `curl ... | bash`, BASH_SOURCE[0]
+# is empty and we're running from stdin — none of the adjacent lib/
+# scripts or sibling Quadlet templates are on disk. In that case, fetch
+# them into a tempdir from INSTALLER_BASE_URL and re-exec ourselves.
+if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
+    TMP=$(mktemp -d -t signalk-installer.XXXXXX)
+    trap 'rm -rf "$TMP"' EXIT
+    echo "[i] Fetching installer tree from ${INSTALLER_BASE_URL}"
+    for f in \
+        installer/linux/install.sh \
+        installer/linux/preflight.sh \
+        installer/linux/detect-hardware.sh \
+        installer/linux/render-server-quadlet.sh \
+        installer/linux/install-recovery-script.sh \
+        installer/linux/legacy-cleanup.sh \
+        installer/linux/lib/colors.sh \
+        installer/linux/lib/distro.sh \
+        installer/linux/lib/http.sh \
+        quadlets/signalk-server.container.template \
+        quadlets/signalk-updater-server.container.template \
+        quadlets/signalk-doctor-server.container.template; do
+        mkdir -p "$TMP/$(dirname "$f")"
+        if ! curl -fsSL "${INSTALLER_BASE_URL}/${f}" -o "$TMP/$f"; then
+            echo "[ERR] Failed to fetch ${INSTALLER_BASE_URL}/${f}" >&2
+            exit 1
+        fi
+    done
+    chmod +x "$TMP/installer/linux/"*.sh
+    chmod +x "$TMP/installer/linux/lib/"*.sh 2>/dev/null || true
+    exec env INSTALLER_VERSION="$INSTALLER_VERSION" INSTALLER_BASE_URL="$INSTALLER_BASE_URL" \
+        bash "$TMP/installer/linux/install.sh" "$@"
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
