@@ -1,0 +1,57 @@
+name: Publish installer to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute installer version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(git describe --tags --always --dirty 2>/dev/null || echo dev-${GITHUB_SHA::7})"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Stage dist/
+        env:
+          INSTALLER_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp -r installer dist/
+          cp -r quadlets dist/
+          [ -d scripts ] && cp -r scripts dist/
+          [ -d docs ] && cp -r docs dist/
+          cp README.md dist/index.md
+
+          # Inject version into shell + powershell installers
+          find dist/installer -type f \( -name '*.sh' -o -name '*.ps1' \) -print0 |
+            xargs -0 sed -i "s|INSTALLER_VERSION:-0.0.0-scaffold|INSTALLER_VERSION:-${INSTALLER_VERSION}|g; s|'0.0.0-scaffold'|'${INSTALLER_VERSION}'|g"
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          force_orphan: false
+          commit_message: "deploy: ${{ steps.ver.outputs.version }} from ${{ github.sha }}"
