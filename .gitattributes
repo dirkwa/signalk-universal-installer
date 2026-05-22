@@ -1,0 +1,5 @@
+# Force LF line endings on checkout regardless of the host's
+# core.autocrlf setting. Prettier/eslint enforce LF; without this,
+# Windows CI runners check out CRLF and `prettier --check` reports
+# every line as "Delete `␍`".
+* text=auto eol=lf

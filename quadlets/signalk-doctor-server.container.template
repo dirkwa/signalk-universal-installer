@@ -1,10 +1,36 @@
-# SignalK Doctor Server Quadlet template — placeholder.
-#
-# The real template lands in Phase 7. It includes:
-#   - PublishPort=127.0.0.1:3004:3004
-#   - Volume=%t/podman/podman.sock:/var/run/docker.sock
-#   - Volume=%h/.config/containers/systemd:/quadlets:Z
-#   - Volume=%t/bus:/host/dbus:ro  + DBUS_SESSION_BUS_ADDRESS
-#   - Volume=%h/.signalk-doctor:/data:rw,Z
-#   - Crashloop guards: Restart=on-failure, StartLimitIntervalSec=300, StartLimitBurst=5
-#   - Labels: io.signalk.persistent=true, io.signalk.role=doctor
+[Unit]
+Description=SignalK Doctor Server
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=ghcr.io/dirkwa/signalk-doctor-server:latest
+ContainerName=signalk-doctor-server
+PublishPort=127.0.0.1:3004:3004
+
+Volume=%h/.signalk-doctor:/data:Z
+Volume=%h/.config/containers/systemd:/quadlets:Z
+Volume=%t/podman/podman.sock:/var/run/docker.sock
+Volume=%t/bus:/host/dbus:ro
+# Read access to the updater's data dir for the shared operation.lock
+Volume=%h/.signalk-updater:/updater-data:rw,Z
+
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/host/dbus
+Environment=QUADLET_DIR=/quadlets
+Environment=DATA_DIR=/data
+Environment=LOCK_DIR=/updater-data
+Environment=NODE_ENV=production
+Environment=LOG_LEVEL=info
+
+Label=io.signalk.persistent=true
+Label=io.signalk.role=doctor
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=default.target
