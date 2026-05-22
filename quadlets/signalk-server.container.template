@@ -1,8 +1,40 @@
-# SignalK Server Quadlet template — placeholder.
-#
-# The real template lands in Phase 7 (Linux installer). It will be a complete
-# `[Container] / [Service] / [Install]` unit with hardware passthrough lines
-# (AddDevice=, Volume=) injected by render-server-quadlet.sh based on
-# ~/.signalk-updater/hardware.json, and crashloop guards (CC-4) in [Service].
-#
-# See: /home/dirk/.claude/plans/binary-stirring-platypus.md, Phase 7.
+[Unit]
+Description=SignalK Server
+Wants=network-online.target signalk-updater-server.service signalk-doctor-server.service
+After=network-online.target signalk-updater-server.service signalk-doctor-server.service
+
+[Container]
+Image=ghcr.io/dirkwa/signalk-server:latest
+ContainerName=signalk-server
+Network=host
+
+Volume=%h/.signalk:/home/node/.signalk:Z
+Volume=%t/podman/podman.sock:/var/run/docker.sock
+
+Environment=SIGNALK_NODE_CONF_DIR=/home/node/.signalk
+
+Label=io.signalk.managed-by=updater
+Label=io.signalk.role=server
+
+# === BEGIN USER ADDITIONS ===
+# Hand-edits below this line are preserved across version switches and
+# hardware-apply rewrites. Add custom mounts, capabilities, or environment
+# variables here. The updater preserves everything between the BEGIN/END
+# markers verbatim.
+# === END USER ADDITIONS ===
+
+# === BEGIN HARDWARE (managed by signalk-universal-installer) ===
+# AddDevice= lines below this block are rendered from
+# ~/.signalk-updater/hardware.json by render-server-quadlet.sh and
+# /api/hardware/apply. Do not edit by hand.
+# === END HARDWARE ===
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=180
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=default.target
