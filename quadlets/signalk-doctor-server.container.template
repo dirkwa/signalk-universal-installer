@@ -1,0 +1,10 @@
+# SignalK Doctor Server Quadlet template — placeholder.
+#
+# The real template lands in Phase 7. It includes:
+#   - PublishPort=127.0.0.1:3004:3004
+#   - Volume=%t/podman/podman.sock:/var/run/docker.sock
+#   - Volume=%h/.config/containers/systemd:/quadlets:Z
+#   - Volume=%t/bus:/host/dbus:ro  + DBUS_SESSION_BUS_ADDRESS
+#   - Volume=%h/.signalk-doctor:/data:rw,Z
+#   - Crashloop guards: Restart=on-failure, StartLimitIntervalSec=300, StartLimitBurst=5
+#   - Labels: io.signalk.persistent=true, io.signalk.role=doctor

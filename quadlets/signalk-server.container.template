@@ -1,0 +1,8 @@
+# SignalK Server Quadlet template — placeholder.
+#
+# The real template lands in Phase 7 (Linux installer). It will be a complete
+# `[Container] / [Service] / [Install]` unit with hardware passthrough lines
+# (AddDevice=, Volume=) injected by render-server-quadlet.sh based on
+# ~/.signalk-updater/hardware.json, and crashloop guards (CC-4) in [Service].
+#
+# See: /home/dirk/.claude/plans/binary-stirring-platypus.md, Phase 7.
