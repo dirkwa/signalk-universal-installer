@@ -6,7 +6,12 @@ After=network-online.target
 [Container]
 Image=ghcr.io/dirkwa/signalk-doctor-server:latest
 ContainerName=signalk-doctor-server
-PublishPort=127.0.0.1:3004:3004
+# PublishPort host is templated by install.sh: defaults to 127.0.0.1
+# (localhost only). Set SIGNALK_LAN_EXPOSE=true on the installer command
+# line to bind 0.0.0.0 and expose the Doctor Console on the LAN.
+# Doctor's read-only probes are unauthenticated; only the /api/recover
+# endpoints require the bearer token (~/.signalk-doctor/token).
+PublishPort=__PUBLISH_HOST__:3004:3004
 
 Volume=%h/.signalk-doctor:/data:Z
 Volume=%h/.config/containers/systemd:/quadlets:Z
