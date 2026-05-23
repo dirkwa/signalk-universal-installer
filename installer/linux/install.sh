@@ -26,7 +26,7 @@
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-8-ge8d5181}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-9-g583b4ed}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 # Where the engine container HTTP servers bind. Default localhost-only;
