@@ -12,7 +12,7 @@
 #   - Bluetooth: not supported on macOS.
 #   - GPIO: not applicable.
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-3-g0fc21b7}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-4-gf7121a1}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 set -euo pipefail
