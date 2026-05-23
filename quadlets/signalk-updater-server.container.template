@@ -6,7 +6,12 @@ After=network-online.target
 [Container]
 Image=ghcr.io/dirkwa/signalk-updater-server:latest
 ContainerName=signalk-updater-server
-PublishPort=127.0.0.1:3003:3003
+# PublishPort host is templated by install.sh: defaults to 127.0.0.1
+# (localhost only). Set SIGNALK_LAN_EXPOSE=true on the installer command
+# line to bind 0.0.0.0 and expose the Updater Console on the LAN.
+# Bearer-token auth (CC-2) still applies; any LAN client must read
+# ~/.signalk-updater/token to make mutating calls.
+PublishPort=__PUBLISH_HOST__:3003:3003
 
 Volume=%h/.signalk-updater:/data:Z
 Volume=%h/.config/containers/systemd:/quadlets:Z

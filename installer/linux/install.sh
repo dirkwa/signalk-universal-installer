@@ -26,8 +26,19 @@
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-6-g9807f77}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-7-g4ffe24e}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
+
+# Where the engine container HTTP servers bind. Default localhost-only;
+# set SIGNALK_LAN_EXPOSE=true (or 1/yes) to bind 0.0.0.0 so the Updater
+# Console (:3003) and Doctor Console (:3004) are reachable from the LAN.
+# Bearer-token auth (CC-2) still gates mutating endpoints. Re-running
+# the installer without the flag reverts to localhost.
+case "${SIGNALK_LAN_EXPOSE:-}" in
+    true | TRUE | True | 1 | yes | YES | Yes) PUBLISH_HOST="0.0.0.0" ;;
+    *) PUBLISH_HOST="127.0.0.1" ;;
+esac
+export PUBLISH_HOST
 
 set -euo pipefail
 
@@ -60,7 +71,10 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
     done
     chmod +x "$TMP/installer/linux/"*.sh
     chmod +x "$TMP/installer/linux/lib/"*.sh 2>/dev/null || true
-    exec env INSTALLER_VERSION="$INSTALLER_VERSION" INSTALLER_BASE_URL="$INSTALLER_BASE_URL" \
+    exec env \
+        INSTALLER_VERSION="$INSTALLER_VERSION" \
+        INSTALLER_BASE_URL="$INSTALLER_BASE_URL" \
+        SIGNALK_LAN_EXPOSE="${SIGNALK_LAN_EXPOSE:-}" \
         bash "$TMP/installer/linux/install.sh" "$@"
 fi
 
@@ -89,6 +103,11 @@ SIGNALK_URL="http://127.0.0.1:3000/signalk"
 detect_os
 section "SignalK Universal Installer v${INSTALLER_VERSION}"
 info "Host: ${DISTRO_PRETTY} (${ARCH_NORM})"
+if [[ "$PUBLISH_HOST" = "0.0.0.0" ]]; then
+    warn "SIGNALK_LAN_EXPOSE=true: Updater + Doctor consoles will bind 0.0.0.0 (LAN-reachable)"
+else
+    info "Port bind: localhost only (set SIGNALK_LAN_EXPOSE=true to expose on LAN)"
+fi
 
 # 2. Pre-flight
 section "Pre-flight"
@@ -190,10 +209,10 @@ snapshot_existing signalk-doctor-server.container
 SERVER_QUADLET=$("$HERE/render-server-quadlet.sh" "$UPDATER_DATA/hardware.json" "$HERE/../../quadlets/signalk-server.container.template")
 atomic_write "$QUADLET_DIR/signalk-server.container" "$SERVER_QUADLET"
 
-UPDATER_QUADLET=$(cat "$HERE/../../quadlets/signalk-updater-server.container.template")
+UPDATER_QUADLET=$(sed "s/__PUBLISH_HOST__/${PUBLISH_HOST}/g" "$HERE/../../quadlets/signalk-updater-server.container.template")
 atomic_write "$QUADLET_DIR/signalk-updater-server.container" "$UPDATER_QUADLET"
 
-DOCTOR_QUADLET=$(cat "$HERE/../../quadlets/signalk-doctor-server.container.template")
+DOCTOR_QUADLET=$(sed "s/__PUBLISH_HOST__/${PUBLISH_HOST}/g" "$HERE/../../quadlets/signalk-doctor-server.container.template")
 atomic_write "$QUADLET_DIR/signalk-doctor-server.container" "$DOCTOR_QUADLET"
 
 ok "Quadlets written to $QUADLET_DIR"
@@ -350,6 +369,11 @@ with open(path, "w") as fh:
 PY
 
 # 19. Success
+if [[ "$PUBLISH_HOST" = "0.0.0.0" ]]; then
+    LAN_NOTE="Updater + Doctor are reachable on the LAN. Use the host's LAN address."
+else
+    LAN_NOTE="Updater + Doctor are bound to localhost only. Run with SIGNALK_LAN_EXPOSE=true to expose on the LAN."
+fi
 cat <<EOF
 
 ${C_GREEN}${C_BOLD}OK — SignalK is up.${C_RESET}
@@ -358,6 +382,8 @@ ${C_GREEN}${C_BOLD}OK — SignalK is up.${C_RESET}
   Updater Console  : ${UPDATER_URL}
   Doctor Console   : ${DOCTOR_URL}
   Recovery script  : \$HOME/.local/bin/signalk-recovery
+
+${LAN_NOTE}
 
 Auth tokens are at:
   Updater : ${UPDATER_DATA}/token  (mode 0600)
