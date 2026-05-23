@@ -8,6 +8,15 @@ Image=ghcr.io/dirkwa/signalk-server:latest
 ContainerName=signalk-server
 Network=host
 
+# Keep the host user's uid/gid inside the container rather than mapping
+# them through subuids. The signalk-server image runs as `node` (uid
+# 1000); on the typical host the invoking user is also uid 1000. With
+# keep-id, container uid 1000 == host uid 1000, so the ~/.signalk
+# bind-mount is writable from inside (otherwise the userns remap puts
+# the in-container `node` user in a subuid range that can't write to
+# host-uid-1000-owned files, and `enableSecurity` etc. fail with 500).
+UserNS=keep-id
+
 Volume=%h/.signalk:/home/node/.signalk:Z
 Volume=%t/podman/podman.sock:/var/run/docker.sock
 
