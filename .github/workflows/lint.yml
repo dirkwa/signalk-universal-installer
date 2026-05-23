@@ -1,0 +1,34 @@
+name: lint
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: bash -n syntax check
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r -d '' f; do
+            if ! bash -n "$f"; then
+              echo "::error file=$f::bash -n syntax error"
+              fail=1
+            fi
+          done < <(find installer scripts -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+          exit "$fail"
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          find installer scripts -type f \( -name '*.sh' -o -name '*.bash' \) -print0 |
+            xargs -0 shellcheck
