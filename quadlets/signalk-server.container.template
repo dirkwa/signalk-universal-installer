@@ -39,7 +39,14 @@ Label=io.signalk.role=server
 # === END HARDWARE ===
 
 [Service]
-Restart=on-failure
+# Restart=always rather than on-failure: the SignalK admin UI's "Restart"
+# button calls process.exit(0) on the server, which is a CLEAN exit
+# (status=0/SUCCESS). Restart=on-failure would not bring it back, and
+# the user would be stranded with a stopped unit. The crashloop guard
+# below (StartLimitIntervalSec + StartLimitBurst) still kicks in for
+# genuine failure loops — after 5 starts in 5 minutes the unit goes to
+# `failed` state and stays there.
+Restart=always
 RestartSec=10
 TimeoutStartSec=180
 StartLimitIntervalSec=300
