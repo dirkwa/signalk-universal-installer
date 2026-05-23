@@ -49,7 +49,7 @@ if ! podman machine list --format '{{.Name}}' | grep -qx "$MACHINE_NAME"; then
     podman machine init --cpus 2 --memory 4096 --disk-size 30 "$MACHINE_NAME"
 fi
 
-if ! podman machine list --format '{{.Name}} {{.Running}}' | grep -q "^$MACHINE_NAME[[:space:]]*true"; then
+if ! podman machine list --format '{{.Name}} {{.Running}}' | grep -q "^${MACHINE_NAME}[[:space:]]*true"; then
     info "Starting Podman machine"
     podman machine start "$MACHINE_NAME"
 fi

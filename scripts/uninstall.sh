@@ -20,7 +20,9 @@ done
 
 echo "Removing podman containers..."
 for u in "${UNITS[@]}"; do
-    podman container exists "$u" 2>/dev/null && podman rm -f "$u" 2>/dev/null || true
+    if podman container exists "$u" 2>/dev/null; then
+        podman rm -f "$u" 2>/dev/null || true
+    fi
 done
 
 systemctl --user daemon-reload || true

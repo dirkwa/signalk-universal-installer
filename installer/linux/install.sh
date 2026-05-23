@@ -297,8 +297,7 @@ done
 section "Starting signalk-server"
 UP_TOKEN=$(cat "$UPDATER_DATA/token" 2>/dev/null || echo "")
 updater_rest_start() {
-    local attempt
-    for attempt in 1 2 3 4 5 6; do
+    for _ in 1 2 3 4 5 6; do
         if curl -fsS -X POST \
             -H "Authorization: Bearer $UP_TOKEN" \
             "${UPDATER_URL}/api/signalk/start" >/dev/null 2>&1; then

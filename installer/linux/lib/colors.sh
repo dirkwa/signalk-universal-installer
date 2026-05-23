@@ -3,6 +3,8 @@
 # when stdout is a TTY, plain text otherwise. Adapted from the legacy
 # signalk-universal-installer-v1 installer.
 
+# shellcheck disable=SC2034
+# (C_GRAY is published for external consumers that source this lib.)
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     readonly C_RED=$'\033[0;31m'
     readonly C_GREEN=$'\033[0;32m'
