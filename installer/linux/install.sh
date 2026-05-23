@@ -26,7 +26,7 @@
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-5-ga242fb4}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-6-g9807f77}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 set -euo pipefail
@@ -221,6 +221,55 @@ if wait_for_http "${UPDATER_URL}/api/health" 180; then
 else
     warn "updater did not respond within 180s; check 'journalctl --user -u signalk-updater-server.service'"
 fi
+
+# 13.5 Install (or update) the bundled SignalK plugins into ~/.signalk/.
+# These plugins live in the user's data dir, not the signalk-server image —
+# same as anything installed via the SignalK appstore. After the first install
+# the appstore is the source of truth for updates; we just lay them down on
+# day one so the admin UI has the Updater / Doctor consoles immediately.
+#
+# We use the signalk-server container's own bundled npm so the host doesn't
+# need a Node toolchain. --ignore-scripts matches the appstore's install
+# posture (some plugins try to compile native bindings that fail silently).
+section "Installing SignalK plugins"
+SK_PLUGINS=(signalk-container signalk-updater signalk-doctor)
+mkdir -p "$HOME/.signalk"
+
+info "running 'npm install' inside the signalk-server image"
+if podman run --rm \
+    --userns=keep-id \
+    -v "$HOME/.signalk:/home/node/.signalk:Z" \
+    --entrypoint sh \
+    "$SK_IMAGE" \
+    -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >/dev/null 2>&1; then
+    for p in "${SK_PLUGINS[@]}"; do
+        if [[ -d "$HOME/.signalk/node_modules/$p" ]]; then
+            v=$(grep -m1 '"version"' "$HOME/.signalk/node_modules/$p/package.json" 2>/dev/null \
+                | sed 's/.*"\([0-9][^"]*\)".*/\1/')
+            ok "$p@${v:-?}"
+        else
+            warn "$p — install reported ok but module dir is missing"
+        fi
+    done
+else
+    warn "npm install failed; plugins not installed. Install from the SignalK appstore later."
+fi
+
+# Auto-enable each plugin (one-time on first install). If a config file
+# already exists we leave the user's settings alone — they may have
+# deliberately disabled a plugin and re-running the installer should not
+# override that.
+mkdir -p "$HOME/.signalk/plugin-config-data"
+for p in "${SK_PLUGINS[@]}"; do
+    # signalk-container is auto-enabled by its own metadata
+    # (signalk-plugin-enabled-by-default: true); skip writing a config for it.
+    [[ "$p" == "signalk-container" ]] && continue
+    cfg="$HOME/.signalk/plugin-config-data/${p}.json"
+    if [[ ! -f "$cfg" ]]; then
+        printf '{\n  "enabled": true,\n  "configuration": {}\n}\n' >"$cfg"
+        ok "auto-enabled $p"
+    fi
+done
 
 # 14. Bring up signalk-server (prefer updater REST, fall back to systemctl).
 # The updater may have JUST been restarted by the daemon-reload above and

@@ -14,7 +14,7 @@ param(
     [string]$InstallerBaseUrl = 'https://dirkwa.github.io/signalk-universal-installer'
 )
 
-if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { $env:INSTALLER_VERSION } else { 'v0.1.0-5-ga242fb4' } }
+if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { $env:INSTALLER_VERSION } else { 'v0.1.0-6-g9807f77' } }
 
 $ErrorActionPreference = 'Stop'
 
