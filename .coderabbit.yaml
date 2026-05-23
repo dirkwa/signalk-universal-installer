@@ -1,0 +1,190 @@
+language: en-US
+
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_title_keywords:
+      - "chore(release):"
+      - "chore(deps):"
+      - "chore(deps-dev):"
+      - "[skip review]"
+      - "WIP"
+    ignore_usernames:
+      - "release-please[bot]"
+      - "renovate[bot]"
+      - "dependabot[bot]"
+      - "github-actions[bot]"
+
+  path_filters:
+    - "!**/package-lock.json"
+    - "!**/yarn.lock"
+    - "!**/pnpm-lock.yaml"
+    - "!**/*.min.js"
+    - "!**/*.min.css"
+    - "!**/dist/**"
+    - "!**/build/**"
+    - "!**/node_modules/**"
+
+  high_level_summary_instructions: |
+    Write summaries in present tense. Describe what the code does, not what
+    it did. Skip filler like "This PR" — go straight to the change.
+
+  path_instructions:
+    - path: '**/*'
+      instructions: |
+        ## Scope
+
+        Focus on files changed since `master`. Think about how changes
+        interact with the rest of the stack, not just the diff in isolation.
+
+        signalk-universal-installer is a **pure bash + PowerShell
+        bootstrapper**. It is not a runtime. Its only job is to land two or
+        three systemd Quadlets, install Podman if missing, detect hardware,
+        and hand control to the engine containers. Once the installer
+        exits, systemd and the engine containers
+        ([signalk-updater-server](https://github.com/dirkwa/signalk-updater-server),
+        [signalk-doctor-server](https://github.com/dirkwa/signalk-doctor-server))
+        own the runtime. Reviews should reject any drift toward "the
+        installer also does X at runtime".
+
+        ## Shell-only repo
+
+        - No Node, no TypeScript, no Python in this repo. Bash on Linux/macOS
+          and PowerShell on Windows (WSL2 bootstrap). Do not suggest
+          rewriting in another language.
+        - All shell scripts must pass `shellcheck` and `bash -n`. These are
+          in the pre-PR checklist.
+        - `set -euo pipefail` at the top of every bash script. Do not
+          suggest dropping `-e` for "convenience" — the installer is a
+          chain of must-succeed steps.
+        - Quote every variable expansion (`"$var"`, not `$var`) unless
+          deliberate word-splitting is needed and commented as such.
+        - Prefer `command -v foo` over `which foo` (POSIX vs PATH-search).
+
+        ## Bootstrap-not-runtime principle
+
+        - The installer writes to `~/.config/containers/systemd/` and
+          `~/.signalk-{updater,doctor}/`. It never writes to `~/.signalk/`.
+        - The installer never starts or stops `signalk-server` directly.
+          It calls the updater's REST API. The only documented exception
+          is the recovery script (`~/.local/bin/signalk-recovery`), which
+          is host-resident bash and works with zero containers running.
+        - Do not introduce daemons, polling loops, or long-lived processes
+          in the installer. After step 12 (success message) it exits 0.
+
+        ## Filesystem invariants
+
+        The path table in AGENTS.md is load-bearing. Any change that adds,
+        renames, or repurposes a path under `~/.signalk-{updater,doctor}/`
+        or `~/.config/containers/systemd/` must update AGENTS.md in the
+        same PR. Flag PRs that touch the layout without updating the table.
+
+        ## Quadlet templates
+
+        - Live in `quadlets/`. The bash installer renders them at install
+          time; the updater container re-renders `signalk-server.container`
+          on version switches and hardware changes.
+        - `signalk-doctor-server.container` is dropped by the installer
+          and is **not** re-rendered at runtime — once written, the doctor
+          owns its own quadlet (see signalk-doctor-server AGENTS.md CC-1).
+        - **Restart policy:** all engine quadlets must use
+          `Restart=on-failure` with `StartLimitIntervalSec=300` and
+          `StartLimitBurst=5`, and `StartLimit*` MUST be in `[Unit]`, not
+          `[Service]` (systemd applies them only from `[Unit]`). This is
+          required by signalk-doctor-server CC-4 ("`Restart=always` is
+          banned") — flag any quadlet that sets `Restart=always` or moves
+          `StartLimit*` to `[Service]`.
+        - Use `%h` and `%t` specifiers for host paths, never hard-coded
+          `/home/$USER` or `/run/user/1000`.
+
+        ## Hardware detection
+
+        - Produces `~/.signalk-updater/hardware.json` and is read by the
+          updater at deploy time. The JSON shape is part of the contract
+          with signalk-updater-server — schema changes must be coordinated.
+        - Serial devices default to `enabled: true`; CAN/BLE/GPIO default
+          to `enabled: false` (require explicit opt-in).
+        - Detection scripts must be idempotent — they re-run on
+          `Re-detect` from the updater UI.
+
+        ## GitHub Pages distribution
+
+        - `installer/`, `quadlets/`, and `scripts/` are published to
+          GitHub Pages on every push to `master` and on `v*` tags.
+        - The `curl … | bash` one-liner is the user-facing API. Do not
+          break:
+          - The path layout under the Pages site.
+          - The `INSTALLER_BASE_URL` override (devs point at a fork or
+            `python3 -m http.server`).
+          - The `INSTALLER_VERSION` sed-substitution that the tag-deploy
+            workflow injects.
+
+        ## Pre-flight checks
+
+        Listed in §6.4 of the design plan; any change to the thresholds
+        (RAM, disk, port reservations, cgroups v2, Podman ≥ 4.4) must be
+        justified in the PR description. Don't silently relax a check.
+
+        ## Echo comments
+
+        Flag any comment that merely restates what the code already says.
+        Examples to flag:
+
+        - `# Install podman` above `apt-get install -y podman`
+        - `# Wait for HTTP` above `wait_for_http …`
+
+        Replace with comments explaining *why*, not *what*. Or delete.
+
+        ## Documentation drift risk
+
+        Flag any `.md` file that contains:
+
+        - Specific code snippets, function signatures, or config values
+          likely to fall out of sync as code evolves.
+        - Step-by-step build/development instructions that duplicate or
+          shadow the scripts themselves.
+        - Implementation status, progress markers, "currently implemented
+          as X" wording. Build narratives belong in PR descriptions, not
+          in repo docs.
+
+        Architecture decisions and conceptual design rationale are fine.
+
+        ## Leftover crumbs from intermediate commits
+
+        Flag references in the current diff to symbols, files, or
+        approaches that no longer exist on this branch — old script names
+        in comments, stale TODOs from a superseded approach, etc.
+
+        ## Unchecked items in test plans
+
+        If the PR description has a checklist with unchecked items, flag
+        it. Either the work isn't done, or the unchecked items should be
+        removed.
+
+        ## Commit / PR conventions
+
+        - Branch names use **hyphens**, never slashes (`fix-something`,
+          not `fix/something`).
+        - Angular conventional commits: `<type>(<scope>): <subject>`.
+          Subject ≤ 50 chars, imperative mood, no period.
+        - One logical change per commit and per PR.
+        - **No AI attribution** in commits, PR bodies, or code. Don't
+          mention Claude, AI, or add `Co-Authored-By` trailers.
+        - PR descriptions: no checkboxes. "Tested" lists what actually
+          ran on a clean VM or in a container, not what's planned.
+
+        ## What NOT to flag
+
+        These are intentional:
+
+        - `sudo apt-get` for `podman` install — package managers need root.
+          The rest of the installer runs unprivileged.
+        - The installer asking the updater's REST API to start
+          signalk-server instead of `systemctl --user start` directly —
+          this is so the updater owns the lifecycle from day one.
+        - Long `set -euo pipefail` blocks at the top of every script.
+        - `envsubst` for Quadlet template rendering — chosen on purpose
+          over heredocs to keep templates inspectable.
