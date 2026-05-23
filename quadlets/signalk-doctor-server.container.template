@@ -2,6 +2,11 @@
 Description=SignalK Doctor Server
 Wants=network-online.target
 After=network-online.target
+# Crashloop guard. Belongs in [Unit] — systemd silently ignores these
+# keys when placed in [Service]. After 5 starts in 5 minutes the unit
+# goes to `failed` instead of looping forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Container]
 Image=ghcr.io/dirkwa/signalk-doctor-server:latest
@@ -34,8 +39,6 @@ Label=io.signalk.role=doctor
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=120
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 [Install]
 WantedBy=default.target

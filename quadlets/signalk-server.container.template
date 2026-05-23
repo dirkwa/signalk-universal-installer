@@ -2,6 +2,13 @@
 Description=SignalK Server
 Wants=network-online.target signalk-updater-server.service signalk-doctor-server.service
 After=network-online.target signalk-updater-server.service signalk-doctor-server.service
+# Crashloop guard. Belongs in [Unit] — systemd silently ignores these
+# keys when placed in [Service], which is how they got dropped on the
+# 0.5.x installs (journal logged `Unknown key 'StartLimitIntervalSec'
+# in section [Service], ignoring.` and the unit retried forever).
+# After 5 starts in 5 minutes the unit goes to `failed`.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Container]
 Image=ghcr.io/dirkwa/signalk-server:latest
@@ -43,14 +50,12 @@ Label=io.signalk.role=server
 # button calls process.exit(0) on the server, which is a CLEAN exit
 # (status=0/SUCCESS). Restart=on-failure would not bring it back, and
 # the user would be stranded with a stopped unit. The crashloop guard
-# below (StartLimitIntervalSec + StartLimitBurst) still kicks in for
-# genuine failure loops — after 5 starts in 5 minutes the unit goes to
-# `failed` state and stays there.
+# (StartLimitIntervalSec/StartLimitBurst, in [Unit] above) still kicks
+# in for genuine failure loops — after 5 starts in 5 minutes the unit
+# goes to `failed` state and stays there.
 Restart=always
 RestartSec=10
 TimeoutStartSec=180
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 [Install]
 WantedBy=default.target
