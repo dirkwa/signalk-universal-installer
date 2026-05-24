@@ -155,14 +155,6 @@ check_podman() {
     cur_major=$(cut -d. -f1 <<<"$v")
     cur_minor=$(cut -d. -f2 <<<"$v")
     if (( cur_major < req_major )) || { (( cur_major == req_major )) && (( cur_minor < req_minor )); }; then
-        # Bookworm ships podman 4.3.1 in main but 4.9 in
-        # bookworm-backports; install.sh enables backports and pulls
-        # the newer package automatically. Warn instead of failing so
-        # bookworm hosts can proceed.
-        if [[ "$DISTRO_ID" = "debian" && "$DISTRO_CODENAME" = "bookworm" ]]; then
-            warn "Podman $v < required $PODMAN_MIN_VERSION on bookworm — installer will upgrade via bookworm-backports"
-            return
-        fi
         fail "Podman $v < required $PODMAN_MIN_VERSION (Quadlet support)"
     else
         ok "Podman $v"
@@ -245,8 +237,34 @@ check_legacy_install() {
     fi
 }
 
+check_distro_blocked() {
+    # Debian 12 (bookworm) ships podman 4.3.1; Quadlet support arrived
+    # in 4.4. We previously enabled bookworm-backports to upgrade, but
+    # Debian removed podman from bookworm-backports — so there is no
+    # in-Debian-repo path to a usable version. Bail with a clear
+    # upgrade-to-trixie message rather than failing later, mid-apt,
+    # with a confusing dependency error.
+    if [[ "$DISTRO_ID" = "debian" && "$DISTRO_CODENAME" = "bookworm" ]]; then
+        err "Debian 12 (bookworm) is no longer supported by this installer."
+        echo >&2
+        err "Bookworm ships Podman 4.3.1 which lacks Quadlet (added in 4.4),"
+        err "and bookworm-backports does not carry a newer version."
+        echo >&2
+        err "Upgrade to Debian 13 (trixie):"
+        err "  1. As root, edit /etc/apt/sources.list and replace 'bookworm'"
+        err "     with 'trixie' on every active line (also under"
+        err "     /etc/apt/sources.list.d/ if you have files there)."
+        err "  2. apt-get update"
+        err "  3. apt-get full-upgrade"
+        err "  4. reboot"
+        err "  5. Re-run this installer."
+        exit 1
+    fi
+}
+
 main() {
     section "Pre-flight on ${DISTRO_PRETTY} (${ARCH_NORM})"
+    check_distro_blocked
     if ! is_supported_distro; then
         warn "Untested on ${DISTRO_PRETTY}; continuing"
     fi

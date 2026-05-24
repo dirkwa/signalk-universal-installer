@@ -30,9 +30,13 @@ is_pi() {
 
 is_supported_distro() {
     case "$DISTRO_ID:$DISTRO_VERSION" in
-        debian:13|debian:12) return 0 ;;
+        # Debian 12 (bookworm) ships podman 4.3.1, which lacks Quadlet
+        # support (added in 4.4). bookworm-backports does not carry
+        # podman, so there's no clean upgrade path within Debian's own
+        # repos — only trixie or later works.
+        debian:13) return 0 ;;
         ubuntu:24.04|ubuntu:24.10|ubuntu:25.04|ubuntu:25.10|ubuntu:26.04) return 0 ;;
-        raspbian:12|raspbian:13) return 0 ;;
+        raspbian:13) return 0 ;;
         *) return 1 ;;
     esac
 }
