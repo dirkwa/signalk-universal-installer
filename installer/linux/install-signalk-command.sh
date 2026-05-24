@@ -178,13 +178,50 @@ cmd_bug_report() {
         echo "=== systemctl --user list-units signalk-* (incl. inactive) ==="
         systemctl --user list-units --all 'signalk-*' 2>&1 || true
         echo
+        # Per-unit status with -l so long lines aren't truncated. The
+        # restart-timing field 'Active: active (running) since ...' and
+        # the recent journal slice 'systemd[778]: Scheduled restart job,
+        # restart counter is at N' are the most useful pieces for
+        # diagnosing "I clicked Restart but it didn't come back".
+        for u in "\${UNITS[@]}"; do
+            echo "=== systemctl --user status -l \${u}.service ==="
+            systemctl --user status -l --no-pager "\${u}.service" 2>&1 || true
+            echo
+        done
+        # Drop-ins under .service.d/ are operator overrides the Quadlet
+        # itself doesn't show. They explain otherwise-surprising
+        # behavior changes; capture path + contents.
+        for u in "\${UNITS[@]}"; do
+            dropdir="\$HOME/.config/systemd/user/\${u}.service.d"
+            if [[ -d "\$dropdir" ]]; then
+                echo "=== \$dropdir contents ==="
+                ls -la "\$dropdir" 2>&1 || true
+                for f in "\$dropdir"/*.conf; do
+                    [[ -f "\$f" ]] || continue
+                    echo "--- \$f ---"
+                    cat "\$f" 2>&1 || true
+                done
+                echo
+            fi
+        done
+        echo "=== systemd-analyze --user blame (top 15) ==="
+        systemd-analyze --user blame 2>&1 | head -15 || true
+        echo
+        echo "=== systemctl --user list-jobs ==="
+        # If a start/restart is stuck waiting on a dependency the
+        # journal often hides, the job queue surfaces it.
+        systemctl --user list-jobs 2>&1 || true
+        echo
         echo "=== loginctl show-user (Linger) ==="
         loginctl show-user "\$USER" -p Linger 2>&1 || true
     } >"\$bundle/systemd.txt" 2>&1
 
-    # Journal — last 24h per unit. Truncate aggressively; logs are noisy.
+    # Journal — last 24h per unit. -x adds systemd's explanation lines
+    # (Subject:/Defined-By: blocks). Truncate aggressively; logs are
+    # noisy but the explanation lines are essential for "why didn't
+    # this unit start when it should have."
     for u in "\${UNITS[@]}"; do
-        journalctl --user -u "\${u}.service" --since '24 hours ago' --no-pager \\
+        journalctl --user -xeu "\${u}.service" --since '24 hours ago' --no-pager \\
             >"\$bundle/journal-\${u}.log" 2>&1 || true
     done
 
