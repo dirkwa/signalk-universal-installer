@@ -18,7 +18,8 @@ The installer:
 8. Atomically writes three Quadlets into `~/.config/containers/systemd/`.
 9. Starts the doctor and updater services, then asks the updater to start signalk-server (with a `systemctl --user` fallback).
 10. Installs the SSH-only recovery script at `~/.local/bin/signalk-recovery` (the safety net for when both engine containers are down).
-11. Drops a journald retention drop-in at `/etc/systemd/journald.conf.d/signalk.conf` (uses `sudo`).
+11. Installs the `signalk` command at `~/.local/bin/signalk` — a dispatcher for `health`, `recover`, `bug-report`, and `uninstall`. Run `signalk help` for usage.
+12. Drops a journald retention drop-in at `/etc/systemd/journald.conf.d/signalk.conf` (uses `sudo`).
 
 When it finishes you have three URLs reachable from the LAN: `:3000` (SignalK), `:3003` (Updater Console), `:3004` (Doctor Console). The installer binds the engine containers to `0.0.0.0` by default because most users install headless and reach the consoles from another machine. The updater's mutating endpoints and the doctor's `/api/recover` are gated by bearer tokens (see `~/.signalk-{updater,doctor}/token`); the doctor's read-only probes are unauthenticated by design (recovery surface that always answers). To restrict everything to localhost set `SIGNALK_LOCALHOST_ONLY=true` before running the installer — useful on shared/guest WiFi where you'd rather not expose probe output.
 
