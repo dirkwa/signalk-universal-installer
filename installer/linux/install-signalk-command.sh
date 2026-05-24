@@ -275,6 +275,81 @@ cmd_bug_report() {
         cp "\$HOME/.signalk-updater/hardware.json" "\$bundle/hardware.json"
     fi
 
+    # SignalK plugin state — metadata only, no configuration bodies.
+    # Plugin configs in plugin-config-data/*.json routinely hold
+    # secrets (MQTT passwords, cloud-sync API keys, OAuth tokens) and
+    # there is no central registry of which fields are sensitive across
+    # the whole plugin ecosystem. Limit the bundle to id + version +
+    # enabled flag so the bug report shows which plugins are installed
+    # and which are running, without leaking credentials. Operators who
+    # need to share a specific plugin's config can attach it manually.
+    SIGNALK_DIR="\$HOME/.signalk"
+    if [[ -d "\$SIGNALK_DIR" ]] && command -v jq >/dev/null 2>&1; then
+        cfg_dir="\$SIGNALK_DIR/plugin-config-data"
+        pkg="\$SIGNALK_DIR/package.json"
+        {
+            echo "=== SignalK plugin state (metadata only) ==="
+            echo "# Configuration bodies are intentionally NOT included."
+            echo "# Plugin configs routinely contain credentials."
+            echo
+            count=0
+            if [[ -d "\$cfg_dir" ]]; then
+                for f in "\$cfg_dir"/*.json; do
+                    [[ -f "\$f" ]] || continue
+                    plugin_id=\$(basename "\$f" .json)
+                    enabled=\$(jq -r '.enabled // "?"' "\$f" 2>/dev/null || echo "?")
+                    case "\$enabled" in
+                        true)  flag="on " ;;
+                        false) flag="off" ;;
+                        *)     flag="?  " ;;
+                    esac
+                    version=""
+                    if [[ -f "\$pkg" ]]; then
+                        # Scoped packages: config file is unscoped
+                        # (zones.json) but the dependency key is scoped
+                        # (@signalk/zones). Try the literal id, then
+                        # walk dependencies for any key ending in /<id>.
+                        version=\$(jq -r --arg id "\$plugin_id" '
+                            .dependencies[\$id] //
+                            (.dependencies | to_entries
+                                | map(select(.key | endswith("/" + \$id)))
+                                | .[0].value) //
+                            "(not in package.json)"
+                        ' "\$pkg" 2>/dev/null || echo "?")
+                    else
+                        version="(no package.json)"
+                    fi
+                    printf '  [%s] %-30s  %s\\n' "\$flag" "\$plugin_id" "\$version"
+                    count=\$((count + 1))
+                done
+            fi
+            echo
+            echo "\$count plugin(s) with config files in plugin-config-data/."
+        } >"\$bundle/signalk-plugins.txt" 2>&1
+    elif [[ -d "\$SIGNALK_DIR" ]]; then
+        echo "jq not installed; signalk-plugins.txt and signalk-settings.json skipped." \\
+            >"\$bundle/signalk-plugins.txt"
+    fi
+
+    # SignalK server settings — connections, source priorities, security
+    # strategy. settings.json is mostly safe but pipedProviders' .options
+    # block sometimes holds passwords (ydwg auth, MQTT bridges). Redact
+    # those values (keeping option keys so connection schema stays
+    # visible); leave the rest of settings.json verbatim.
+    if [[ -f "\$SIGNALK_DIR/settings.json" ]] && command -v jq >/dev/null 2>&1; then
+        # walk(...) recursively visits every node; we target objects
+        # that look like a provider with .options and replace each
+        # value under .options with "<redacted>" while preserving keys.
+        jq '(.pipedProviders // []) |= map(
+                if (.options | type) == "object"
+                then .options |= with_entries(.value = "<redacted>")
+                else .
+                end
+            )' \\
+            "\$SIGNALK_DIR/settings.json" >"\$bundle/signalk-settings.json" 2>&1 \\
+            || echo "# failed to parse \$SIGNALK_DIR/settings.json" >"\$bundle/signalk-settings.json"
+    fi
+
     # Container storage state — surfaces ZFS/idmap hazards.
     {
         echo "=== rootless storage path ==="
@@ -305,8 +380,11 @@ cmd_bug_report() {
     echo "Attach this file to a GitHub issue at:"
     echo "  https://github.com/dirkwa/signalk-universal-installer/issues"
     echo
-    echo "Contents are limited to host metadata, container state, and recent journals."
-    echo "Tokens are reported as presence-only (mode + 'present'); their values are NEVER included."
+    echo "Contents are limited to host metadata, container state, recent journals,"
+    echo "and SignalK plugin metadata. Auth tokens are reported as presence-only"
+    echo "(mode + 'present') and their values are NEVER included. SignalK plugin"
+    echo "configuration bodies (which routinely hold secrets) are also NEVER included;"
+    echo "settings.json is included with pipedProviders' options redacted."
 }
 
 case "\${1:-help}" in
