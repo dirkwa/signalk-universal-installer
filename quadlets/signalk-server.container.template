@@ -1,7 +1,14 @@
 [Unit]
 Description=SignalK Server
-Wants=network-online.target signalk-updater-server.service signalk-doctor-server.service
-After=network-online.target signalk-updater-server.service signalk-doctor-server.service
+# podman.socket is bind-mounted at %t/podman/podman.sock so consumer
+# plugins (signalk-container) can reach the host daemon. Without
+# Wants/After=podman.socket, systemd may start this unit before the
+# socket exists and `podman run -v ...` exits 125 with `statfs: no
+# such file or directory`. The installer enables podman.socket once;
+# this keeps ordering correct across reboots and manual socket-unit
+# cycles.
+Wants=network-online.target podman.socket signalk-updater-server.service signalk-doctor-server.service
+After=network-online.target podman.socket signalk-updater-server.service signalk-doctor-server.service
 # Crashloop guard. Belongs in [Unit] — systemd silently ignores these
 # keys when placed in [Service], which is how they got dropped on the
 # 0.5.x installs (journal logged `Unknown key 'StartLimitIntervalSec'
