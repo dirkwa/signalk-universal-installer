@@ -12,6 +12,7 @@
 #   3b. Switch rootless storage driver to fuse-overlayfs when on ZFS
 #   4. Enable linger
 #   4b. Enable user podman.socket (engine containers bind-mount it)
+#   4c. Cgroup delegation: write user@.service.d/delegate.conf if needed
 #   5. Ensure group memberships (dialout, gpio, netdev)
 #   6. Generate auth tokens for updater and doctor
 #   7. Initialize ~/.signalk-doctor/{snapshots,last-good.json}
@@ -264,6 +265,64 @@ if ! systemctl --user is-enabled --quiet podman.socket 2>/dev/null; then
     systemctl --user enable --now podman.socket
 fi
 ok "podman.socket active"
+
+# 4c. Cgroup delegation for the user slice.
+#
+# The kernel may have memory + pids enabled at the root cgroup, but
+# systemd's default user@.service Delegate= value varies by distro and
+# systemd version. On hosts where memory/pids don't propagate down to
+# user-<uid>.slice, container resource limits silently no-op:
+# `podman run --memory=512m` accepts the flag but enforces nothing.
+# signalk-container's doctor probe documents this exactly; we pre-empt
+# it here by writing the standard user@.service.d/delegate.conf
+# override that the doctor's remediation tells the operator to write.
+#
+# Three branches: already-delegated → skip; missing AND sudo available
+# → autofix (re-login required for effect on the running user@.service
+# instance, see message below); missing AND no sudo → print the same
+# recipe so the operator can fix it themselves.
+section "Cgroup delegation"
+USER_SLICE="/sys/fs/cgroup/user.slice/user-$(id -u).slice"
+NEED_DELEGATE_FIX=0
+DELEGATE_RELOGIN_HINT=0
+if [[ -f "$USER_SLICE/cgroup.controllers" ]]; then
+    USER_SLICE_CTL=$(cat "$USER_SLICE/cgroup.controllers" 2>/dev/null || echo "")
+    if grep -qw memory <<<"$USER_SLICE_CTL" && grep -qw pids <<<"$USER_SLICE_CTL"; then
+        ok "user slice has memory + pids delegated"
+    else
+        NEED_DELEGATE_FIX=1
+    fi
+else
+    # No user slice file yet — shouldn't happen post-linger, but treat
+    # as missing so the override file at least lands on disk.
+    NEED_DELEGATE_FIX=1
+fi
+
+if (( NEED_DELEGATE_FIX )); then
+    DELEGATE_CONF="/etc/systemd/system/user@.service.d/delegate.conf"
+    info "Writing $DELEGATE_CONF (requires sudo)"
+    # Use interactive sudo, matching the apt + loginctl + usermod
+    # steps earlier in this script. By this point in the run the
+    # operator has typically already been prompted at least once and
+    # the password is cached, so this is a no-op in the common case;
+    # for fresh sudo timestamps it prompts. We don't fall back to a
+    # warn-only path here — silent-noop memory/pids limits is a real
+    # bug, not optional polish.
+    sudo install -d -m 0755 "$(dirname "$DELEGATE_CONF")"
+    sudo tee "$DELEGATE_CONF" >/dev/null <<EOF
+# Installed by signalk-universal-installer.
+# Ensures user@.service delegates memory + pids in addition to the
+# defaults, so rootless container resource limits actually enforce.
+[Service]
+Delegate=cpu cpuset io memory pids
+EOF
+    sudo systemctl daemon-reload
+    ok "Installed $DELEGATE_CONF"
+    # daemon-reload doesn't re-apply Delegate= to the already-running
+    # user@.service instance; the user has to log out and back in (or
+    # reboot) for the new delegation to take effect.
+    DELEGATE_RELOGIN_HINT=1
+fi
 
 # 5. Groups
 section "Group memberships"
@@ -722,5 +781,14 @@ if (( PATH_NEEDS_RELOAD )); then
 
 To use 'signalk' in this shell right now, run:  exec ${SHELL_NAME}
 (New shells pick it up automatically — the snippet was added to ${SHELL_RC}.)
+EOF
+fi
+
+if (( DELEGATE_RELOGIN_HINT )); then
+    cat <<EOF
+
+Cgroup delegation override installed at /etc/systemd/system/user@.service.d/delegate.conf.
+The change applies to NEW user-bus sessions — log out and back in (or reboot)
+for container memory/pids limits to actually enforce.
 EOF
 fi

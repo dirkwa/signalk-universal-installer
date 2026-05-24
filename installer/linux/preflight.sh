@@ -97,6 +97,37 @@ check_cgroups_v2() {
     fi
 }
 
+# Verify the user slice actually sees memory + pids. The kernel may
+# have them at the root, but systemd's default user@.service Delegate=
+# value varies by distro/version and on some systems memory + pids
+# don't propagate to user-<uid>.slice. When that happens, container
+# resource limits silently no-op (signalk-container's doctor
+# remediationCgroupControllers documents the fix).
+#
+# Informational warning only — install.sh autofixes via the
+# user@.service delegate override (needs sudo).
+check_user_slice_delegation() {
+    local uid slice ctl missing
+    uid=$(id -u)
+    slice="/sys/fs/cgroup/user.slice/user-${uid}.slice"
+    if [[ ! -f "$slice/cgroup.controllers" ]]; then
+        # User slice not yet created (linger off + user not logged in
+        # via systemd-logind). install.sh's linger step + a subsequent
+        # bus startup will materialise it; can't probe further here.
+        warn "user-${uid}.slice not present yet — install.sh will create it via linger"
+        return
+    fi
+    ctl=$(cat "$slice/cgroup.controllers" 2>/dev/null || echo "")
+    missing=""
+    grep -qw memory <<<"$ctl" || missing+=" memory"
+    grep -qw pids <<<"$ctl" || missing+=" pids"
+    if [[ -n "$missing" ]]; then
+        warn "user-${uid}.slice missing delegated controller(s):${missing} — installer will autofix (requires sudo, takes effect on next login)"
+    else
+        ok "user-${uid}.slice has memory + pids delegated"
+    fi
+}
+
 check_podman() {
     if ! command -v podman >/dev/null 2>&1; then
         warn "Podman not installed — installer will install it"
@@ -202,6 +233,7 @@ main() {
     check_disk
     check_ports
     check_cgroups_v2
+    check_user_slice_delegation
     check_podman
     check_subid
     check_linger
