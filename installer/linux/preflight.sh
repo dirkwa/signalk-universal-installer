@@ -142,6 +142,14 @@ check_podman() {
     cur_major=$(cut -d. -f1 <<<"$v")
     cur_minor=$(cut -d. -f2 <<<"$v")
     if (( cur_major < req_major )) || { (( cur_major == req_major )) && (( cur_minor < req_minor )); }; then
+        # Bookworm ships podman 4.3.1 in main but 4.9 in
+        # bookworm-backports; install.sh enables backports and pulls
+        # the newer package automatically. Warn instead of failing so
+        # bookworm hosts can proceed.
+        if [[ "$DISTRO_ID" = "debian" && "$DISTRO_CODENAME" = "bookworm" ]]; then
+            warn "Podman $v < required $PODMAN_MIN_VERSION on bookworm — installer will upgrade via bookworm-backports"
+            return
+        fi
         fail "Podman $v < required $PODMAN_MIN_VERSION (Quadlet support)"
     else
         ok "Podman $v"
