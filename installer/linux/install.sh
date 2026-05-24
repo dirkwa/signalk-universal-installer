@@ -155,10 +155,18 @@ section "SignalK Universal Installer v${INSTALLER_VERSION}"
 info "Host: ${DISTRO_PRETTY} (${ARCH_NORM})"
 if [[ "$SUDO" = "MISSING" ]]; then
     err "Running as non-root user '$USER' and sudo is not installed."
-    err "Bootstrap sudo first (as root):"
-    err "  apt-get update && apt-get install -y sudo"
-    err "  usermod -aG sudo $USER"
-    err "  # Then log $USER out + back in and re-run the installer."
+    echo >&2
+    err "Bootstrap sudo as root, then RECONNECT your SSH session:"
+    err "  1. Become root (e.g.  su -)"
+    err "  2. apt-get update && apt-get install -y sudo"
+    err "  3. usermod -aG sudo $USER"
+    err "  4. exit  # leave the root shell"
+    err "  5. CLOSE the SSH session entirely and reconnect."
+    err "     (su / newgrp / exec bash do NOT pick up the new group —"
+    err "     Linux assigns groups when the session starts, not on"
+    err "     subshell entry.)"
+    err "  6. After reconnect, verify with:  groups | grep -qw sudo && echo OK"
+    err "  7. Re-run the installer one-liner."
     exit 1
 elif [[ "$SUDO" = "sudo" ]]; then
     # Probe whether sudo will actually let this user escalate, BEFORE
@@ -169,15 +177,22 @@ elif [[ "$SUDO" = "sudo" ]]; then
     # patterns sudo emits to stderr (English + the localized forms
     # we've seen in the wild). When that's the case, fail-fast with
     # the recipe — the typical cause is `usermod -aG sudo $USER`
-    # without re-login (the running session still has the stale
-    # group set).
+    # without a full SSH reconnect (the running session still has the
+    # stale group set; only a fresh login refreshes it).
     sudo_probe=$(sudo -nv 2>&1 || true)
     if grep -qiE 'not (in the sudoers|allowed)|may not run sudo|nicht in der sudoers' <<<"$sudo_probe"; then
         err "'$USER' is not authorized to use sudo."
-        err "If you just added the user to the sudo group, log $USER out"
-        err "and back in (or reboot) — the running shell still has the"
-        err "stale group set."
-        err "Otherwise, add the user as root: usermod -aG sudo $USER"
+        echo >&2
+        err "If you just added the user to the sudo group, CLOSE this SSH"
+        err "session entirely and reconnect — su / exec bash / newgrp do"
+        err "NOT refresh the kernel's group credentials for the running"
+        err "session. Only a fresh login does."
+        echo >&2
+        err "After reconnect, verify with:  groups | grep -qw sudo && echo OK"
+        err "Then re-run the installer one-liner."
+        echo >&2
+        err "If '$USER' really isn't in the sudo group at all, add it as"
+        err "root first:  usermod -aG sudo $USER"
         exit 1
     fi
 fi
