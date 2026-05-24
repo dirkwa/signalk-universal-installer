@@ -24,11 +24,12 @@
 #  14. Ask the updater to start signalk-server (with systemctl fallback)
 #  15. Wait for signalk-server health
 #  16. Install ~/.local/bin/signalk-recovery
+#  16b. Install ~/.local/bin/signalk (CLI dispatcher: health/recover/bug-report/uninstall)
 #  17. Journald drop-in (sudo)
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-15-gf53d015}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-16-g88ee62f}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 # Where the engine container HTTP servers bind. Default is LAN-reachable
@@ -77,6 +78,7 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/detect-hardware.sh \
         installer/linux/render-server-quadlet.sh \
         installer/linux/install-recovery-script.sh \
+        installer/linux/install-signalk-command.sh \
         installer/linux/legacy-cleanup.sh \
         installer/linux/lib/colors.sh \
         installer/linux/lib/distro.sh \
@@ -441,6 +443,10 @@ fi
 section "Host recovery script"
 bash "$HERE/install-recovery-script.sh"
 
+# 16b. `signalk` command dispatcher
+section "signalk command"
+INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
+
 # 17. Journald limits (sudo)
 section "Journald retention drop-in"
 SUDO_OK=1
@@ -490,7 +496,6 @@ ${C_GREEN}${C_BOLD}OK — SignalK is up.${C_RESET}
   SignalK admin UI : http://localhost:3000
   Updater Console  : ${UPDATER_URL}
   Doctor Console   : ${DOCTOR_URL}
-  Recovery script  : \$HOME/.local/bin/signalk-recovery
 
 ${LAN_NOTE}
 
@@ -498,6 +503,12 @@ Auth tokens are at:
   Updater : ${UPDATER_DATA}/token  (mode 0600)
   Doctor  : ${DOCTOR_DATA}/token   (mode 0600)
 
-Next: install plugins from the SignalK appstore. To check stack health any time:
-  ~/.local/bin/signalk-recovery status
+The 'signalk' command is now on your PATH:
+  signalk health         show stack health
+  signalk recover        delegate to the SSH-only recovery script
+  signalk bug-report     bundle logs + state for an issue report
+  signalk uninstall      stop services + remove Quadlets (preserves data)
+  signalk help           full usage
+
+Next: install plugins from the SignalK appstore.
 EOF
