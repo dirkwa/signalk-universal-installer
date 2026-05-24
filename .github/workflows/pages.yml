@@ -6,15 +6,22 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Native GitHub Pages deploy: upload-pages-artifact + deploy-pages both
+# run on Node 24, replacing the peaceiris third-party action (Node 20)
+# and the auto-triggered `pages-build-deployment` workflow GitHub fired
+# whenever we pushed to the gh-pages branch. The repo's Pages source
+# must be set to "GitHub Actions" in Settings → Pages for this to take
+# effect; the prior "Deploy from a branch" setting keeps firing the
+# legacy built-in workflow on top of ours.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -47,11 +54,21 @@ jobs:
           find dist/installer -type f \( -name '*.sh' -o -name '*.ps1' \) -print0 |
             xargs -0 sed -i "s|INSTALLER_VERSION:-0.0.0-scaffold|INSTALLER_VERSION:-${INSTALLER_VERSION}|g; s|'0.0.0-scaffold'|'${INSTALLER_VERSION}'|g"
 
-      - name: Deploy to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
-          publish_branch: gh-pages
-          force_orphan: false
-          commit_message: "deploy: ${{ steps.ver.outputs.version }} from ${{ github.sha }}"
+          path: ./dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v5
