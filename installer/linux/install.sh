@@ -28,17 +28,36 @@
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-14-g51d06d2}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-15-gf53d015}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
-# Where the engine container HTTP servers bind. Default localhost-only;
-# set SIGNALK_LAN_EXPOSE=true (or 1/yes) to bind 0.0.0.0 so the Updater
-# Console (:3003) and Doctor Console (:3004) are reachable from the LAN.
-# Bearer-token auth (CC-2) still gates mutating endpoints. Re-running
-# the installer without the flag reverts to localhost.
+# Where the engine container HTTP servers bind. Default is LAN-reachable
+# (0.0.0.0) because most users install headless and reach the consoles
+# from another machine. Set SIGNALK_LOCALHOST_ONLY=true (or 1/yes) to
+# bind 127.0.0.1 only. Bearer-token auth (CC-2) still gates the updater's
+# mutating endpoints and the doctor's recovery endpoints; the doctor's
+# read-only probes are unauthenticated by design (recovery surface that
+# always answers).
+#
+# SIGNALK_LAN_EXPOSE is the previous opt-IN variable (default was
+# 127.0.0.1). Honoured for one release as a deprecation alias so existing
+# automation keeps working: SIGNALK_LAN_EXPOSE=false now means "bind
+# localhost only" — same effect as SIGNALK_LOCALHOST_ONLY=true.
+PUBLISH_HOST="0.0.0.0"
+case "${SIGNALK_LOCALHOST_ONLY:-}" in
+    true | TRUE | True | 1 | yes | YES | Yes) PUBLISH_HOST="127.0.0.1" ;;
+esac
 case "${SIGNALK_LAN_EXPOSE:-}" in
-    true | TRUE | True | 1 | yes | YES | Yes) PUBLISH_HOST="0.0.0.0" ;;
-    *) PUBLISH_HOST="127.0.0.1" ;;
+    "") ;; # unset — no deprecation to flag
+    false | FALSE | False | 0 | no | NO | No)
+        PUBLISH_HOST="127.0.0.1"
+        DEPRECATED_LAN_EXPOSE_SEEN=1
+        ;;
+    *)
+        # truthy or any other set value — same effect as the new default,
+        # but still flag the deprecation so operators update their automation.
+        DEPRECATED_LAN_EXPOSE_SEEN=1
+        ;;
 esac
 export PUBLISH_HOST
 
@@ -76,6 +95,7 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
     exec env \
         INSTALLER_VERSION="$INSTALLER_VERSION" \
         INSTALLER_BASE_URL="$INSTALLER_BASE_URL" \
+        SIGNALK_LOCALHOST_ONLY="${SIGNALK_LOCALHOST_ONLY:-}" \
         SIGNALK_LAN_EXPOSE="${SIGNALK_LAN_EXPOSE:-}" \
         bash "$TMP/installer/linux/install.sh" "$@"
 fi
@@ -105,10 +125,14 @@ SIGNALK_URL="http://127.0.0.1:3000/signalk"
 detect_os
 section "SignalK Universal Installer v${INSTALLER_VERSION}"
 info "Host: ${DISTRO_PRETTY} (${ARCH_NORM})"
+if [[ "${DEPRECATED_LAN_EXPOSE_SEEN:-0}" = "1" ]]; then
+    warn "SIGNALK_LAN_EXPOSE is deprecated — use SIGNALK_LOCALHOST_ONLY=true instead."
+fi
 if [[ "$PUBLISH_HOST" = "0.0.0.0" ]]; then
-    warn "SIGNALK_LAN_EXPOSE=true: Updater + Doctor consoles will bind 0.0.0.0 (LAN-reachable)"
+    info "Port bind: 0.0.0.0 (LAN-reachable). Doctor read-only probes are unauthenticated by design."
+    info "Set SIGNALK_LOCALHOST_ONLY=true to restrict to localhost."
 else
-    info "Port bind: localhost only (set SIGNALK_LAN_EXPOSE=true to expose on LAN)"
+    info "Port bind: localhost only (SIGNALK_LOCALHOST_ONLY=true)"
 fi
 
 # 2. Pre-flight
@@ -455,9 +479,9 @@ PY
 
 # 19. Success
 if [[ "$PUBLISH_HOST" = "0.0.0.0" ]]; then
-    LAN_NOTE="Updater + Doctor are reachable on the LAN. Use the host's LAN address."
+    LAN_NOTE="Updater + Doctor are reachable on the LAN. The doctor's read-only probes are unauthenticated by design (recovery surface); on shared/guest WiFi consider SIGNALK_LOCALHOST_ONLY=true."
 else
-    LAN_NOTE="Updater + Doctor are bound to localhost only. Run with SIGNALK_LAN_EXPOSE=true to expose on the LAN."
+    LAN_NOTE="Updater + Doctor are bound to localhost only. Unset SIGNALK_LOCALHOST_ONLY to expose on the LAN."
 fi
 cat <<EOF
 
