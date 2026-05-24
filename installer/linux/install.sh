@@ -86,6 +86,7 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/lib/colors.sh \
         installer/linux/lib/distro.sh \
         installer/linux/lib/http.sh \
+        installer/linux/lib/ghcr.sh \
         quadlets/signalk-server.container.template \
         quadlets/signalk-updater-server.container.template \
         quadlets/signalk-doctor-server.container.template; do
@@ -124,11 +125,30 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/distro.sh"
 # shellcheck disable=SC1091
 . "$HERE/lib/http.sh"
+# shellcheck disable=SC1091
+. "$HERE/lib/ghcr.sh"
 
 REPO_OWNER=${REPO_OWNER:-dirkwa}
 SK_IMAGE=${SK_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-server:dirkwa}
-UPDATER_IMAGE=${UPDATER_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-updater-server:latest}
-DOCTOR_IMAGE=${DOCTOR_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-doctor-server:latest}
+
+# Resolve the latest published stable tag for each engine container at
+# install time. Avoids the :latest drift trap — a fresh install pinned
+# to :latest pulls one digest at boot and never re-resolves, so every
+# operator ends up running whatever the registry happened to point
+# :latest at on install day. Pinning to an explicit semver tag means
+# the updater's own self-update flow is the only thing that ever
+# advances the version, which is the model we want.
+#
+# Honors UPDATER_IMAGE / DOCTOR_IMAGE env overrides so CI and power
+# users can still point at a specific image (e.g. a fork's :master).
+if [[ -z ${UPDATER_IMAGE:-} ]]; then
+    UPDATER_TAG=$(latest_stable_tag "${REPO_OWNER}/signalk-updater-server")
+    UPDATER_IMAGE="ghcr.io/${REPO_OWNER}/signalk-updater-server:${UPDATER_TAG}"
+fi
+if [[ -z ${DOCTOR_IMAGE:-} ]]; then
+    DOCTOR_TAG=$(latest_stable_tag "${REPO_OWNER}/signalk-doctor-server")
+    DOCTOR_IMAGE="ghcr.io/${REPO_OWNER}/signalk-doctor-server:${DOCTOR_TAG}"
+fi
 
 QUADLET_DIR="${HOME}/.config/containers/systemd"
 UPDATER_DATA="${HOME}/.signalk-updater"
@@ -487,10 +507,20 @@ snapshot_existing signalk-doctor-server.container
 SERVER_QUADLET=$("$HERE/render-server-quadlet.sh" "$UPDATER_DATA/hardware.json" "$HERE/../../quadlets/signalk-server.container.template")
 atomic_write "$QUADLET_DIR/signalk-server.container" "$SERVER_QUADLET"
 
-UPDATER_QUADLET=$(sed "s/__PUBLISH_HOST__/${PUBLISH_HOST}/g" "$HERE/../../quadlets/signalk-updater-server.container.template")
+# Substitute both the publish host (set earlier from SIGNALK_LOCALHOST_ONLY)
+# AND the resolved engine image. The image-pinning rationale lives next to
+# the UPDATER_IMAGE / DOCTOR_IMAGE resolution above. `|` separator on the
+# Image= line because the image contains `/`.
+UPDATER_QUADLET=$(sed \
+    -e "s/__PUBLISH_HOST__/${PUBLISH_HOST}/g" \
+    -e "s|__UPDATER_IMAGE__|${UPDATER_IMAGE}|g" \
+    "$HERE/../../quadlets/signalk-updater-server.container.template")
 atomic_write "$QUADLET_DIR/signalk-updater-server.container" "$UPDATER_QUADLET"
 
-DOCTOR_QUADLET=$(sed "s/__PUBLISH_HOST__/${PUBLISH_HOST}/g" "$HERE/../../quadlets/signalk-doctor-server.container.template")
+DOCTOR_QUADLET=$(sed \
+    -e "s/__PUBLISH_HOST__/${PUBLISH_HOST}/g" \
+    -e "s|__DOCTOR_IMAGE__|${DOCTOR_IMAGE}|g" \
+    "$HERE/../../quadlets/signalk-doctor-server.container.template")
 atomic_write "$QUADLET_DIR/signalk-doctor-server.container" "$DOCTOR_QUADLET"
 
 ok "Quadlets written to $QUADLET_DIR"

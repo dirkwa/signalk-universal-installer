@@ -14,7 +14,7 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Container]
-Image=ghcr.io/dirkwa/signalk-doctor-server:latest
+Image=__DOCTOR_IMAGE__
 ContainerName=signalk-doctor-server
 # PublishPort host is templated by install.sh: defaults to 0.0.0.0
 # (LAN-reachable; most users install headless and reach the console
