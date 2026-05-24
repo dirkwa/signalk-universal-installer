@@ -16,11 +16,14 @@ StartLimitBurst=5
 [Container]
 Image=ghcr.io/dirkwa/signalk-doctor-server:latest
 ContainerName=signalk-doctor-server
-# PublishPort host is templated by install.sh: defaults to 127.0.0.1
-# (localhost only). Set SIGNALK_LAN_EXPOSE=true on the installer command
-# line to bind 0.0.0.0 and expose the Doctor Console on the LAN.
-# Doctor's read-only probes are unauthenticated; only the /api/recover
-# endpoints require the bearer token (~/.signalk-doctor/token).
+# PublishPort host is templated by install.sh: defaults to 0.0.0.0
+# (LAN-reachable; most users install headless and reach the console
+# from another machine). Set SIGNALK_LOCALHOST_ONLY=true on the
+# installer command line to bind 127.0.0.1 only.
+# Doctor's read-only probes are unauthenticated by design (recovery
+# surface that always answers when nothing else does). The
+# /api/recover endpoints require the bearer token
+# (~/.signalk-doctor/token).
 PublishPort=__PUBLISH_HOST__:3004:3004
 
 Volume=%h/.signalk-doctor:/data:Z
