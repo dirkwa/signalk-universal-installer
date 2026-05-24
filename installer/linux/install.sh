@@ -229,24 +229,10 @@ bash "$HERE/preflight.sh"
 
 # 3. Install podman if absent
 section "Podman"
-# Debian bookworm ships podman 4.3.1 in the main repo; Quadlet support
-# arrived in 4.4. We need 4.4+ (available in bookworm-backports) for
-# the entire stack to work. Trixie and Ubuntu have new enough defaults
-# — no backports needed.
-PODMAN_APT_FLAGS=()
-if [[ "$DISTRO_ID" = "debian" && "$DISTRO_CODENAME" = "bookworm" ]]; then
-    BACKPORTS_LIST="/etc/apt/sources.list.d/bookworm-backports.list"
-    if [[ ! -f "$BACKPORTS_LIST" ]]; then
-        info "Bookworm detected — enabling bookworm-backports for Podman ≥ 4.4"
-        echo "deb http://deb.debian.org/debian bookworm-backports main" \
-            | $SUDO tee "$BACKPORTS_LIST" >/dev/null
-    fi
-    PODMAN_APT_FLAGS=(-t bookworm-backports)
-fi
 if ! command -v podman >/dev/null 2>&1; then
     info "Installing podman + uidmap + slirp4netns (requires sudo)"
     $SUDO apt-get update
-    $SUDO apt-get install -y "${PODMAN_APT_FLAGS[@]}" podman uidmap slirp4netns
+    $SUDO apt-get install -y podman uidmap slirp4netns
 fi
 ok "$(podman --version)"
 
@@ -270,7 +256,7 @@ if [[ "$STORAGE_FS" == "zfs" ]]; then
     info "Rootless storage on ZFS — switching to fuse-overlayfs"
     if ! command -v fuse-overlayfs >/dev/null 2>&1; then
         info "Installing fuse-overlayfs (requires sudo)"
-        $SUDO apt-get install -y "${PODMAN_APT_FLAGS[@]}" fuse-overlayfs
+        $SUDO apt-get install -y fuse-overlayfs
     fi
     STORAGE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/containers/storage.conf"
     mkdir -p "$(dirname "$STORAGE_CONF")"
