@@ -18,7 +18,7 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Container]
-Image=ghcr.io/dirkwa/signalk-server:latest
+Image=ghcr.io/dirkwa/signalk-server:dirkwa
 ContainerName=signalk-server
 Network=host
 

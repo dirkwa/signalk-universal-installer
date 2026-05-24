@@ -114,7 +114,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/http.sh"
 
 REPO_OWNER=${REPO_OWNER:-dirkwa}
-SK_IMAGE=${SK_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-server:latest}
+SK_IMAGE=${SK_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-server:dirkwa}
 UPDATER_IMAGE=${UPDATER_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-updater-server:latest}
 DOCTOR_IMAGE=${DOCTOR_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-doctor-server:latest}
 
