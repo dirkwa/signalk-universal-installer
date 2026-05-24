@@ -126,10 +126,38 @@ UPDATER_URL="http://127.0.0.1:3003"
 DOCTOR_URL="http://127.0.0.1:3004"
 SIGNALK_URL="http://127.0.0.1:3000/signalk"
 
+# Privilege escalation. The installer needs root for apt + systemd
+# file writes + journald drop-in + cgroup delegation override. We
+# support three setups:
+#   - Running as root → SUDO="" (no prefix needed).
+#   - Non-root with `sudo` available → SUDO="sudo" (interactive prompt
+#     on first use, cached for the rest of the run).
+#   - Non-root without `sudo` → fail-fast in preflight with the exact
+#     recipe to bootstrap sudo before re-running. We don't try `su -c`
+#     because the curl-piped one-liner has no controlling tty for the
+#     password prompt and the failure mode is very confusing.
+if (( EUID == 0 )); then
+    SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+else
+    SUDO="MISSING"
+fi
+
 # 1. Detect host
 detect_os
 section "SignalK Universal Installer v${INSTALLER_VERSION}"
 info "Host: ${DISTRO_PRETTY} (${ARCH_NORM})"
+if [[ "$SUDO" = "MISSING" ]]; then
+    err "Running as non-root user '$USER' and sudo is not installed."
+    err "Bootstrap sudo first (as root):"
+    err "  apt-get update && apt-get install -y sudo"
+    err "  usermod -aG sudo $USER"
+    err "  # Then log $USER out + back in and re-run the installer."
+    exit 1
+elif (( EUID == 0 )); then
+    info "Running as root — sudo prefix omitted."
+fi
 if [[ "${DEPRECATED_LAN_EXPOSE_SEEN:-0}" = "1" ]]; then
     warn "SIGNALK_LAN_EXPOSE is deprecated — use SIGNALK_LOCALHOST_ONLY=true instead."
 fi
@@ -163,10 +191,24 @@ bash "$HERE/preflight.sh"
 
 # 3. Install podman if absent
 section "Podman"
+# Debian bookworm ships podman 4.3.1 in the main repo; Quadlet support
+# arrived in 4.4. We need 4.4+ (available in bookworm-backports) for
+# the entire stack to work. Trixie and Ubuntu have new enough defaults
+# — no backports needed.
+PODMAN_APT_FLAGS=()
+if [[ "$DISTRO_ID" = "debian" && "$DISTRO_CODENAME" = "bookworm" ]]; then
+    BACKPORTS_LIST="/etc/apt/sources.list.d/bookworm-backports.list"
+    if [[ ! -f "$BACKPORTS_LIST" ]]; then
+        info "Bookworm detected — enabling bookworm-backports for Podman ≥ 4.4"
+        echo "deb http://deb.debian.org/debian bookworm-backports main" \
+            | $SUDO tee "$BACKPORTS_LIST" >/dev/null
+    fi
+    PODMAN_APT_FLAGS=(-t bookworm-backports)
+fi
 if ! command -v podman >/dev/null 2>&1; then
     info "Installing podman + uidmap + slirp4netns (requires sudo)"
-    sudo apt-get update
-    sudo apt-get install -y podman uidmap slirp4netns
+    $SUDO apt-get update
+    $SUDO apt-get install -y "${PODMAN_APT_FLAGS[@]}" podman uidmap slirp4netns
 fi
 ok "$(podman --version)"
 
@@ -190,7 +232,7 @@ if [[ "$STORAGE_FS" == "zfs" ]]; then
     info "Rootless storage on ZFS — switching to fuse-overlayfs"
     if ! command -v fuse-overlayfs >/dev/null 2>&1; then
         info "Installing fuse-overlayfs (requires sudo)"
-        sudo apt-get install -y fuse-overlayfs
+        $SUDO apt-get install -y "${PODMAN_APT_FLAGS[@]}" fuse-overlayfs
     fi
     STORAGE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/containers/storage.conf"
     mkdir -p "$(dirname "$STORAGE_CONF")"
@@ -244,7 +286,7 @@ fi
 section "systemd-user linger"
 if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
     info "Enabling linger for $USER (requires sudo)"
-    sudo loginctl enable-linger "$USER"
+    $SUDO loginctl enable-linger "$USER"
 fi
 ok "linger enabled"
 
@@ -308,15 +350,15 @@ if (( NEED_DELEGATE_FIX )); then
     # for fresh sudo timestamps it prompts. We don't fall back to a
     # warn-only path here — silent-noop memory/pids limits is a real
     # bug, not optional polish.
-    sudo install -d -m 0755 "$(dirname "$DELEGATE_CONF")"
-    sudo tee "$DELEGATE_CONF" >/dev/null <<EOF
+    $SUDO install -d -m 0755 "$(dirname "$DELEGATE_CONF")"
+    $SUDO tee "$DELEGATE_CONF" >/dev/null <<EOF
 # Installed by signalk-universal-installer.
 # Ensures user@.service delegates memory + pids in addition to the
 # defaults, so rootless container resource limits actually enforce.
 [Service]
 Delegate=cpu cpuset io memory pids
 EOF
-    sudo systemctl daemon-reload
+    $SUDO systemctl daemon-reload
     ok "Installed $DELEGATE_CONF"
     # daemon-reload doesn't re-apply Delegate= to the already-running
     # user@.service instance; the user has to log out and back in (or
@@ -329,7 +371,7 @@ section "Group memberships"
 for g in dialout gpio netdev; do
     if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
         info "Adding $USER to $g (requires sudo)"
-        sudo usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
+        $SUDO usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
     fi
 done
 ok "groups: dialout, gpio, netdev (ensured if present on host)"
@@ -568,24 +610,18 @@ case ":$PATH:" in
     *) PATH_NEEDS_RELOAD=1 ;;
 esac
 
-# 17. Journald limits (sudo)
+# 17. Journald limits.
 section "Journald retention drop-in"
-SUDO_OK=1
-sudo -n true 2>/dev/null || SUDO_OK=0
-if (( SUDO_OK )); then
-    sudo install -d -m 0755 /etc/systemd/journald.conf.d
-    sudo tee /etc/systemd/journald.conf.d/signalk.conf >/dev/null <<EOF
+info "Capping journald to 500M / 14 days (requires sudo)"
+$SUDO install -d -m 0755 /etc/systemd/journald.conf.d
+$SUDO tee /etc/systemd/journald.conf.d/signalk.conf >/dev/null <<EOF
 # Installed by signalk-universal-installer
 [Journal]
 SystemMaxUse=500M
 MaxRetentionSec=14day
 EOF
-    sudo systemctl restart systemd-journald
-    ok "journald limits applied"
-else
-    warn "sudo not available without prompt; skipping journald limits"
-    warn "to apply later: see docs/recovery.md 'Journald retention'"
-fi
+$SUDO systemctl restart systemd-journald
+ok "journald limits applied"
 
 # 18. Mark bootstrap-complete
 section "Recording bootstrap state"
