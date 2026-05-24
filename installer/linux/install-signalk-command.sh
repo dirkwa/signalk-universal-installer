@@ -289,9 +289,3 @@ SIGNALK_DISPATCHER_EOF
 
 chmod 0755 "$TARGET"
 ok "Installed $TARGET"
-
-if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
-    warn "$BIN_DIR is not on \$PATH for this shell."
-    warn "Add this to ~/.profile / ~/.bashrc so 'signalk' is on the next login:"
-    warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi

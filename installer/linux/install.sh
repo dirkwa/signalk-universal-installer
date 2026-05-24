@@ -25,6 +25,7 @@
 #  15. Wait for signalk-server health
 #  16. Install ~/.local/bin/signalk-recovery
 #  16b. Install ~/.local/bin/signalk (CLI dispatcher: health/recover/bug-report/uninstall)
+#  16c. Append a PATH snippet to the user's login-shell rc
 #  17. Journald drop-in (sudo)
 #  18. Mark bootstrap-complete in last-good.json
 #  18b. (re-runs only) Verification pass: report healthy/broken checkpoints
@@ -465,6 +466,49 @@ bash "$HERE/install-recovery-script.sh"
 section "signalk command"
 INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
 
+# 16c. Ensure ~/.local/bin is on PATH for future logins.
+#
+# Debian-derived /etc/profile.d/ adds ~/.local/bin to PATH only when the
+# directory existed at login time. Operators running our installer for
+# the first time created it just now, so their current shell AND every
+# future shell on a system where the conditional doesn't run will miss
+# both `signalk` and `signalk-recovery`. Append a guarded export to the
+# user's login-shell rc; the snippet is idempotent.
+section "PATH activation"
+SHELL_RC=""
+case "$(basename "${SHELL:-bash}")" in
+    zsh)  SHELL_RC="$HOME/.zshrc" ;;
+    bash) SHELL_RC="$HOME/.bashrc" ;;
+    *)    SHELL_RC="$HOME/.profile" ;;
+esac
+
+PATH_GUARD='# signalk-universal-installer: ensure ~/.local/bin on PATH'
+if [[ -f "$SHELL_RC" ]] && grep -Fq "$PATH_GUARD" "$SHELL_RC"; then
+    ok "PATH snippet already present in $SHELL_RC"
+else
+    # shellcheck disable=SC2016
+    # $PATH / $HOME are written literally on purpose — the user's shell
+    # expands them at login, not us here.
+    {
+        echo
+        echo "$PATH_GUARD"
+        echo 'case ":$PATH:" in'
+        echo '    *":$HOME/.local/bin:"*) ;;'
+        echo '    *) export PATH="$HOME/.local/bin:$PATH" ;;'
+        echo 'esac'
+    } >>"$SHELL_RC"
+    ok "Added PATH snippet to $SHELL_RC"
+fi
+
+# Capture whether the current shell needs a reload. The child install
+# scripts both create files under $HOME/.local/bin, so we just check
+# whether that directory is on PATH right now.
+PATH_NEEDS_RELOAD=0
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) PATH_NEEDS_RELOAD=1 ;;
+esac
+
 # 17. Journald limits (sudo)
 section "Journald retention drop-in"
 SUDO_OK=1
@@ -664,12 +708,19 @@ Auth tokens are at:
   Updater : ${UPDATER_DATA}/token  (mode 0600)
   Doctor  : ${DOCTOR_DATA}/token   (mode 0600)
 
-The 'signalk' command is now on your PATH:
+The 'signalk' command:
   signalk health         show stack health
   signalk recover        delegate to the SSH-only recovery script
   signalk bug-report     bundle logs + state for an issue report
   signalk uninstall      stop services + remove Quadlets (preserves data)
   signalk help           full usage
-
-Next: install plugins from the SignalK appstore.
 EOF
+
+if (( PATH_NEEDS_RELOAD )); then
+    SHELL_NAME=$(basename "${SHELL:-bash}")
+    cat <<EOF
+
+To use 'signalk' in this shell right now, run:  exec ${SHELL_NAME}
+(New shells pick it up automatically — the snippet was added to ${SHELL_RC}.)
+EOF
+fi
