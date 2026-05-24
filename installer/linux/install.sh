@@ -9,6 +9,7 @@
 #   1. Detect distro + arch + sanity-check the host
 #   2. Pre-flight checks (RAM, disk, ports, cgroups v2, podman, linger, legacy)
 #   3. Install podman if absent
+#   3b. Switch rootless storage driver to fuse-overlayfs when on ZFS
 #   4. Enable linger
 #   4b. Enable user podman.socket (engine containers bind-mount it)
 #   5. Ensure group memberships (dialout, gpio, netdev)
@@ -27,7 +28,7 @@
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-11-g390ad99}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-12-g0136b33}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 # Where the engine container HTTP servers bind. Default localhost-only;
@@ -122,6 +123,76 @@ if ! command -v podman >/dev/null 2>&1; then
     sudo apt-get install -y podman uidmap slirp4netns
 fi
 ok "$(podman --version)"
+
+# 3b. ZFS rootless-storage autofix.
+#
+# When rootless Podman's graphroot lives on ZFS the default `overlay`
+# storage driver triggers Podman's per-file `storage-chown-by-maps`
+# sweep on first `--userns=keep-id` use. CoW metadata makes that crawl
+# for tens of minutes on real boats, and on some kernel/ZFS combos the
+# gid_map write fails outright with `crun: writing file
+# /proc/<pid>/gid_map: Invalid argument`. signalk-container's doctor
+# documents the same situation post-install — we pre-empt it here by
+# installing fuse-overlayfs and pointing podman's storage driver at it
+# (virtual ownership stored in xattrs, no chown sweep).
+section "Rootless storage driver"
+STORAGE_FS=$(stat -f -c '%T' "${XDG_DATA_HOME:-$HOME/.local/share}/containers/storage" 2>/dev/null \
+    || stat -f -c '%T' "${XDG_DATA_HOME:-$HOME/.local/share}" 2>/dev/null \
+    || stat -f -c '%T' "$HOME" 2>/dev/null \
+    || echo "unknown")
+if [[ "$STORAGE_FS" == "zfs" ]]; then
+    info "Rootless storage on ZFS — switching to fuse-overlayfs"
+    if ! command -v fuse-overlayfs >/dev/null 2>&1; then
+        info "Installing fuse-overlayfs (requires sudo)"
+        sudo apt-get install -y fuse-overlayfs
+    fi
+    STORAGE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/containers/storage.conf"
+    mkdir -p "$(dirname "$STORAGE_CONF")"
+    # Refuse to overwrite an existing storage.conf — operator may have
+    # tuned it. Detect by content: if it already names fuse-overlayfs
+    # as the mount_program we're done; otherwise leave it alone and
+    # warn so the user knows the autofix didn't take effect.
+    if [[ -f "$STORAGE_CONF" ]]; then
+        if grep -q 'mount_program.*fuse-overlayfs' "$STORAGE_CONF"; then
+            ok "storage.conf already points at fuse-overlayfs"
+        else
+            warn "Existing $STORAGE_CONF does not use fuse-overlayfs — leaving as-is."
+            warn "If you hit slow image pulls or 'gid_map: Invalid argument' on first start,"
+            warn "edit it to set [storage].driver=\"overlay\" and"
+            warn "[storage.options.overlay].mount_program=\"/usr/bin/fuse-overlayfs\","
+            warn "then run: podman system reset --force && podman system migrate"
+        fi
+    else
+        # `podman system reset` is destructive if images/containers
+        # already exist. The safe path is "only reset when storage is
+        # empty"; on a clean install that's always the case.
+        if [[ -n "$(podman images -q 2>/dev/null)" ]] || [[ -n "$(podman ps -aq 2>/dev/null)" ]]; then
+            warn "Found existing podman images/containers — skipping driver switch to avoid data loss."
+            warn "If first start is slow or fails on ZFS, manually run:"
+            warn "  podman system reset --force && podman system migrate"
+            warn "after writing $STORAGE_CONF (see docs/recovery.md)."
+        else
+            cat >"$STORAGE_CONF" <<'EOF'
+# Written by signalk-universal-installer on ZFS hosts.
+# Default `overlay` triggers chown-by-maps on --userns=keep-id; very
+# slow on ZFS and on some kernels fails outright. fuse-overlayfs keeps
+# virtual ownership in xattrs, no chown sweep.
+[storage]
+driver = "overlay"
+
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"
+EOF
+            chmod 0644 "$STORAGE_CONF"
+            # storage layout is empty: a reset is a no-op but migrate
+            # picks up the new mount_program for any future pulls.
+            podman system migrate >/dev/null 2>&1 || true
+            ok "fuse-overlayfs configured in $STORAGE_CONF"
+        fi
+    fi
+else
+    ok "rootless storage on $STORAGE_FS (no driver switch needed)"
+fi
 
 # 4. Linger
 section "systemd-user linger"
