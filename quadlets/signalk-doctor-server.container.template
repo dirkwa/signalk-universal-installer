@@ -1,7 +1,12 @@
 [Unit]
 Description=SignalK Doctor Server
-Wants=network-online.target
-After=network-online.target
+# podman.socket is bind-mounted at %t/podman/podman.sock; without
+# Wants/After, systemd may start this unit before the socket exists
+# and `podman run -v ...` exits 125 with `statfs: no such file or
+# directory`. The installer enables podman.socket once; this keeps
+# ordering correct across reboots and manual socket-unit cycles.
+Wants=network-online.target podman.socket
+After=network-online.target podman.socket
 # Crashloop guard. Belongs in [Unit] — systemd silently ignores these
 # keys when placed in [Service]. After 5 starts in 5 minutes the unit
 # goes to `failed` instead of looping forever.

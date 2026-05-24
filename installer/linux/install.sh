@@ -10,6 +10,7 @@
 #   2. Pre-flight checks (RAM, disk, ports, cgroups v2, podman, linger, legacy)
 #   3. Install podman if absent
 #   4. Enable linger
+#   4b. Enable user podman.socket (engine containers bind-mount it)
 #   5. Ensure group memberships (dialout, gpio, netdev)
 #   6. Generate auth tokens for updater and doctor
 #   7. Initialize ~/.signalk-doctor/{snapshots,last-good.json}
@@ -26,7 +27,7 @@
 #  18. Mark bootstrap-complete in last-good.json
 #  19. Print success URLs
 
-INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-10-gc5e0150}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-v0.1.0-11-g390ad99}"
 INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
 
 # Where the engine container HTTP servers bind. Default localhost-only;
@@ -133,6 +134,20 @@ ok "linger enabled"
 # Re-establish XDG_RUNTIME_DIR if linger was just enabled; the user-bus
 # socket may not exist until the next login otherwise. Defensive nudge:
 systemctl --user daemon-reload || true
+
+# The rootless podman socket at $XDG_RUNTIME_DIR/podman/podman.sock is
+# bind-mounted into all three engine containers (updater, doctor, and
+# signalk-server itself — the signalk-container plugin reaches the host
+# daemon via that mount). Without an enabled socket unit, the file
+# doesn't exist when those containers start and `podman run -v ...`
+# exits 125 with `statfs: no such file or directory`. Enabling
+# activates it on user-bus startup; --now creates the socket
+# immediately for the very first install.
+if ! systemctl --user is-enabled --quiet podman.socket 2>/dev/null; then
+    info "Enabling user podman.socket"
+    systemctl --user enable --now podman.socket
+fi
+ok "podman.socket active"
 
 # 5. Groups
 section "Group memberships"
