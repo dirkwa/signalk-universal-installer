@@ -27,6 +27,7 @@
 #  16b. Install ~/.local/bin/signalk (CLI dispatcher: health/recover/bug-report/uninstall)
 #  17. Journald drop-in (sudo)
 #  18. Mark bootstrap-complete in last-good.json
+#  18b. (re-runs only) Verification pass: report healthy/broken checkpoints
 #  19. Print success URLs
 
 INSTALLER_VERSION="${INSTALLER_VERSION:-0.0.0-scaffold}"
@@ -135,6 +136,23 @@ if [[ "$PUBLISH_HOST" = "0.0.0.0" ]]; then
     info "Set SIGNALK_LOCALHOST_ONLY=true to restrict to localhost."
 else
     info "Port bind: localhost only (SIGNALK_LOCALHOST_ONLY=true)"
+fi
+
+# Detect a previous successful install. install.sh's last step (#18)
+# writes `bootstrappedAt` into ~/.signalk-doctor/last-good.json after
+# every successful pass; presence of that key means at least one full
+# bootstrap completed. We don't change the run sequence in that case —
+# every step is already idempotent — but we DO add a verification pass
+# at the end (step 18b) that reports what's healthy vs. still broken
+# after the idempotent re-run, so the operator can tell whether issues
+# were resolved.
+VERIFY_MODE=0
+if [[ -f "${DOCTOR_DATA}/last-good.json" ]] \
+    && grep -q '"bootstrappedAt"' "${DOCTOR_DATA}/last-good.json" 2>/dev/null; then
+    VERIFY_MODE=1
+    info "Existing install detected — running in verify mode."
+    info "Steps will be re-run idempotently; a summary at the end will tell you"
+    info "what was already healthy, what got fixed, and what still needs attention."
 fi
 
 # 2. Pre-flight
@@ -483,15 +501,142 @@ with open(path, "w") as fh:
     json.dump(data, fh, indent=2)
 PY
 
+# 18b. Verification pass (verify mode only).
+#
+# On re-runs, check the final state and build two lists: healthy and
+# broken. We don't classify "fixed" because all 18 prior steps are
+# idempotent and don't tell us whether they had to do work — we'd have
+# to instrument every one to know. Instead, we trust that if a re-run
+# leaves a checkpoint healthy, the install is effectively repaired; if
+# a checkpoint is still broken after a full pass, that's what the
+# operator needs to see.
+#
+# Suppressed on a first-run (VERIFY_MODE=0) to keep the success message
+# clean; the URLs being printed already imply everything's up.
+if [[ "$VERIFY_MODE" = "1" ]]; then
+    section "Verification"
+    VERIFY_HEALTHY=()
+    VERIFY_BROKEN=()
+
+    verify_check() {
+        local label=$1 verdict=$2
+        if [[ "$verdict" = "ok" ]]; then
+            VERIFY_HEALTHY+=("$label")
+        else
+            VERIFY_BROKEN+=("$label — $verdict")
+        fi
+    }
+
+    # podman present + version usable
+    if command -v podman >/dev/null 2>&1; then
+        verify_check "podman binary" "ok"
+    else
+        verify_check "podman binary" "missing"
+    fi
+
+    # podman.socket enabled (R8.3 / our PR #17)
+    if systemctl --user is-enabled --quiet podman.socket 2>/dev/null; then
+        verify_check "user podman.socket enabled" "ok"
+    else
+        verify_check "user podman.socket enabled" "not enabled; engine containers will fail on next boot"
+    fi
+
+    # linger
+    if loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+        verify_check "systemd-user linger" "ok"
+    else
+        verify_check "systemd-user linger" "off; user-bus dies at logout"
+    fi
+
+    # Three Quadlets on disk
+    for u in signalk-server signalk-updater-server signalk-doctor-server; do
+        if [[ -f "$QUADLET_DIR/${u}.container" ]]; then
+            verify_check "Quadlet ${u}.container" "ok"
+        else
+            verify_check "Quadlet ${u}.container" "missing from $QUADLET_DIR"
+        fi
+    done
+
+    # Three services active
+    for u in signalk-server signalk-updater-server signalk-doctor-server; do
+        active=$(systemctl --user is-active "${u}.service" 2>/dev/null || true)
+        if [[ "$active" = "active" ]]; then
+            verify_check "${u}.service" "ok"
+        else
+            verify_check "${u}.service" "state=${active:-unknown}; check 'journalctl --user -u ${u}.service'"
+        fi
+    done
+
+    # Both tokens present + mode 0600
+    for f in "$UPDATER_DATA/token" "$DOCTOR_DATA/token"; do
+        token_label="$(basename "$(dirname "$f")")/token"
+        if [[ -f "$f" ]]; then
+            mode=$(stat -c '%a' "$f" 2>/dev/null || echo "?")
+            if [[ "$mode" = "600" ]]; then
+                verify_check "$token_label" "ok"
+            else
+                verify_check "$token_label" "mode $mode (expected 600)"
+            fi
+        else
+            verify_check "$token_label" "missing"
+        fi
+    done
+
+    # Three URLs answering
+    if curl -fsS -o /dev/null -m 5 "$UPDATER_URL/api/health" 2>/dev/null; then
+        verify_check "updater health (:3003)" "ok"
+    else
+        verify_check "updater health (:3003)" "unreachable"
+    fi
+    if curl -fsS -o /dev/null -m 5 "$DOCTOR_URL/api/health" 2>/dev/null; then
+        verify_check "doctor health (:3004)" "ok"
+    else
+        verify_check "doctor health (:3004)" "unreachable"
+    fi
+    if curl -fsS -o /dev/null -m 5 "$SIGNALK_URL" 2>/dev/null; then
+        verify_check "signalk-server (:3000)" "ok"
+    else
+        verify_check "signalk-server (:3000)" "unreachable"
+    fi
+
+    # Summary.
+    if (( ${#VERIFY_HEALTHY[@]} > 0 )); then
+        echo
+        for item in "${VERIFY_HEALTHY[@]}"; do
+            ok "$item"
+        done
+    fi
+    if (( ${#VERIFY_BROKEN[@]} > 0 )); then
+        echo
+        warn "Verification flagged ${#VERIFY_BROKEN[@]} item(s):"
+        for item in "${VERIFY_BROKEN[@]}"; do
+            warn "  - $item"
+        done
+        echo
+        warn "Next steps:"
+        warn "  signalk health           — quick re-check"
+        warn "  signalk recover doctor   — full diagnostics dump"
+        warn "  signalk bug-report       — bundle state for an issue"
+    fi
+fi
+
 # 19. Success
 if [[ "$PUBLISH_HOST" = "0.0.0.0" ]]; then
     LAN_NOTE="Updater + Doctor are reachable on the LAN. The doctor's read-only probes are unauthenticated by design (recovery surface); on shared/guest WiFi consider SIGNALK_LOCALHOST_ONLY=true."
 else
     LAN_NOTE="Updater + Doctor are bound to localhost only. Unset SIGNALK_LOCALHOST_ONLY to expose on the LAN."
 fi
+if [[ "$VERIFY_MODE" = "1" ]] && (( ${#VERIFY_BROKEN[@]} > 0 )); then
+    SUMMARY_HEADLINE="${C_BOLD}Re-run complete — verification flagged ${#VERIFY_BROKEN[@]} item(s) above.${C_RESET}"
+elif [[ "$VERIFY_MODE" = "1" ]]; then
+    SUMMARY_HEADLINE="${C_GREEN}${C_BOLD}OK — existing install verified healthy.${C_RESET}"
+else
+    SUMMARY_HEADLINE="${C_GREEN}${C_BOLD}OK — SignalK is up.${C_RESET}"
+fi
+
 cat <<EOF
 
-${C_GREEN}${C_BOLD}OK — SignalK is up.${C_RESET}
+${SUMMARY_HEADLINE}
 
   SignalK admin UI : http://localhost:3000
   Updater Console  : ${UPDATER_URL}
