@@ -155,11 +155,3 @@ RECOVERY_EOF
 
 chmod 0755 "$TARGET"
 ok "signalk-recovery installed at $TARGET"
-
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *)
-        warn "$BIN_DIR is not in your PATH"
-        warn "Add this to your shell rc:  export PATH=\"\$HOME/.local/bin:\$PATH\""
-        ;;
-esac
