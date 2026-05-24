@@ -621,6 +621,22 @@ if [[ "$VERIFY_MODE" = "1" ]]; then
 fi
 
 # 19. Success
+#
+# Print URLs the operator can paste into their browser. Most boats are
+# headless and the operator is on a laptop/tablet on the same LAN, so
+# when bound to 0.0.0.0 we resolve the primary outbound IP via
+# `ip route get` (no packet actually sent — the kernel just reports
+# which source it would use). Falls back to `hostname -I` and finally
+# to "localhost" so the message always prints something usable.
+LAN_HOST=""
+if [[ "$PUBLISH_HOST" = "0.0.0.0" ]]; then
+    LAN_HOST=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')
+    if [[ -z "$LAN_HOST" ]]; then
+        LAN_HOST=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+fi
+DISPLAY_HOST="${LAN_HOST:-localhost}"
+
 if [[ "$PUBLISH_HOST" = "0.0.0.0" ]]; then
     LAN_NOTE="Updater + Doctor are reachable on the LAN. The doctor's read-only probes are unauthenticated by design (recovery surface); on shared/guest WiFi consider SIGNALK_LOCALHOST_ONLY=true."
 else
@@ -631,16 +647,16 @@ if [[ "$VERIFY_MODE" = "1" ]] && (( ${#VERIFY_BROKEN[@]} > 0 )); then
 elif [[ "$VERIFY_MODE" = "1" ]]; then
     SUMMARY_HEADLINE="${C_GREEN}${C_BOLD}OK — existing install verified healthy.${C_RESET}"
 else
-    SUMMARY_HEADLINE="${C_GREEN}${C_BOLD}OK — SignalK is up.${C_RESET}"
+    SUMMARY_HEADLINE="${C_GREEN}${C_BOLD}OK — SignalK is up. Open it in your browser:${C_RESET}"
 fi
 
 cat <<EOF
 
 ${SUMMARY_HEADLINE}
 
-  SignalK admin UI : http://localhost:3000
-  Updater Console  : ${UPDATER_URL}
-  Doctor Console   : ${DOCTOR_URL}
+  SignalK admin UI : http://${DISPLAY_HOST}:3000
+  Updater Console  : http://${DISPLAY_HOST}:3003
+  Doctor Console   : http://${DISPLAY_HOST}:3004
 
 ${LAN_NOTE}
 
