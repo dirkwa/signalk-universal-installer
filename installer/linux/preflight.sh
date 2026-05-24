@@ -46,6 +46,15 @@ check_disk() {
     fi
 }
 
+# `bootstrappedAt` in ~/.signalk-doctor/last-good.json is written by
+# install.sh's last step on every successful pass. Its presence means
+# this isn't a fresh install — ports being held by signalk-* services
+# is the expected state, not a collision.
+is_verify_mode() {
+    local marker="${HOME}/.signalk-doctor/last-good.json"
+    [[ -f "$marker" ]] && grep -q '"bootstrappedAt"' "$marker" 2>/dev/null
+}
+
 check_ports() {
     local p
     local conflicts=()
@@ -55,7 +64,11 @@ check_ports() {
         fi
     done
     if (( ${#conflicts[@]} > 0 )); then
-        fail "Port(s) already in use: ${conflicts[*]} — stop the conflicting service or set a different port"
+        if is_verify_mode; then
+            ok "Ports ${conflicts[*]} bound (expected — existing install)"
+        else
+            fail "Port(s) already in use: ${conflicts[*]} — stop the conflicting service or set a different port"
+        fi
     else
         ok "Ports ${PORTS_TO_CHECK[*]} are free"
     fi

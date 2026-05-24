@@ -128,14 +128,19 @@ SIGNALK_URL="http://127.0.0.1:3000/signalk"
 
 # Privilege escalation. The installer needs root for apt + systemd
 # file writes + journald drop-in + cgroup delegation override. We
-# support three setups:
+# support four setups:
 #   - Running as root → SUDO="" (no prefix needed).
-#   - Non-root with `sudo` available → SUDO="sudo" (interactive prompt
-#     on first use, cached for the rest of the run).
-#   - Non-root without `sudo` → fail-fast in preflight with the exact
-#     recipe to bootstrap sudo before re-running. We don't try `su -c`
-#     because the curl-piped one-liner has no controlling tty for the
-#     password prompt and the failure mode is very confusing.
+#   - Non-root + sudo present + caller authorized → SUDO="sudo"
+#     (interactive prompt on first use, cached for the rest of the
+#     run).
+#   - Non-root + sudo present + caller NOT authorized → fail-fast
+#     with the recipe + the "log out + back in" reminder. Common
+#     case: user just ran `usermod -aG sudo $USER` and didn't
+#     relogin, so the session's group set is stale.
+#   - Non-root + sudo absent → fail-fast with the bootstrap recipe.
+#     We don't try `su -c` because the curl-piped one-liner has no
+#     controlling tty for the password prompt and the failure mode
+#     is confusing.
 if (( EUID == 0 )); then
     SUDO=""
 elif command -v sudo >/dev/null 2>&1; then
@@ -155,8 +160,26 @@ if [[ "$SUDO" = "MISSING" ]]; then
     err "  usermod -aG sudo $USER"
     err "  # Then log $USER out + back in and re-run the installer."
     exit 1
-elif (( EUID == 0 )); then
-    info "Running as root — sudo prefix omitted."
+elif [[ "$SUDO" = "sudo" ]]; then
+    # Probe whether sudo will actually let this user escalate, BEFORE
+    # we start running steps that depend on it. `sudo -nv` returns 0
+    # when the timestamp is already cached, 1 when sudo would prompt
+    # OR when the user is not authorized; we distinguish by looking
+    # for the "not in sudoers" / "may not run sudo" / "is not allowed"
+    # patterns sudo emits to stderr (English + the localized forms
+    # we've seen in the wild). When that's the case, fail-fast with
+    # the recipe — the typical cause is `usermod -aG sudo $USER`
+    # without re-login (the running session still has the stale
+    # group set).
+    sudo_probe=$(sudo -nv 2>&1 || true)
+    if grep -qiE 'not (in the sudoers|allowed)|may not run sudo|nicht in der sudoers' <<<"$sudo_probe"; then
+        err "'$USER' is not authorized to use sudo."
+        err "If you just added the user to the sudo group, log $USER out"
+        err "and back in (or reboot) — the running shell still has the"
+        err "stale group set."
+        err "Otherwise, add the user as root: usermod -aG sudo $USER"
+        exit 1
+    fi
 fi
 if [[ "${DEPRECATED_LAN_EXPOSE_SEEN:-0}" = "1" ]]; then
     warn "SIGNALK_LAN_EXPOSE is deprecated — use SIGNALK_LOCALHOST_ONLY=true instead."
@@ -573,20 +596,30 @@ INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
 # directory existed at login time. Operators running our installer for
 # the first time created it just now, so their current shell AND every
 # future shell on a system where the conditional doesn't run will miss
-# both `signalk` and `signalk-recovery`. Append a guarded export to the
-# user's login-shell rc; the snippet is idempotent.
+# both `signalk` and `signalk-recovery`. Append a guarded export to:
+#
+# 1) the user's login-shell rc (~/.bashrc or ~/.zshrc), AND
+# 2) ~/.profile.
+#
+# Both are needed because bash's startup file priority differs by mode:
+# an interactive non-login shell sources ~/.bashrc directly; an
+# interactive login shell sources ~/.profile (which on Debian sources
+# ~/.bashrc as a sub-step). On hosts where ~/.bashrc is in a path
+# bash decides not to source (or sources non-interactively and exits
+# at the standard `case $- in *i*) ;; *) return;; esac` guard), only
+# ~/.profile catches the snippet. Writing both makes the failure mode
+# go away. The guarded snippet is idempotent so duplication is fine.
 section "PATH activation"
-SHELL_RC=""
-case "$(basename "${SHELL:-bash}")" in
-    zsh)  SHELL_RC="$HOME/.zshrc" ;;
-    bash) SHELL_RC="$HOME/.bashrc" ;;
-    *)    SHELL_RC="$HOME/.profile" ;;
-esac
 
 PATH_GUARD='# signalk-universal-installer: ensure ~/.local/bin on PATH'
-if [[ -f "$SHELL_RC" ]] && grep -Fq "$PATH_GUARD" "$SHELL_RC"; then
-    ok "PATH snippet already present in $SHELL_RC"
-else
+
+# write_path_snippet <rc-file>: idempotently append the guarded snippet.
+write_path_snippet() {
+    local rc=$1
+    if [[ -f "$rc" ]] && grep -Fq "$PATH_GUARD" "$rc"; then
+        ok "PATH snippet already present in $rc"
+        return
+    fi
     # shellcheck disable=SC2016
     # $PATH / $HOME are written literally on purpose — the user's shell
     # expands them at login, not us here.
@@ -597,8 +630,19 @@ else
         echo '    *":$HOME/.local/bin:"*) ;;'
         echo '    *) export PATH="$HOME/.local/bin:$PATH" ;;'
         echo 'esac'
-    } >>"$SHELL_RC"
-    ok "Added PATH snippet to $SHELL_RC"
+    } >>"$rc"
+    ok "Added PATH snippet to $rc"
+}
+
+SHELL_RC=""
+case "$(basename "${SHELL:-bash}")" in
+    zsh)  SHELL_RC="$HOME/.zshrc" ;;
+    bash) SHELL_RC="$HOME/.bashrc" ;;
+esac
+
+write_path_snippet "$HOME/.profile"
+if [[ -n "$SHELL_RC" ]]; then
+    write_path_snippet "$SHELL_RC"
 fi
 
 # Capture whether the current shell needs a reload. The child install
@@ -813,10 +857,15 @@ EOF
 
 if (( PATH_NEEDS_RELOAD )); then
     SHELL_NAME=$(basename "${SHELL:-bash}")
+    # -l forces a login shell which is what an SSH session would
+    # already be. The PATH snippet was written to ~/.profile too so
+    # the login-shell flow definitely picks it up. Without -l on a
+    # login shell, bash may not re-source ~/.bashrc and the snippet
+    # never runs.
     cat <<EOF
 
-To use 'signalk' in this shell right now, run:  exec ${SHELL_NAME}
-(New shells pick it up automatically — the snippet was added to ${SHELL_RC}.)
+To use 'signalk' in this shell right now, run:  exec "${SHELL_NAME}" -l
+(New logins pick it up automatically — the snippet was added to ~/.profile.)
 EOF
 fi
 
