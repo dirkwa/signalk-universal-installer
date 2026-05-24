@@ -97,12 +97,24 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
     done
     chmod +x "$TMP/installer/linux/"*.sh
     chmod +x "$TMP/installer/linux/lib/"*.sh 2>/dev/null || true
-    exec env \
+    # Run the local copy as a child, NOT via `exec`. The original
+    # `curl … | bash` invocation is still streaming bytes through this
+    # bash's stdin; using `exec` here replaced the process before bash
+    # had consumed the tail of install.sh, so curl hit SIGPIPE writing
+    # to a pipe with no reader and exited 23 with a confusing
+    # "Failure writing output to destination" line printed AFTER the
+    # successful install summary. Running as a subprocess keeps this
+    # bash alive; we then drain curl's leftover bytes to /dev/null so
+    # curl sees a clean EOF instead of a broken pipe.
+    env \
         INSTALLER_VERSION="$INSTALLER_VERSION" \
         INSTALLER_BASE_URL="$INSTALLER_BASE_URL" \
         SIGNALK_LOCALHOST_ONLY="${SIGNALK_LOCALHOST_ONLY:-}" \
         SIGNALK_LAN_EXPOSE="${SIGNALK_LAN_EXPOSE:-}" \
         bash "$TMP/installer/linux/install.sh" "$@"
+    rc=$?
+    cat >/dev/null 2>&1 || true
+    exit "$rc"
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
