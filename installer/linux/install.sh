@@ -242,11 +242,21 @@ bash "$HERE/preflight.sh"
 # 3. Install podman if absent
 section "Podman"
 if ! command -v podman >/dev/null 2>&1; then
-    info "Installing podman + uidmap + slirp4netns (requires sudo)"
+    info "Installing podman + uidmap + slirp4netns + jq (requires sudo)"
     $SUDO apt-get update
-    $SUDO apt-get install -y podman uidmap slirp4netns
+    $SUDO apt-get install -y podman uidmap slirp4netns jq
 fi
 ok "$(podman --version)"
+
+# jq is used by install.sh's bootstrap-marker write and by
+# `signalk bug-report`'s JSON handling. The podman-install block above
+# pulls it in on a fresh install; this catches the re-run case where
+# podman was already present from an earlier (jq-less) install.
+if ! command -v jq >/dev/null 2>&1; then
+    info "Installing jq (requires sudo)"
+    $SUDO apt-get install -y jq
+fi
+ok "$(jq --version)"
 
 # 3b. ZFS rootless-storage autofix.
 #
@@ -682,20 +692,22 @@ ok "journald limits applied"
 
 # 18. Mark bootstrap-complete
 section "Recording bootstrap state"
-python3 - "$DOCTOR_DATA/last-good.json" <<'PY' 2>/dev/null || true
-import json, sys, datetime
-path = sys.argv[1]
-try:
-    with open(path) as fh:
-        data = json.load(fh)
-except Exception:
-    data = {"quadlets": {}}
-data.setdefault("quadlets", {})
-data["updatedAt"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-data["bootstrappedAt"] = data["updatedAt"]
-with open(path, "w") as fh:
-    json.dump(data, fh, indent=2)
-PY
+LAST_GOOD="$DOCTOR_DATA/last-good.json"
+NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+TMP_LG=$(mktemp)
+# Read existing file if it's valid JSON; otherwise start from the
+# documented empty shape. Then set updatedAt + bootstrappedAt and
+# ensure `quadlets` exists. Atomic write via mv so a torn write can't
+# leave a half-written file.
+if [[ -s "$LAST_GOOD" ]] && jq -e . "$LAST_GOOD" >/dev/null 2>&1; then
+    jq --arg now "$NOW" \
+       '. + {updatedAt: $now, bootstrappedAt: $now} | .quadlets = (.quadlets // {})' \
+       "$LAST_GOOD" >"$TMP_LG"
+else
+    jq -n --arg now "$NOW" \
+       '{updatedAt: $now, bootstrappedAt: $now, quadlets: {}}' >"$TMP_LG"
+fi
+mv -f "$TMP_LG" "$LAST_GOOD"
 
 # 18b. Verification pass (verify mode only).
 #
