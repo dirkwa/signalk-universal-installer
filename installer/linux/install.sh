@@ -86,6 +86,7 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/lib/colors.sh \
         installer/linux/lib/distro.sh \
         installer/linux/lib/http.sh \
+        installer/linux/lib/ghcr.sh \
         quadlets/signalk-server.container.template \
         quadlets/signalk-updater-server.container.template \
         quadlets/signalk-doctor-server.container.template; do
