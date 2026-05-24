@@ -21,11 +21,19 @@ latest_stable_tag() {
 
     # Anonymous pull token. -m 10 caps total time per call; if GHCR
     # hangs we'd rather pin to :latest than wait two minutes.
+    #
+    # The `|| true` suffix is load-bearing: the caller runs under
+    # `set -euo pipefail` (see installer/linux/install.sh:68), and
+    # without it a curl failure OR an empty sed extraction would abort
+    # the whole installer before the [[ -z "$token" ]] fallback below
+    # could fire. The function intentionally swallows all error detail
+    # at this layer — its contract is "print a tag or the fallback,
+    # never fail."
     local token
     token=$(curl -fsS -m 10 \
         "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" \
         2>/dev/null | \
-        sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+        sed -n 's/.*"token":"\([^"]*\)".*/\1/p') || true
     if [[ -z "$token" ]]; then
         echo "$fallback"
         return 0
@@ -38,7 +46,7 @@ latest_stable_tag() {
     raw=$(curl -fsS -m 15 \
         -H "Authorization: Bearer ${token}" \
         "https://ghcr.io/v2/${repo}/tags/list" \
-        2>/dev/null)
+        2>/dev/null) || true
     if [[ -z "$raw" ]]; then
         echo "$fallback"
         return 0
@@ -46,6 +54,9 @@ latest_stable_tag() {
 
     # Extract the tags array contents, split on commas, filter to
     # bare semver. sort -V sorts versions; tail -1 keeps the highest.
+    # `|| true` because grep exits 1 when no semver tags match
+    # (legitimate state — a brand-new repo with only :master tags) and
+    # pipefail would otherwise abort the installer.
     local latest
     latest=$(echo "$raw" | \
         sed -n 's/.*"tags":\[\([^]]*\)\].*/\1/p' | \
@@ -53,7 +64,7 @@ latest_stable_tag() {
         tr -d ' "' | \
         grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | \
         sort -V | \
-        tail -1)
+        tail -1) || true
     if [[ -z "$latest" ]]; then
         echo "$fallback"
         return 0
