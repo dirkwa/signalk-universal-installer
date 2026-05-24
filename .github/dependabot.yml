@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # GitHub Actions is the only ecosystem dependabot can manage in this
+  # repo — the installer is pure bash and has no package manifests.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types:
+          - minor
+          - patch
