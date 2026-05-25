@@ -82,6 +82,8 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/render-server-quadlet.sh \
         installer/linux/install-recovery-script.sh \
         installer/linux/install-signalk-command.sh \
+        installer/linux/signalk.tmpl \
+        installer/linux/signalk-recovery.tmpl \
         installer/linux/legacy-cleanup.sh \
         installer/linux/lib/colors.sh \
         installer/linux/lib/distro.sh \
