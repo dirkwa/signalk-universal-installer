@@ -131,24 +131,30 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_OWNER=${REPO_OWNER:-dirkwa}
 SK_IMAGE=${SK_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-server:dirkwa}
 
-# Resolve the latest published stable tag for each engine container at
-# install time. Avoids the :latest drift trap — a fresh install pinned
-# to :latest pulls one digest at boot and never re-resolves, so every
-# operator ends up running whatever the registry happened to point
-# :latest at on install day. Pinning to an explicit semver tag means
-# the updater's own self-update flow is the only thing that ever
-# advances the version, which is the model we want.
+# Engine containers default to `:latest`. This used to resolve a
+# specific semver tag from GHCR at install time, but that made the
+# engine permanently responsible for migrating its own Quadlet pin on
+# every update — fragile, and circular: a broken engine couldn't move
+# itself forward without an SSH-and-edit recovery.
 #
-# Honors UPDATER_IMAGE / DOCTOR_IMAGE env overrides so CI and power
-# users can still point at a specific image (e.g. a fork's :master).
-if [[ -z ${UPDATER_IMAGE:-} ]]; then
-    UPDATER_TAG=$(latest_stable_tag "${REPO_OWNER}/signalk-updater-server")
-    UPDATER_IMAGE="ghcr.io/${REPO_OWNER}/signalk-updater-server:${UPDATER_TAG}"
-fi
-if [[ -z ${DOCTOR_IMAGE:-} ]]; then
-    DOCTOR_TAG=$(latest_stable_tag "${REPO_OWNER}/signalk-doctor-server")
-    DOCTOR_IMAGE="ghcr.io/${REPO_OWNER}/signalk-doctor-server:${DOCTOR_TAG}"
-fi
+# Now the model is:
+#   - The Quadlet's `Image=` says `:latest` (OperatorIntent = "stay on
+#     the channel").
+#   - The engine's self-update / doctor-update flows pull the specific
+#     semver tag explicitly, then `restartUnit` — podman picks up the
+#     just-pulled image because `:latest` now resolves to it. No
+#     Quadlet rewrite needed.
+#   - The Dashboard surfaces RuntimeIdentity (from /api/health.version)
+#     and Channel (from the Quadlet tag) separately, so the operator
+#     sees the actual semver next to the channel name. Floating tags
+#     stop being a UI footgun.
+#
+# UPDATER_IMAGE / DOCTOR_IMAGE env overrides still work for CI and
+# power users who want to point at a fork's `:master` or a pinned
+# semver. `lib/ghcr.sh::latest_stable_tag` stays around as a debug
+# helper but isn't called from the install path.
+UPDATER_IMAGE=${UPDATER_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-updater-server:latest}
+DOCTOR_IMAGE=${DOCTOR_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-doctor-server:latest}
 
 QUADLET_DIR="${HOME}/.config/containers/systemd"
 UPDATER_DATA="${HOME}/.signalk-updater"
