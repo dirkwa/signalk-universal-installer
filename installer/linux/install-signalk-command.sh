@@ -377,14 +377,119 @@ cmd_bug_report() {
     echo "[OK] Bundle ready:"
     echo "  \$tarball"
     echo
-    echo "Attach this file to a GitHub issue at:"
-    echo "  https://github.com/dirkwa/signalk-universal-installer/issues"
-    echo
     echo "Contents are limited to host metadata, container state, recent journals,"
     echo "and SignalK plugin metadata. Auth tokens are reported as presence-only"
     echo "(mode + 'present') and their values are NEVER included. SignalK plugin"
     echo "configuration bodies (which routinely hold secrets) are also NEVER included;"
     echo "settings.json is included with pipedProviders' options redacted."
+
+    # Optional upload + issue-opening. Two prompts because the privacy
+    # tradeoff is real: filebin.net is unauthenticated public storage
+    # (anyone with the bin URL can download), and although the bundle
+    # has tokens/pipedProviders redacted, it still contains settings.json,
+    # hardware.json, plugin versions, and 24h of journals. Operators on
+    # shared boats or with custom plugins should know that before they
+    # upload. Both defaults are Y — most operators running \`signalk
+    # bug-report\` want to file an issue, and a default-N upload
+    # silently produced "attach this file manually" bodies that surprised
+    # users in practice. The explicit consent text above makes the
+    # tradeoff visible; operators with concerns can type N.
+    local issue_url_base="https://github.com/SignalK/signalk-server/issues/new"
+    local tarball_url=""
+
+    # Non-interactive callers (cron, CI, \`signalk bug-report < /dev/null\`)
+    # would see \`read\` return immediately with an empty string, and the
+    # issue-page prompt's default-Y would then silently spawn xdg-open.
+    # Skip both prompts when stdin isn't a TTY and just print the manual
+    # instructions.
+    if [[ ! -t 0 ]]; then
+        echo
+        echo "Non-interactive shell — skipping upload and browser prompts."
+        echo "Attach \$tarball to a new issue at:"
+        echo "  \$issue_url_base"
+        return
+    fi
+
+    echo
+    echo "Upload the bundle to filebin.net so it can be linked from the issue?"
+    echo "  - filebin.net is PUBLIC: anyone with the bin URL can download it."
+    echo "  - The bundle has tokens and pipedProviders options redacted, but"
+    echo "    still contains settings.json, hardware.json, plugin versions,"
+    echo "    and 24 hours of journal output. Review the tarball first if"
+    echo "    you are on a shared boat or run custom plugins."
+    echo "  - filebin auto-expires bins after ~6 days."
+    # Guard read against EOF — \`set -e\` would otherwise kill the script
+    # before the default is applied (e.g. stdin closed after the first
+    # prompt, broken pipe).
+    if ! read -r -p "Upload now? [Y/n] " ans_upload; then
+        ans_upload=""
+    fi
+    ans_upload=\${ans_upload:-Y}
+    if [[ "\$ans_upload" =~ ^[Yy]\$ ]]; then
+        # Bin name mixes timestamp + \$RANDOM so guessing the URL is
+        # infeasible; this is the only access control filebin offers.
+        local bin
+        bin="signalk-\$(date -u +%Y%m%d-%H%M%S)-\$RANDOM"
+        local fname
+        fname=\$(basename "\$tarball")
+        echo "[i] Uploading \$tarball …"
+        if curl -fsS --max-time 120 \\
+             -H "Content-Type: application/gzip" \\
+             --data-binary "@\$tarball" \\
+             "https://filebin.net/\$bin/\$fname" >/dev/null; then
+            tarball_url="https://filebin.net/\$bin/\$fname"
+            echo "[OK] Uploaded:"
+            echo "  \$tarball_url"
+        else
+            echo "[WARN] Upload failed. Attach \$tarball to the issue manually."
+        fi
+    fi
+
+    echo
+    if ! read -r -p "Open the GitHub issue page in your browser? [Y/n] " ans_issue; then
+        ans_issue=""
+    fi
+    ans_issue=\${ans_issue:-Y}
+    if [[ "\$ans_issue" =~ ^[Yy]\$ ]]; then
+        local body
+        if [[ -n "\$tarball_url" ]]; then
+            body="**Bug report bundle:** \$tarball_url"\$'\\n'"_(filebin link, auto-expires in ~6 days — please download soon)_"
+        else
+            body="**Bug report bundle:** attach \\\`\$(basename "\$tarball")\\\` from \$(dirname "\$tarball")/"
+        fi
+        body+=\$'\\n\\n'"**What happened:**"\$'\\n\\n'"**Expected:**"\$'\\n\\n'"**Steps to reproduce:**"\$'\\n'
+        # URL-encode the body for the query string. python3 is present
+        # on every distro the installer targets; jq's @uri is the
+        # fallback when python3 is unavailable.
+        local encoded_body=""
+        if command -v python3 >/dev/null 2>&1; then
+            encoded_body=\$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read()))' <<<"\$body")
+        elif command -v jq >/dev/null 2>&1; then
+            encoded_body=\$(jq -rn --arg s "\$body" '\$s|@uri')
+        fi
+        local issue_url
+        if [[ -n "\$encoded_body" ]]; then
+            issue_url="\$issue_url_base?title=Bug%20report%20\$stamp&body=\$encoded_body"
+        else
+            issue_url="\$issue_url_base"
+            echo "[WARN] Could not URL-encode the issue body (no python3 or jq)."
+            echo "       Paste this into the issue manually:"
+            echo
+            printf '%s\\n' "\$body"
+            echo
+        fi
+        echo "[i] Opening:"
+        echo "  \$issue_url"
+        if command -v xdg-open >/dev/null 2>&1; then
+            # Detach so we don't block the shell on slow GUI startup.
+            xdg-open "\$issue_url" >/dev/null 2>&1 &
+        else
+            echo "(no xdg-open — copy the URL above into your browser)"
+        fi
+    else
+        echo "Open this when you're ready:"
+        echo "  \$issue_url_base"
+    fi
 }
 
 case "\${1:-help}" in
