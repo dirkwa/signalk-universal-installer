@@ -415,7 +415,12 @@ cmd_bug_report() {
     echo "    and 24 hours of journal output. Review the tarball first if"
     echo "    you are on a shared boat or run custom plugins."
     echo "  - filebin auto-expires bins after ~6 days."
-    read -r -p "Upload now? [y/N] " ans_upload
+    # Guard read against EOF — \`set -e\` would otherwise kill the script
+    # before the default is applied (e.g. stdin closed after the first
+    # prompt, broken pipe).
+    if ! read -r -p "Upload now? [y/N] " ans_upload; then
+        ans_upload=""
+    fi
     ans_upload=\${ans_upload:-N}
     if [[ "\$ans_upload" =~ ^[Yy]\$ ]]; then
         # Bin name mixes timestamp + \$RANDOM so guessing the URL is
@@ -438,7 +443,9 @@ cmd_bug_report() {
     fi
 
     echo
-    read -r -p "Open the GitHub issue page in your browser? [Y/n] " ans_issue
+    if ! read -r -p "Open the GitHub issue page in your browser? [Y/n] " ans_issue; then
+        ans_issue=""
+    fi
     ans_issue=\${ans_issue:-Y}
     if [[ "\$ans_issue" =~ ^[Yy]\$ ]]; then
         local body
