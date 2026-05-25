@@ -131,28 +131,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_OWNER=${REPO_OWNER:-dirkwa}
 SK_IMAGE=${SK_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-server:dirkwa}
 
-# Engine containers default to `:latest`. This used to resolve a
-# specific semver tag from GHCR at install time, but that made the
-# engine permanently responsible for migrating its own Quadlet pin on
-# every update — fragile, and circular: a broken engine couldn't move
-# itself forward without an SSH-and-edit recovery.
-#
-# Now the model is:
-#   - The Quadlet's `Image=` says `:latest` (OperatorIntent = "stay on
-#     the channel").
-#   - The engine's self-update / doctor-update flows pull the specific
-#     semver tag explicitly, then `restartUnit` — podman picks up the
-#     just-pulled image because `:latest` now resolves to it. No
-#     Quadlet rewrite needed.
-#   - The Dashboard surfaces RuntimeIdentity (from /api/health.version)
-#     and Channel (from the Quadlet tag) separately, so the operator
-#     sees the actual semver next to the channel name. Floating tags
-#     stop being a UI footgun.
-#
-# UPDATER_IMAGE / DOCTOR_IMAGE env overrides still work for CI and
-# power users who want to point at a fork's `:master` or a pinned
-# semver. `lib/ghcr.sh::latest_stable_tag` stays around as a debug
-# helper but isn't called from the install path.
+# Engine Quadlets default to `:latest` (OperatorIntent = "stay on the
+# channel"). The engine's self-update / doctor-update flows pull a
+# specific semver tag explicitly before `restartUnit`, so podman picks
+# up the just-pulled image without rewriting the Quadlet. Full
+# rationale (and the reversal of PR #36's install-time pinning) lives
+# in AGENTS.md "Engine images run on :latest". UPDATER_IMAGE /
+# DOCTOR_IMAGE env overrides still work for CI.
 UPDATER_IMAGE=${UPDATER_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-updater-server:latest}
 DOCTOR_IMAGE=${DOCTOR_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-doctor-server:latest}
 

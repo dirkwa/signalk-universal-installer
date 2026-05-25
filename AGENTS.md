@@ -73,3 +73,20 @@ Paths the installer creates and the engine containers depend on:
 | `~/.local/bin/signalk-recovery` | installer | Static bash recovery script — works with zero containers running. |
 
 The installer never writes to `~/.signalk/` and never starts/stops `signalk-server` except via the updater's REST API (with a direct `systemctl --user start` fallback when the updater is unreachable).
+
+## Engine images run on `:latest`
+
+The Quadlets for `signalk-updater-server` and `signalk-doctor-server` pin `Image=ghcr.io/dirkwa/signalk-*-server:latest` by default. This is OperatorIntent = "stay on the channel" — the engine's own auth-gated self-update flow is the authoritative version-advancer.
+
+PR #36 once tried to resolve a specific semver tag from GHCR at install time and pin the Quadlet to it. That made the engine permanently responsible for migrating its own Quadlet pin on every update — fragile, and circular: a broken engine couldn't move itself forward without an SSH-and-edit recovery. PR-2 (after signalk-updater-server v0.6.4) reverses that decision.
+
+The new model relies on signalk-updater-server v0.6.4's separation of OperatorIntent (the Quadlet tag), RuntimeIdentity (the engine's `/api/health.version`), and LatestAvailable (the GHCR cache). When the operator clicks Self-update:
+
+1. The engine pulls a specific semver tag explicitly (`podman pull ghcr.io/dirkwa/signalk-updater-server:0.6.4`).
+2. `daemon-reload` + `restartUnit` fires.
+3. podman picks up the just-pulled image because `:latest` now resolves to it — no Quadlet rewrite required.
+4. The Dashboard's Updater card shows "Version: 0.6.4" (from `health.version`) and "Channel: :latest (stable)" (from the Quadlet) as separate rows.
+
+`UPDATER_IMAGE` / `DOCTOR_IMAGE` env vars still override at install time for CI and power-user setups. `installer/linux/lib/ghcr.sh::latest_stable_tag` remains in the tree as a debug helper but is not called from the install path.
+
+The signalk-server image is a separate case: it defaults to `:dirkwa` (the fork channel, not a version pin) and is updated via the engine's Versions tab, which DOES rewrite the Quadlet because version switching on the data plane is an operator-driven choice with semantic consequences (config compatibility, plugin breakage).
