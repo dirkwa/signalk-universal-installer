@@ -132,6 +132,33 @@ cmd_bug_report() {
 
     echo "[i] Collecting diagnostics into \$bundle"
 
+    # Pick a container runtime. On hosts where both CLIs are present we
+    # cannot guess from PATH alone — a developer with both installed
+    # commonly has signalk-* containers under only one of them, and
+    # picking the wrong one captures an empty bundle. Probe each engine
+    # for signalk-* containers and prefer whichever actually answers;
+    # only when neither has any (or one CLI is absent) fall back to
+    # podman > docker for parity with the rest of the installer. If
+    # neither is on PATH, CTR_CMD stays empty and the per-container
+    # block becomes a no-op rather than failing under \`set -e\`.
+    local CTR_CMD=""
+    local podman_ctrs="" docker_ctrs=""
+    if command -v podman >/dev/null 2>&1; then
+        podman_ctrs=\$(podman ps -a --filter 'name=signalk-' --format '{{.Names}}' 2>/dev/null || true)
+    fi
+    if command -v docker >/dev/null 2>&1; then
+        docker_ctrs=\$(docker ps -a --filter 'name=signalk-' --format '{{.Names}}' 2>/dev/null || true)
+    fi
+    if [[ -n "\$podman_ctrs" ]]; then
+        CTR_CMD=podman
+    elif [[ -n "\$docker_ctrs" ]]; then
+        CTR_CMD=docker
+    elif command -v podman >/dev/null 2>&1; then
+        CTR_CMD=podman
+    elif command -v docker >/dev/null 2>&1; then
+        CTR_CMD=docker
+    fi
+
     # Host context.
     {
         echo "=== signalk version ==="
@@ -169,6 +196,57 @@ cmd_bug_report() {
         echo "=== docker --version (if shim) ==="
         docker --version 2>&1 || true
     } >"\$bundle/runtime.txt" 2>&1
+
+    # Per-container inspect + logs for every signalk-* container.
+    # signalk-container spawns user-data containers (Grafana, InfluxDB,
+    # MQTT, …) alongside the three engine containers. They share the
+    # rootless idmap/cgroup/storage layer, so when "image switch" or
+    # "container won't start" is reported the cause is often in the
+    # HostConfig (Memory/PidsLimit), Mounts (UidMap/GidMap), or in the
+    # container's own logs — not in the engine's view of the world.
+    #
+    # podman inspect includes the full Env list, which routinely holds
+    # admin passwords for user containers (Grafana admin, InfluxDB
+    # token, MQTT broker auth). Redact env values (keep keys so a
+    # reviewer can see what the container expected); same model as
+    # pipedProviders' options below. Mounts are kept verbatim — paths
+    # are not secret and idmap settings (UidMap/GidMap) are the data we
+    # are after.
+    mkdir -p "\$bundle/containers"
+    if [[ -z "\$CTR_CMD" ]]; then
+        echo "(no container runtime on PATH — podman and docker both absent)" \\
+            >"\$bundle/containers/INDEX.txt"
+    else
+        mapfile -t SIGNALK_CTRS < <(
+            "\$CTR_CMD" ps -a --filter 'name=signalk-' --format '{{.Names}}' 2>/dev/null || true
+        )
+        {
+            echo "=== captured \${#SIGNALK_CTRS[@]} signalk-* container(s) via \$CTR_CMD ==="
+            printf '  %s\\n' "\${SIGNALK_CTRS[@]}"
+        } >"\$bundle/containers/INDEX.txt"
+        for ctr in "\${SIGNALK_CTRS[@]}"; do
+            [[ -n "\$ctr" ]] || continue
+            if command -v jq >/dev/null 2>&1; then
+                "\$CTR_CMD" inspect "\$ctr" 2>/dev/null \\
+                    | jq 'map(.Config.Env |= (
+                            if . == null then null
+                            else map(sub("(?<k>^[^=]+)=.*"; "\\(.k)=<redacted>"))
+                            end))' \\
+                    >"\$bundle/containers/\${ctr}.inspect.json" 2>&1 \\
+                    || echo "(\$CTR_CMD inspect or jq failed for \$ctr)" \\
+                        >"\$bundle/containers/\${ctr}.inspect.json"
+            else
+                # No jq → fall back to a clear marker, do not dump raw env.
+                echo "(jq not installed; skipping inspect dump to avoid leaking env values)" \\
+                    >"\$bundle/containers/\${ctr}.inspect.json"
+            fi
+            # Bounded logs — 500 lines is enough for a recent failure
+            # signature without ballooning the bundle for chatty containers
+            # (Grafana, InfluxDB).
+            "\$CTR_CMD" logs --tail 500 "\$ctr" \\
+                >"\$bundle/containers/\${ctr}.log" 2>&1 || true
+        done
+    fi
 
     # systemd-user state.
     {
@@ -270,6 +348,38 @@ cmd_bug_report() {
         done
     } >"\$bundle/console-health.txt" 2>&1
 
+    # Doctor + updater deep snapshots — the data needed to debug an
+    # image switch (operator-intent tag vs. running tag vs. reported
+    # version vs. last-known-good vs. snapshot inventory). Captured as
+    # raw JSON so jq queries against the bundle work post-hoc. The
+    # doctor's probes are unauthenticated by design; the updater's
+    # read-only endpoints used here (/api/health, /api/state,
+    # /api/hardware) are also unauthenticated. Mutating endpoints stay
+    # untouched. Save each endpoint to its own file so a single
+    # unreachable endpoint doesn't corrupt the rest, and so reviewers
+    # can grep for a specific shape.
+    mkdir -p "\$bundle/doctor" "\$bundle/updater"
+    for entry in \\
+        "doctor/health           \$DOCTOR_URL/api/health" \\
+        "doctor/probes           \$DOCTOR_URL/api/probes" \\
+        "doctor/snapshots        \$DOCTOR_URL/api/snapshots" \\
+        "doctor/last-good        \$DOCTOR_URL/api/last-good" \\
+        "updater/health          \$UPDATER_URL/api/health" \\
+        "updater/state           \$UPDATER_URL/api/state" \\
+        "updater/hardware        \$UPDATER_URL/api/hardware"; do
+        rel=\${entry%% *}
+        url=\${entry##* }
+        out="\$bundle/\${rel}.json"
+        if ! curl -fsS -m 10 -o "\$out" "\$url" 2>"\${out}.err"; then
+            # Move stderr next to the missing payload so the failure is
+            # visible without cross-referencing.
+            mv "\${out}.err" "\${out}" 2>/dev/null || true
+            echo "(failed to fetch \$url — see this file for curl error)" >>"\$out"
+        else
+            rm -f "\${out}.err" 2>/dev/null || true
+        fi
+    done
+
     # Hardware detection (non-secret).
     if [[ -f "\$HOME/.signalk-updater/hardware.json" ]]; then
         cp "\$HOME/.signalk-updater/hardware.json" "\$bundle/hardware.json"
@@ -366,6 +476,27 @@ cmd_bug_report() {
         echo
         echo "=== /sys/fs/cgroup/cgroup.controllers ==="
         cat /sys/fs/cgroup/cgroup.controllers 2>&1 || true
+        echo
+        # /etc/subuid + /etc/subgid drive the rootless idmap range
+        # podman allocates per container. "newuidmap: write to uid_map
+        # failed" or "no subuid ranges found for user X" failures land
+        # here, not in any of the other files.
+        echo "=== /etc/subuid (\$USER row) ==="
+        grep -E "^(\$USER|\$(id -u)):" /etc/subuid 2>&1 || echo "(no entry — rootless containers will fail to map)"
+        echo
+        echo "=== /etc/subgid (\$USER row) ==="
+        grep -E "^(\$USER|\$(id -u)):" /etc/subgid 2>&1 || echo "(no entry — rootless containers will fail to map)"
+        echo
+        # podman system info as JSON is much easier to grep post-hoc
+        # than the colored, multi-section default output already captured
+        # in runtime.txt. Skip silently if the runtime is docker.
+        if [[ "\$CTR_CMD" == "podman" ]]; then
+            echo "=== podman system info --format json ==="
+            podman system info --format json 2>&1 || true
+        elif [[ "\$CTR_CMD" == "docker" ]]; then
+            echo "=== docker info --format '{{json .}}' ==="
+            docker info --format '{{json .}}' 2>&1 || true
+        fi
     } >"\$bundle/storage-and-cgroup.txt" 2>&1
 
     # Tar it up.
@@ -378,10 +509,13 @@ cmd_bug_report() {
     echo "  \$tarball"
     echo
     echo "Contents are limited to host metadata, container state, recent journals,"
-    echo "and SignalK plugin metadata. Auth tokens are reported as presence-only"
+    echo "doctor probes + snapshot index, updater state (image tags/digests/versions),"
+    echo "per-container inspect + log tail for every signalk-* container, and"
+    echo "SignalK plugin metadata. Auth tokens are reported as presence-only"
     echo "(mode + 'present') and their values are NEVER included. SignalK plugin"
     echo "configuration bodies (which routinely hold secrets) are also NEVER included;"
-    echo "settings.json is included with pipedProviders' options redacted."
+    echo "settings.json is included with pipedProviders' options redacted. Container"
+    echo "env values are redacted in inspect dumps (keys preserved)."
 
     # Optional upload + issue-opening. Two prompts because the privacy
     # tradeoff is real: filebin.net is unauthenticated public storage

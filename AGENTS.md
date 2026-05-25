@@ -90,3 +90,17 @@ The model relies on signalk-updater-server's separation of OperatorIntent (the Q
 `UPDATER_IMAGE` / `DOCTOR_IMAGE` env vars still override at install time for CI and power-user setups. `installer/linux/lib/ghcr.sh::latest_stable_tag` remains in the tree as a debug helper but is not called from the install path.
 
 The signalk-server image is a separate case: it defaults to `:dirkwa` (the fork channel, not a version pin) and is updated via the engine's Versions tab, which DOES rewrite the Quadlet because version switching on the data plane is an operator-driven choice with semantic consequences (config compatibility, plugin breakage).
+
+## Three-tier recovery model
+
+Each tier is independent of the one above it. Changes that touch any of them must preserve that independence.
+
+1. **Updater Console (`:3003`)** — the normal-path UI for version switches and self-update.
+2. **Doctor Console (`:3004`)** — independent of the updater; owns last-known-good snapshots and can recover when the updater is broken. The doctor's read-only probes are deliberately unauthenticated so recovery always answers; only `/api/recover` is token-gated.
+3. **`~/.local/bin/signalk-recovery`** (installed by `installer/linux/install-recovery-script.sh`) — a static bash script that works with zero containers running; the SSH-only safety net.
+
+The updater's mutating endpoints are token-gated regardless of bind address.
+
+## `install-signalk-command.sh` is a heredoc
+
+`installer/linux/install-signalk-command.sh` writes `~/.local/bin/signalk` as a heredoc. **Every `$` inside the dispatcher body must be escaped as `\$`** — otherwise it expands at install time, not at run time. The single intentional unescaped expansion is `${SK_VERSION}` near the top, which bakes the installer version into the script.
