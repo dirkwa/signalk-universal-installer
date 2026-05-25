@@ -38,7 +38,11 @@ EOF
 
 newest_snapshot() {
     local quadlet=$1
-    ls -1t "$SNAP_DIR"/*"-${quadlet}.container" 2>/dev/null | head -1
+    # find + sort handles non-alphanumeric filenames safely (shellcheck SC2012).
+    # %T@ %p prints mtime-since-epoch + path; sort -nr picks the newest first.
+    find "$SNAP_DIR" -maxdepth 1 -type f -name "*-${quadlet}.container" \
+        -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr | head -1 | cut -d' ' -f2-
 }
 
 show_status() {
@@ -104,7 +108,11 @@ cmd_rollback_doctor() {
 cmd_rollback_all() {
     local svcs=()
     for q in "${QUADLETS[@]}"; do
-        restore_one "$q" && svcs+=("$q") || true
+        # Plain if-then so a successful restore_one followed by a failing
+        # svcs+= doesn't trip the C branch (shellcheck SC2015).
+        if restore_one "$q"; then
+            svcs+=("$q")
+        fi
     done
     reload_and_restart "${svcs[@]}"
 }
