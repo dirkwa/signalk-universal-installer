@@ -521,11 +521,16 @@ section "systemd-user daemon-reload"
 systemctl --user daemon-reload
 ok "daemon-reload OK"
 
-# 12. Start doctor + updater
-section "Starting peer containers"
-systemctl --user start signalk-doctor-server.service
-systemctl --user start signalk-updater-server.service
-ok "doctor and updater units started"
+# 12. (Re)start doctor + updater
+# `restart` instead of `start` so a re-run picks up the rewritten Quadlet
+# even when the unit is already active. `systemctl start` on an active unit
+# is a no-op — the old container keeps running and the new `Image=` line
+# on disk goes unused until the next reboot. `restart` is equivalent to
+# `start` for inactive units, so the first-boot path is unaffected.
+section "(Re)starting peer containers"
+systemctl --user restart signalk-doctor-server.service
+systemctl --user restart signalk-updater-server.service
+ok "doctor and updater units (re)started"
 
 # 13. Wait for health (first-boot tolerant per R1.3)
 section "Health checks"
