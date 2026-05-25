@@ -394,6 +394,19 @@ cmd_bug_report() {
     local issue_url_base="https://github.com/SignalK/signalk-server/issues/new"
     local tarball_url=""
 
+    # Non-interactive callers (cron, CI, \`signalk bug-report < /dev/null\`)
+    # would see \`read\` return immediately with an empty string, and the
+    # issue-page prompt's default-Y would then silently spawn xdg-open.
+    # Skip both prompts when stdin isn't a TTY and just print the manual
+    # instructions.
+    if [[ ! -t 0 ]]; then
+        echo
+        echo "Non-interactive shell — skipping upload and browser prompts."
+        echo "Attach \$tarball to a new issue at:"
+        echo "  \$issue_url_base"
+        return
+    fi
+
     echo
     echo "Upload the bundle to filebin.net so it can be linked from the issue?"
     echo "  - filebin.net is PUBLIC: anyone with the bin URL can download it."
