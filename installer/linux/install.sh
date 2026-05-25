@@ -131,24 +131,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_OWNER=${REPO_OWNER:-dirkwa}
 SK_IMAGE=${SK_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-server:dirkwa}
 
-# Resolve the latest published stable tag for each engine container at
-# install time. Avoids the :latest drift trap — a fresh install pinned
-# to :latest pulls one digest at boot and never re-resolves, so every
-# operator ends up running whatever the registry happened to point
-# :latest at on install day. Pinning to an explicit semver tag means
-# the updater's own self-update flow is the only thing that ever
-# advances the version, which is the model we want.
-#
-# Honors UPDATER_IMAGE / DOCTOR_IMAGE env overrides so CI and power
-# users can still point at a specific image (e.g. a fork's :master).
-if [[ -z ${UPDATER_IMAGE:-} ]]; then
-    UPDATER_TAG=$(latest_stable_tag "${REPO_OWNER}/signalk-updater-server")
-    UPDATER_IMAGE="ghcr.io/${REPO_OWNER}/signalk-updater-server:${UPDATER_TAG}"
-fi
-if [[ -z ${DOCTOR_IMAGE:-} ]]; then
-    DOCTOR_TAG=$(latest_stable_tag "${REPO_OWNER}/signalk-doctor-server")
-    DOCTOR_IMAGE="ghcr.io/${REPO_OWNER}/signalk-doctor-server:${DOCTOR_TAG}"
-fi
+# Engine Quadlets default to `:latest` (OperatorIntent = "stay on the
+# channel"). The engine's self-update / doctor-update flows pull a
+# specific semver tag explicitly before `restartUnit`, so podman picks
+# up the just-pulled image without rewriting the Quadlet. Full
+# rationale (and the reversal of PR #36's install-time pinning) lives
+# in AGENTS.md "Engine images run on :latest". UPDATER_IMAGE /
+# DOCTOR_IMAGE env overrides still work for CI.
+UPDATER_IMAGE=${UPDATER_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-updater-server:latest}
+DOCTOR_IMAGE=${DOCTOR_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-doctor-server:latest}
 
 QUADLET_DIR="${HOME}/.config/containers/systemd"
 UPDATER_DATA="${HOME}/.signalk-updater"
