@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# signalk-recovery — host-resident SignalK safety net.
+# Installed by signalk-universal-installer. Does not depend on any
+# container being running; talks only to ~/.config/containers/systemd/
+# and `systemctl --user`. Usage:
+#
+#   signalk-recovery status            — show current and last-good tags
+#   signalk-recovery rollback-server   — restore signalk-server quadlet
+#   signalk-recovery rollback-updater  — restore updater quadlet
+#   signalk-recovery rollback-doctor   — restore doctor quadlet
+#   signalk-recovery rollback-all      — restore all three
+#   signalk-recovery doctor            — print diagnostics dump
+
+set -euo pipefail
+
+QUADLET_DIR="${HOME}/.config/containers/systemd"
+SNAP_DIR="${HOME}/.signalk-doctor/snapshots"
+LAST_GOOD="${HOME}/.signalk-doctor/last-good.json"
+
+QUADLETS=(signalk-server signalk-updater-server signalk-doctor-server)
+
+usage() {
+    cat <<EOF
+signalk-recovery — SignalK out-of-band recovery (no containers required).
+
+Commands:
+  status                   show current tags and last-known-good state
+  rollback-server          restore signalk-server.container from last-known-good
+  rollback-updater         restore signalk-updater-server.container from last-known-good
+  rollback-doctor          restore signalk-doctor-server.container from last-known-good
+  rollback-all             restore all three quadlets
+  doctor                   dump systemd, podman, and last-error diagnostics
+
+Snapshots live under: $SNAP_DIR
+Last-known-good index:  $LAST_GOOD
+EOF
+}
+
+newest_snapshot() {
+    local quadlet=$1
+    ls -1t "$SNAP_DIR"/*"-${quadlet}.container" 2>/dev/null | head -1
+}
+
+show_status() {
+    echo "Quadlet directory:  $QUADLET_DIR"
+    echo "Snapshot directory: $SNAP_DIR"
+    echo "Last-good index:    $LAST_GOOD"
+    echo
+    for q in "${QUADLETS[@]}"; do
+        local file="$QUADLET_DIR/${q}.container"
+        local active
+        active=$(systemctl --user is-active "${q}.service" 2>/dev/null || true)
+        active=${active%%$'\n'*}
+        [[ -z "$active" ]] && active="unknown"
+        local image
+        image=""
+        if [[ -f "$file" ]]; then
+            image=$(awk -F= '/^Image=/{print $2; exit}' "$file")
+        fi
+        local newest
+        newest=$(newest_snapshot "$q" || true)
+        printf '  %-28s active=%-12s image=%s\n' "$q" "$active" "${image:-<no quadlet>}"
+        if [[ -n "$newest" ]]; then
+            printf '  %-28s newest-snapshot=%s\n' "" "$newest"
+        fi
+    done
+}
+
+restore_one() {
+    local quadlet=$1
+    local src
+    src=$(newest_snapshot "$quadlet" || true)
+    if [[ -z "$src" ]]; then
+        echo "no snapshot found for $quadlet" >&2
+        return 1
+    fi
+    local target="$QUADLET_DIR/${quadlet}.container"
+    local tmp="${target}.recover.$$"
+    cp -p "$src" "$tmp"
+    mv -f "$tmp" "$target"
+    echo "restored: $quadlet (from $src)"
+}
+
+reload_and_restart() {
+    local services=("$@")
+    systemctl --user daemon-reload
+    for s in "${services[@]}"; do
+        systemctl --user try-restart "${s}.service" || true
+    done
+}
+
+cmd_rollback_server() {
+    restore_one signalk-server
+    reload_and_restart signalk-server
+}
+cmd_rollback_updater() {
+    restore_one signalk-updater-server
+    reload_and_restart signalk-updater-server
+}
+cmd_rollback_doctor() {
+    restore_one signalk-doctor-server
+    reload_and_restart signalk-doctor-server
+}
+cmd_rollback_all() {
+    local svcs=()
+    for q in "${QUADLETS[@]}"; do
+        restore_one "$q" && svcs+=("$q") || true
+    done
+    reload_and_restart "${svcs[@]}"
+}
+
+cmd_doctor() {
+    echo "--- podman ps ---"
+    podman ps -a --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>&1 || true
+    echo
+    echo "--- systemd-user signalk-* units ---"
+    systemctl --user list-units --all 'signalk-*' 2>&1 || true
+    echo
+    echo "--- journalctl --user signalk-* (last 30 lines each) ---"
+    for s in "${QUADLETS[@]}"; do
+        echo "[${s}]"
+        journalctl --user -u "${s}.service" -n 30 --no-pager 2>&1 || true
+        echo
+    done
+    echo "--- last-good.json ---"
+    cat "$LAST_GOOD" 2>/dev/null || echo "(missing)"
+}
+
+case "${1:-status}" in
+    status)           show_status ;;
+    rollback-server)  cmd_rollback_server ;;
+    rollback-updater) cmd_rollback_updater ;;
+    rollback-doctor)  cmd_rollback_doctor ;;
+    rollback-all)     cmd_rollback_all ;;
+    doctor)           cmd_doctor ;;
+    -h|--help|help)   usage ;;
+    *)                usage; exit 1 ;;
+esac

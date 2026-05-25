@@ -24,11 +24,11 @@ jobs:
               echo "::error file=$f::bash -n syntax error"
               fail=1
             fi
-          done < <(find installer scripts -type f \( -name '*.sh' -o -name '*.bash' \) -print0)
+          done < <(find installer scripts -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.tmpl' \) -print0)
           exit "$fail"
 
       - name: shellcheck
         run: |
           set -euo pipefail
-          find installer scripts -type f \( -name '*.sh' -o -name '*.bash' \) -print0 |
+          find installer scripts -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.tmpl' \) -print0 |
             xargs -0 shellcheck
