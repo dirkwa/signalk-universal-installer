@@ -4,13 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 See [AGENTS.md](AGENTS.md) for the canonical workflow conventions (branch/commit rules, PR rules, pre-PR checklist, release flow), the filesystem invariants the engine containers depend on, and the "engine images run on `:latest`" rationale. **Read AGENTS.md first** — it is the source of truth for how to make changes here. The notes below cover what AGENTS.md does not.
 
-## Repository layout
+## Shape of this repo
 
-- `installer/{linux,macos,windows}/` — platform bootstrappers. `install.sh` orchestrates the install on Linux; sibling scripts (`detect-hardware.sh`, `install-recovery-script.sh`, `install-signalk-command.sh`, `legacy-cleanup.sh`, `preflight.sh`, `render-server-quadlet.sh`) are sourced or invoked from it. `installer/linux/lib/` holds reusable helpers (`colors.sh`, `distro.sh`, `ghcr.sh`, `http.sh`).
-- `quadlets/*.container.template` — systemd-user Quadlet templates for the three engine containers (`signalk-server`, `signalk-updater-server`, `signalk-doctor-server`). Variables are substituted at install time.
-- `scripts/doctor.sh`, `scripts/uninstall.sh` — standalone host-side tools, served from GitHub Pages so they work even when the engine containers are dead.
-- `docs/{installation,recovery,hardware}.md` — operator-facing documentation.
-- No build system. No `package.json`. Everything is shell scripts published verbatim via GitHub Pages on push to `master`.
+Pure bash + PowerShell. No build system, no `package.json`. Scripts are published verbatim via GitHub Pages on push to `master` and to `v*` tags — so an edit to any `.sh` is what users will execute. There is no test suite; "tests" mean running the actual installer on a clean target. AGENTS.md's "Filesystem invariants" table is the authoritative list of paths the engine containers depend on.
 
 ## The user-facing `signalk` command
 
@@ -28,6 +24,6 @@ The installer respects an invariant that the engine containers also enforce:
 
 Changes that touch any of these tiers must preserve this independence. In particular, the doctor's read-only probes are deliberately unauthenticated so that recovery always answers; the updater's mutating endpoints are token-gated regardless of bind address.
 
-## Linting and pre-PR checks
+## Pre-PR checks
 
-See AGENTS.md's "Pre-PR checklist" — the canonical sequence is `shellcheck` over `installer/**/*.sh scripts/*.sh`, then `bash -n` for syntax, then manual smoke on a clean VM/container, then `cr review --plain | tee /tmp/cr-review-<branch>.txt`. There is no test suite to run; "tests" here mean running the actual installer on a clean target.
+See AGENTS.md's "Pre-PR checklist" — the same gates apply to Claude-authored changes here.
