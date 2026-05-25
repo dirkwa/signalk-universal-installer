@@ -132,13 +132,28 @@ cmd_bug_report() {
 
     echo "[i] Collecting diagnostics into \$bundle"
 
-    # Pick a container runtime. Prefer podman (rootless default) but
-    # fall back to docker so users on rootful docker or a docker shim
-    # still get container state in the bundle. If neither is on PATH,
-    # CTR_CMD stays empty and the per-container block becomes a no-op
-    # rather than failing under \`set -e\`.
+    # Pick a container runtime. On hosts where both CLIs are present we
+    # cannot guess from PATH alone — a developer with both installed
+    # commonly has signalk-* containers under only one of them, and
+    # picking the wrong one captures an empty bundle. Probe each engine
+    # for signalk-* containers and prefer whichever actually answers;
+    # only when neither has any (or one CLI is absent) fall back to
+    # podman > docker for parity with the rest of the installer. If
+    # neither is on PATH, CTR_CMD stays empty and the per-container
+    # block becomes a no-op rather than failing under \`set -e\`.
     local CTR_CMD=""
+    local podman_ctrs="" docker_ctrs=""
     if command -v podman >/dev/null 2>&1; then
+        podman_ctrs=\$(podman ps -a --filter 'name=signalk-' --format '{{.Names}}' 2>/dev/null || true)
+    fi
+    if command -v docker >/dev/null 2>&1; then
+        docker_ctrs=\$(docker ps -a --filter 'name=signalk-' --format '{{.Names}}' 2>/dev/null || true)
+    fi
+    if [[ -n "\$podman_ctrs" ]]; then
+        CTR_CMD=podman
+    elif [[ -n "\$docker_ctrs" ]]; then
+        CTR_CMD=docker
+    elif command -v podman >/dev/null 2>&1; then
         CTR_CMD=podman
     elif command -v docker >/dev/null 2>&1; then
         CTR_CMD=docker
