@@ -389,8 +389,11 @@ cmd_bug_report() {
     # has tokens/pipedProviders redacted, it still contains settings.json,
     # hardware.json, plugin versions, and 24h of journals. Operators on
     # shared boats or with custom plugins should know that before they
-    # upload. Default is N for the upload, Y for opening the issue page
-    # (since opening a browser is harmless on its own).
+    # upload. Both defaults are Y — most operators running \`signalk
+    # bug-report\` want to file an issue, and a default-N upload
+    # silently produced "attach this file manually" bodies that surprised
+    # users in practice. The explicit consent text above makes the
+    # tradeoff visible; operators with concerns can type N.
     local issue_url_base="https://github.com/SignalK/signalk-server/issues/new"
     local tarball_url=""
 
@@ -418,10 +421,10 @@ cmd_bug_report() {
     # Guard read against EOF — \`set -e\` would otherwise kill the script
     # before the default is applied (e.g. stdin closed after the first
     # prompt, broken pipe).
-    if ! read -r -p "Upload now? [y/N] " ans_upload; then
+    if ! read -r -p "Upload now? [Y/n] " ans_upload; then
         ans_upload=""
     fi
-    ans_upload=\${ans_upload:-N}
+    ans_upload=\${ans_upload:-Y}
     if [[ "\$ans_upload" =~ ^[Yy]\$ ]]; then
         # Bin name mixes timestamp + \$RANDOM so guessing the URL is
         # infeasible; this is the only access control filebin offers.
