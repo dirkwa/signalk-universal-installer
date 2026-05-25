@@ -270,6 +270,38 @@ cmd_bug_report() {
         done
     } >"\$bundle/console-health.txt" 2>&1
 
+    # Doctor + updater deep snapshots — the data needed to debug an
+    # image switch (operator-intent tag vs. running tag vs. reported
+    # version vs. last-known-good vs. snapshot inventory). Captured as
+    # raw JSON so jq queries against the bundle work post-hoc. The
+    # doctor's probes are unauthenticated by design; the updater's
+    # read-only endpoints used here (/api/health, /api/state,
+    # /api/hardware) are also unauthenticated. Mutating endpoints stay
+    # untouched. Save each endpoint to its own file so a single
+    # unreachable endpoint doesn't corrupt the rest, and so reviewers
+    # can grep for a specific shape.
+    mkdir -p "\$bundle/doctor" "\$bundle/updater"
+    for entry in \\
+        "doctor/health           \$DOCTOR_URL/api/health" \\
+        "doctor/probes           \$DOCTOR_URL/api/probes" \\
+        "doctor/snapshots        \$DOCTOR_URL/api/snapshots" \\
+        "doctor/last-good        \$DOCTOR_URL/api/last-good" \\
+        "updater/health          \$UPDATER_URL/api/health" \\
+        "updater/state           \$UPDATER_URL/api/state" \\
+        "updater/hardware        \$UPDATER_URL/api/hardware"; do
+        rel=\${entry%% *}
+        url=\${entry##* }
+        out="\$bundle/\${rel}.json"
+        if ! curl -fsS -m 10 -o "\$out" "\$url" 2>"\${out}.err"; then
+            # Move stderr next to the missing payload so the failure is
+            # visible without cross-referencing.
+            mv "\${out}.err" "\${out}" 2>/dev/null || true
+            echo "(failed to fetch \$url — see this file for curl error)" >>"\$out"
+        else
+            rm -f "\${out}.err" 2>/dev/null || true
+        fi
+    done
+
     # Hardware detection (non-secret).
     if [[ -f "\$HOME/.signalk-updater/hardware.json" ]]; then
         cp "\$HOME/.signalk-updater/hardware.json" "\$bundle/hardware.json"
@@ -378,6 +410,7 @@ cmd_bug_report() {
     echo "  \$tarball"
     echo
     echo "Contents are limited to host metadata, container state, recent journals,"
+    echo "doctor probes + snapshot index, updater state (image tags/digests/versions),"
     echo "and SignalK plugin metadata. Auth tokens are reported as presence-only"
     echo "(mode + 'present') and their values are NEVER included. SignalK plugin"
     echo "configuration bodies (which routinely hold secrets) are also NEVER included;"
