@@ -36,6 +36,15 @@ Volume=%t/podman/podman.sock:/var/run/docker.sock
 
 Environment=SIGNALK_NODE_CONF_DIR=/home/node/.signalk
 
+# Cut podman's SIGTERM → SIGKILL grace from the default 10s to 5s.
+# signalk-server doesn't trap SIGTERM (no handler in bin/signalk-server
+# upstream), so the full grace is dead time on every version switch
+# regardless. Until upstream lands a graceful shutdown handler, 5s is
+# enough for the kernel to deliver SIGTERM, Node to ignore it, and
+# podman to follow up with SIGKILL — without making the user wait
+# the full 10s. Maps to podman's --stop-timeout flag.
+StopTimeout=5
+
 Label=io.signalk.managed-by=updater
 Label=io.signalk.role=server
 
