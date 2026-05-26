@@ -6,7 +6,9 @@
 #   signalk health         show stack health (containers, services, URLs)
 #   signalk recover [...]  delegate to ~/.local/bin/signalk-recovery
 #   signalk update         refresh installer scripts + Quadlet templates via doctor
-#   signalk bug-report     bundle logs + state into /tmp/signalk-bug-report-*.tar.gz
+#   signalk bug-report [--to <dir>]
+#                          bundle logs + state into <dir>/signalk-bug-report-*.tar.gz
+#                          (default: /tmp)
 #   signalk uninstall      stop services + remove Quadlets (preserves data)
 #   signalk version        print installer version
 #   signalk help           show this help
@@ -23,7 +25,7 @@ QUADLET_DIR="${HOME}/.config/containers/systemd"
 UNITS=(signalk-server signalk-updater-server signalk-doctor-server)
 
 usage() {
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 cmd_version() {
@@ -184,6 +186,41 @@ cmd_uninstall() {
 }
 
 cmd_bug_report() {
+    # Output directory for the final tarball. Defaults to /tmp (the
+    # historical behavior), but the `--to <dir>` flag lets callers like
+    # signalk-doctor-server's POST /api/bug-report point this at a
+    # container-readable path (e.g. ~/.signalk-doctor/bug-reports/ which
+    # is bind-mounted into the doctor at /data/bug-reports).
+    local tarball_dir="/tmp"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to)
+                if [[ -z "${2:-}" ]]; then
+                    echo "[ERR] --to requires a directory argument" >&2
+                    return 1
+                fi
+                tarball_dir="$2"
+                shift 2
+                ;;
+            --to=*)
+                tarball_dir="${1#--to=}"
+                shift
+                ;;
+            *)
+                echo "[ERR] Unknown bug-report argument: $1" >&2
+                return 1
+                ;;
+        esac
+    done
+    if ! mkdir -p "$tarball_dir" 2>/dev/null; then
+        echo "[ERR] cannot create output directory $tarball_dir" >&2
+        return 1
+    fi
+    if [[ ! -w "$tarball_dir" ]]; then
+        echo "[ERR] output directory $tarball_dir is not writable" >&2
+        return 1
+    fi
+
     local stamp
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     local outdir
@@ -561,7 +598,7 @@ cmd_bug_report() {
     } >"$bundle/storage-and-cgroup.txt" 2>&1
 
     # Tar it up.
-    local tarball="/tmp/signalk-bug-report-$stamp.tar.gz"
+    local tarball="$tarball_dir/signalk-bug-report-$stamp.tar.gz"
     tar -C "$outdir" -czf "$tarball" "signalk-bug-report-$stamp"
     rm -rf "$outdir"
 
@@ -691,7 +728,7 @@ case "${1:-help}" in
     health)     cmd_health ;;
     recover)    shift; cmd_recover "$@" ;;
     update)     cmd_update ;;
-    bug-report) cmd_bug_report ;;
+    bug-report) shift; cmd_bug_report "$@" ;;
     uninstall)  cmd_uninstall ;;
     version|--version|-v) cmd_version ;;
     help|--help|-h) usage ;;
