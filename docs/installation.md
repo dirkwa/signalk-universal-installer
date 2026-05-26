@@ -107,7 +107,7 @@ usbipd bind --busid <BUSID>
 usbipd attach --wsl --busid <BUSID>     # while WSL is running
 ```
 
-Then in WSL, the device shows up as `/dev/ttyUSB0` etc. Re-run the bash installer inside WSL to re-detect hardware and rewrite the signalk-server Quadlet's `AddDevice=` lines (the Updater Console's in-browser Hardware tab is a deferred Roadmap item).
+Then in WSL, the device shows up as `/dev/ttyUSB0` etc. Re-run the bash installer inside WSL to re-detect hardware and rewrite the signalk-server Quadlet's `AddDevice=` lines. (The Updater Console has no Hardware tab — see [docs/hardware.md](hardware.md) for the supported re-detection paths.)
 
 ## Recovery
 

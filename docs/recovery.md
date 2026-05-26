@@ -61,6 +61,7 @@ Open SSH and use the bash recovery script:
 No containers need to be running for this to work — it's pure bash + systemd.
 
 <a id="stuck-operation-lock"></a>
+
 ## Scenario: stuck operation.lock
 
 `~/.signalk-updater/operation.lock` is a cross-engine file mutex serialising version switches, self-updates, doctor-switches, hardware-applies, and recovery operations. Every flow acquires it in a `try`/`finally` so it normally releases in seconds (a clean stop) to a few minutes (a switch that times out and rolls back).
@@ -80,8 +81,6 @@ rm ~/.signalk-updater/operation.lock
 ```
 
 The lock lives on a host bind-mount (`~/.signalk-updater/`), so restarting the updater container doesn't clear it on its own — only `rm` (or a re-run of the previously-stuck operation reaching its own `finally`) does. After removing the file, retry the operation that was blocked.
-
-`signalk-recovery` does not currently provide a force-clear subcommand for this; a future release may add one.
 
 ## Scenario: corrupted state files
 

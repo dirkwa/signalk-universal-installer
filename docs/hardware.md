@@ -8,7 +8,7 @@ The installer detects host hardware at install time and passes it through to the
 |---|---|---|---|
 | **USB serial** | Every entry under `/dev/serial/by-id/*` (stable across renumbering) | **Enabled** — most boats want USB-serial gateways (NMEA0183, NMEA2000 via Actisense / Yacht Devices / iKommunicate) reachable from signalk-server | `{ byId, vendor, product, enabled }` per device |
 | **SocketCAN** | `ip -o link show type can` (every `can*` netlink interface) | Disabled (requires explicit opt-in) — CAN interfaces can be physical (NGT-1 plugged in over USB-CAN) or virtual (`vcan0` for testing) and surfacing them all by default is noisy | `{ interface, type: "socketcan", enabled }` per interface |
-| **Bluetooth (DBus)** | Presence of `/run/dbus/system_bus_socket` | Disabled — BLE on linux requires shared host DBus and not every install needs it | `{ enabled, dbusAvailable }` (no per-device list; toggle adds a single DBus passthrough) |
+| **Bluetooth (DBus)** | Presence of `/run/dbus/system_bus_socket` | Disabled — BLE on Linux requires the host DBus to be shared into the container, and not every install needs it | `{ enabled, dbusAvailable }` (no per-device list; toggle adds a single DBus passthrough) |
 | **Raspberry Pi GPIO** | `/proc/device-tree/model` matched against `Pi[ ]*[3-5]` | Disabled (opt-in) — only meaningful on Pi hosts | `{ enabled, platform: "rpi5"\|"rpi4"\|"rpi3"\|"rpi-other"\|"none" }` |
 
 For each enabled entry the renderer (`render-server-quadlet.sh`) emits an `AddDevice=` line (USB serial, CAN) or a `Volume=` line (DBus, GPIO) inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. Anything outside that block — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
@@ -27,12 +27,15 @@ The installer adds you to all three at step 5 of `install.sh`. Group changes onl
 
 ## Re-running detection
 
-Hardware changes (plugging in a new USB gateway, adding a CAN interface) require re-running detection so the Quadlet picks them up. Two paths:
+Hardware changes (plugging in a new USB gateway, adding a CAN interface) require re-running detection so the Quadlet picks them up. The supported path is to re-run the bash installer:
 
-1. **Re-run the bash installer.** `curl … | bash` is idempotent; it re-runs `detect-hardware.sh`, the result feeds into a Quadlet rewrite via `render-server-quadlet.sh`, and `systemctl --user daemon-reload` + `restart signalk-server.service` picks up the new `AddDevice=` lines.
-2. **The Updater Console's Hardware tab** — planned, not yet implemented. The REST endpoint `POST /api/hardware/apply` exists and is tested; the in-browser UI for toggling individual devices on/off is a deferred Roadmap item.
+```bash
+curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
+```
 
-The `hardware.json` file is the source of truth — if you want to disable a USB-serial device you'd otherwise pass through, edit the `enabled` field directly and re-run `render-server-quadlet.sh` (or trigger `/api/hardware/apply` with the new payload).
+`curl … | bash` is idempotent; it re-runs `detect-hardware.sh`, the result feeds into a Quadlet rewrite via `render-server-quadlet.sh`, and `systemctl --user daemon-reload` + `restart signalk-server.service` picks up the new `AddDevice=` lines.
+
+The `hardware.json` file is the source of truth: if you want to disable a USB-serial device you'd otherwise pass through, edit the `enabled` field directly and either re-run the installer (which calls `render-server-quadlet.sh` for you) or POST the new payload to `/api/hardware/apply` on the Updater (bearer-token-gated).
 
 ## Platform notes
 
