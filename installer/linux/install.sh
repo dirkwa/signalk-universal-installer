@@ -765,16 +765,20 @@ esac
 
 # 17. Journald limits.
 section "Journald retention drop-in"
-info "Capping journald to 500M / 14 days (requires sudo)"
-$SUDO install -d -m 0755 /etc/systemd/journald.conf.d
-$SUDO tee /etc/systemd/journald.conf.d/signalk.conf >/dev/null <<EOF
-# Installed by signalk-universal-installer
+JOURNALD_DROPIN=/etc/systemd/journald.conf.d/signalk.conf
+JOURNALD_DESIRED='# Installed by signalk-universal-installer
 [Journal]
 SystemMaxUse=500M
-MaxRetentionSec=14day
-EOF
-$SUDO systemctl restart systemd-journald
-ok "journald limits applied"
+MaxRetentionSec=14day'
+if [[ -f "$JOURNALD_DROPIN" ]] && [[ "$(cat "$JOURNALD_DROPIN" 2>/dev/null)" == "$JOURNALD_DESIRED" ]]; then
+    ok "journald limits already applied (skipping)"
+else
+    info "Capping journald to 500M / 14 days (requires sudo)"
+    $SUDO install -d -m 0755 /etc/systemd/journald.conf.d
+    printf '%s\n' "$JOURNALD_DESIRED" | $SUDO tee "$JOURNALD_DROPIN" >/dev/null
+    $SUDO systemctl restart systemd-journald
+    ok "journald limits applied"
+fi
 
 # 18. Mark bootstrap-complete
 section "Recording bootstrap state"
