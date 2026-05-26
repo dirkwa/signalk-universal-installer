@@ -2,17 +2,17 @@
 
 Bash/PowerShell bootstrap for the SignalK container stack on Linux, macOS, and Windows (WSL2).
 
-> Status: **v0.1.0 — first end-to-end runnable release.** Engine container images published to GHCR; the `curl … | bash` one-liner is wired up and ready for real-VM smoke testing. See "Roadmap" below for what's deferred.
-
 ## What this installs
 
 A peer-container stack managed by `systemd --user`:
 
 - `signalk-server` — the SignalK Node Server in a container.
-- `signalk-updater-server` — image lifecycle, version switching, self-update, hardware UI (`:3003`).
-- `signalk-doctor-server` — read-only diagnostics, last-known-good recovery, the offline safety net (`:3004`).
+- `signalk-updater-server` — image lifecycle, version switching, self-update, hardware passthrough (`:3003`). Web console with Dashboard / Versions / Logs tabs.
+- `signalk-doctor-server` — read-only diagnostics, last-known-good recovery, the offline safety net (`:3004`). Web console with Health / Drift / Logs / Snapshots / Recover / Installer tabs.
 
-All three run rootless under Podman with `Restart=on-failure` + crashloop guards. Recovery never depends on `signalk-server` being healthy, and never depends on the updater being healthy — the doctor is independent of both, and a host-resident bash script (`~/.local/bin/signalk-recovery`) backs both of them when neither container can respond.
+All three run rootless under Podman. `signalk-updater-server` and `signalk-doctor-server` use `Restart=on-failure`; `signalk-server` uses `Restart=always` (the admin UI's "Restart" button does a clean `process.exit(0)` that `on-failure` wouldn't recover from). Both policies sit behind `StartLimitIntervalSec=300` + `StartLimitBurst=5` crashloop guards. Recovery never depends on `signalk-server` being healthy, and never depends on the updater being healthy — the doctor is independent of both, and a host-resident bash script (`~/.local/bin/signalk-recovery`) backs both of them when neither container can respond.
+
+During bootstrap, the installer runs `npm install` for three companion SignalK plugins (`signalk-container`, `signalk-updater`, `signalk-doctor`) inside the `signalk-server` container — the container does the actual writes to its `~/.signalk/` mount — and seeds default plugin config files (if absent). User-disabled plugins are never re-enabled on re-runs.
 
 ## Components
 
@@ -28,7 +28,7 @@ All three run rootless under Podman with `Restart=on-failure` + crashloop guards
 ## Quick start
 
 ```bash
-# Linux (Debian 13, Ubuntu 24.04+, Raspberry Pi OS bookworm+)
+# Linux (Debian 13 / trixie, Ubuntu 24.04+, Raspberry Pi OS trixie+)
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
 
 # macOS (Apple Silicon and Intel; Homebrew required)
@@ -46,14 +46,11 @@ Then open:
 
 See [docs/installation.md](docs/installation.md) for the full per-platform walkthrough, and [docs/recovery.md](docs/recovery.md) for the recovery playbook.
 
-## Roadmap
+## Known limitations
 
-Things deferred to follow-up PRs (not blockers for v0.1.0):
-
-- **Webapp UI for the engine containers.** Phases 4 and 5 built REST APIs only; a real UI (Vite + React + shadcn) is a separate effort. For now `curl`-driven workflows work end-to-end.
-- **Persistent-label config-panel hiding.** signalk-container 1.11+ will hide Stop/Remove for `io.signalk.persistent=true` containers in its config UI. The label write path is in place (`ContainerConfig.labels`) but the UI affordance isn't.
-- **Hardware re-detect from inside the container.** Phase 10 added the apply path; re-running detection still requires SSH + `signalk-recovery doctor` or `detect-hardware.sh`.
-- **Pi 5 / Pi 4 / macOS / Windows real-hardware smoke tests.** Documented in `docs/installation.md`; runs in front of physical devices.
+- **Hardware device toggling requires re-running the installer.** The `POST /api/hardware/apply` endpoint and on-disk `~/.signalk-updater/hardware.json` work end-to-end; the Updater Console doesn't expose a Hardware tab, so toggling individual devices on or off means editing `hardware.json` directly (or re-running `curl … | bash`, which re-runs detection and is idempotent on identical input).
+- **The signalk-container config panel does not gate Stop / Remove on `io.signalk.persistent=true`.** Engine Quadlets are stamped with the label and `signalk-container` reads it from `ContainerConfig.labels`, but the UI still offers Stop and Remove buttons for engine containers. Pressing them takes the stack down; recover via the Doctor Console or `~/.local/bin/signalk-recovery`.
+- **Real-hardware smoke tests run in front of physical devices.** Pi 5 / Pi 4 / macOS Podman Machine + USB / WSL2 + usbipd are documented in `docs/installation.md` but not part of the CI matrix.
 
 ## Predecessor
 
