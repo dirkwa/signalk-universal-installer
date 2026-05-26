@@ -37,6 +37,16 @@ Environment=QUADLET_DIR=/quadlets
 Environment=DOCTOR_DATA=/doctor-data
 Environment=NODE_ENV=production
 Environment=LOG_LEVEL=info
+# signalk-server runs with Network=host, so it listens on the host's
+# 127.0.0.1:3000. This container runs on pasta networking where
+# 127.0.0.1 is its own loopback, not the host's — making the engine's
+# previous default (127.0.0.1:3000) unreachable. `host.containers.internal`
+# is podman's host alias and resolves correctly under pasta.
+# signalk-updater-server 0.6.9+ has a runtime fallback that auto-detects
+# this; pinning it here makes the boundary explicit and survives any
+# future code-default churn.
+Environment=SIGNALK_HEALTH_URL=http://host.containers.internal:3000/signalk
+Environment=SIGNALK_URL=http://host.containers.internal:3000
 
 Label=io.signalk.persistent=true
 Label=io.signalk.role=updater
