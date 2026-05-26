@@ -47,6 +47,15 @@ Environment=LOG_LEVEL=info
 # future code-default churn.
 Environment=SIGNALK_HEALTH_URL=http://host.containers.internal:3000/signalk
 Environment=SIGNALK_URL=http://host.containers.internal:3000
+# signalk-doctor-server runs its own pasta network and publishes
+# 0.0.0.0:3004. From this container, 127.0.0.1:3004 is OUR loopback,
+# not the host's :3004 — same pasta-net trap that hit signalk-server.
+# Pin the doctor's health endpoint to the explicit host alias so the
+# post-doctor-switch health-poll, the update-checker's RuntimeIdentity
+# probe, and /api/state's doctor read all reach the right place.
+# Engine 0.6.12+ has the runtime fallback; pinning here is the
+# explicit form for fresh installs.
+Environment=DOCTOR_HEALTH_URL=http://host.containers.internal:3004/api/health
 
 Label=io.signalk.persistent=true
 Label=io.signalk.role=updater
