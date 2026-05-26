@@ -70,6 +70,7 @@ Paths the installer creates and the engine containers depend on:
 | `~/.signalk/` | signalk-server | SignalK data — never touched by installer or doctor. |
 | `~/.signalk-updater/` | updater container + installer | Tokens, hardware.json, logs. |
 | `~/.signalk-doctor/` | doctor container + installer | Snapshots of Quadlets, last-good.json, tokens. |
+| `~/.signalk-doctor/signalk-token` | installer | Admin token (mode 0600) generated via `podman exec signalk-server signalk-generate-token -u admin -e 5y …`. Read by the doctor's drift scanner for the admin-gated `/skServer/diagnostics` endpoint. Idempotent: never overwritten by the installer if already non-empty. Rotation is operator-initiated (regenerate, overwrite the file; the doctor invalidates its cache on the next 401/403). |
 | `~/.local/bin/signalk-recovery` | installer | Static bash recovery script — works with zero containers running. |
 
 The installer never writes to `~/.signalk/` and never starts/stops `signalk-server` except via the updater's REST API (with a direct `systemctl --user start` fallback when the updater is unreachable).

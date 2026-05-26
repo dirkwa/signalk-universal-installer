@@ -676,9 +676,10 @@ else
     if token=$(podman exec signalk-server "$SK_TOKEN_BIN" -u admin -e 5y -s "$SK_SECURITY_PATH" 2>/dev/null); then
         if [[ -n "$token" ]]; then
             mkdir -p "$(dirname "$DOCTOR_TOKEN_PATH")"
+            old_umask=$(umask)
             umask 077
             printf '%s' "$token" >"$DOCTOR_TOKEN_PATH"
-            umask 022
+            umask "$old_umask"
             chmod 0600 "$DOCTOR_TOKEN_PATH"
             ok "wrote doctor token to $DOCTOR_TOKEN_PATH (mode 0600)"
         else
@@ -686,7 +687,7 @@ else
         fi
     else
         warn "signalk-generate-token failed; doctor drift will stay offline"
-        warn "you can retry with:  podman exec signalk-server $SK_TOKEN_BIN -u doctor -e 5y -s $SK_SECURITY_PATH"
+        warn "you can retry with:  podman exec signalk-server $SK_TOKEN_BIN -u admin -e 5y -s $SK_SECURITY_PATH"
     fi
 fi
 
