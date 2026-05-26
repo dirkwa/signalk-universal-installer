@@ -633,6 +633,63 @@ else
     warn "open ${DOCTOR_URL} or run ~/.local/bin/signalk-recovery doctor"
 fi
 
+# 15b. Provision a doctor-scoped admin token for signalk-server's
+# /skServer/diagnostics endpoint.
+#
+# The doctor's drift scanner needs an admin token to call signalk-
+# server's diagnostics endpoint (the GET shipped in SignalK PR #2702).
+# Without this file the scanner permanently reports "offline" with the
+# Last successful scan as "never". The doctor itself can't generate
+# this token — it has no access to signalk-server's security.json
+# — so the installer does it here, while we still have podman exec
+# rights against the freshly-started signalk-server container.
+#
+# Idempotency: if a non-empty token already lives at the target path,
+# leave it alone. Re-running the installer must not churn the token
+# (which would not be a problem on its own, but operators who later
+# rotate the admin password expect their replacement token to survive).
+#
+# Security gate: signalk-server may not have security enabled yet on
+# a brand-new install. We check for security.json's `users[]` array
+# before attempting; if security isn't enabled the warning explains
+# the next step (enable security in the admin UI, then re-run).
+DOCTOR_TOKEN_PATH="$HOME/.signalk-doctor/signalk-token"
+SK_TOKEN_BIN=/home/node/signalk/node_modules/signalk-server/bin/signalk-generate-token
+SK_SECURITY_PATH=/home/node/.signalk/security.json
+section "Doctor admin token"
+if [[ -s "$DOCTOR_TOKEN_PATH" ]]; then
+    ok "doctor token already present at $DOCTOR_TOKEN_PATH (skipping)"
+elif ! podman exec signalk-server test -s "$SK_SECURITY_PATH" 2>/dev/null; then
+    warn "signalk-server has no security.json yet — enable security in the admin UI then re-run the installer"
+    warn "without this, the doctor's drift scan stays offline ('Last successful scan: never')"
+elif ! podman exec signalk-server grep -q '"users"' "$SK_SECURITY_PATH" 2>/dev/null; then
+    warn "signalk-server security.json exists but has no users — finish security setup in the admin UI, then re-run"
+else
+    # The token generator writes to stdout. Use `-u admin` because
+    # signalk-server's auth middleware only honors tokens whose `id`
+    # claim matches a user in security.json's users[] — there's no CLI
+    # to add a dedicated "doctor" user without hand-editing the JSON,
+    # and the diagnostics endpoint we're after is admin-gated anyway.
+    # -e 5y is long enough that we don't need to babysit rotation. The
+    # doctor invalidates its own cache on 401/403, so rotating later is
+    # "regenerate, overwrite this file" — no doctor restart needed.
+    if token=$(podman exec signalk-server "$SK_TOKEN_BIN" -u admin -e 5y -s "$SK_SECURITY_PATH" 2>/dev/null); then
+        if [[ -n "$token" ]]; then
+            mkdir -p "$(dirname "$DOCTOR_TOKEN_PATH")"
+            umask 077
+            printf '%s' "$token" >"$DOCTOR_TOKEN_PATH"
+            umask 022
+            chmod 0600 "$DOCTOR_TOKEN_PATH"
+            ok "wrote doctor token to $DOCTOR_TOKEN_PATH (mode 0600)"
+        else
+            warn "signalk-generate-token produced empty output; doctor drift will stay offline"
+        fi
+    else
+        warn "signalk-generate-token failed; doctor drift will stay offline"
+        warn "you can retry with:  podman exec signalk-server $SK_TOKEN_BIN -u doctor -e 5y -s $SK_SECURITY_PATH"
+    fi
+fi
+
 # 16. Recovery script
 section "Host recovery script"
 bash "$HERE/install-recovery-script.sh"
