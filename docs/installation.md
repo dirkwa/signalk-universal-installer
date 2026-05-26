@@ -1,6 +1,8 @@
 # Installation
 
-## Linux (Debian 13, Ubuntu 24.04+, Raspberry Pi OS bookworm+)
+## Linux (Debian 13 / trixie, Ubuntu 24.04+, Raspberry Pi OS trixie+)
+
+> Debian 12 (bookworm) is **not** supported — its Podman is too old for the Quadlet features we use. The installer aborts on bookworm with a recipe to upgrade to trixie.
 
 ```bash
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
@@ -8,20 +10,35 @@ curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/
 
 The installer:
 
-1. Detects your distro and runs pre-flight (RAM ≥ 2 GB, disk ≥ 5 GB, ports 3000/3003/3004/3010 free, cgroups v2, Podman ≥ 4.4).
+1. Detects host (OS, arch, distro family) and runs pre-flight: RAM ≥ 2 GB, disk ≥ 5 GB, ports 3000 / 3003 / 3004 / 3010 free, cgroups v2 with memory + pids delegation to the user slice (autofixed when possible), Podman ≥ 4.4.
 2. Installs Podman + `uidmap` + `slirp4netns` via `apt` if missing.
 3. Enables `loginctl enable-linger $USER` so the stack survives reboots.
-4. Adds you to `dialout`, `gpio`, `netdev` groups for USB serial / GPIO / CAN.
-5. Generates bearer-auth tokens for the updater and doctor (mode 0600).
-6. Detects USB serial / SocketCAN / Bluetooth-DBus / Pi GPIO into `~/.signalk-updater/hardware.json`.
-7. Pulls the three container images (multi-arch: amd64 + arm64).
-8. Atomically writes three Quadlets into `~/.config/containers/systemd/`.
-9. Starts the doctor and updater services, then asks the updater to start signalk-server (with a `systemctl --user` fallback).
-10. Installs the SSH-only recovery script at `~/.local/bin/signalk-recovery` (the safety net for when both engine containers are down).
-11. Installs the `signalk` command at `~/.local/bin/signalk` — a dispatcher for `health`, `recover`, `bug-report`, and `uninstall`. Run `signalk help` for usage.
-12. Drops a journald retention drop-in at `/etc/systemd/journald.conf.d/signalk.conf` (uses `sudo`).
+4. Adds you to `dialout`, `gpio`, `netdev` groups for USB serial / GPIO / CAN. Group memberships only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.
+5. Generates bearer-auth tokens at `~/.signalk-updater/token` and `~/.signalk-doctor/token` (mode 0600). Idempotent: never overwrites existing tokens.
+6. Initialises the doctor's state directory (`~/.signalk-doctor/snapshots/`, `last-good.json`) and generates an admin signalk-token at `~/.signalk-doctor/signalk-token` (mode 0600) via `podman exec signalk-server signalk-generate-token` so the doctor's drift scanner can read the admin-gated `/skServer/diagnostics` endpoint.
+7. Detects USB serial / SocketCAN / Bluetooth-DBus / Pi GPIO into `~/.signalk-updater/hardware.json`.
+8. Pulls the three container images (multi-arch: amd64 + arm64).
+9. Atomically writes three Quadlets into `~/.config/containers/systemd/` (see [Quadlet layout](#quadlet-layout) below).
+10. `systemctl --user daemon-reload`, then starts (or restarts, on re-run) the doctor and updater services and asks the updater to start signalk-server via its REST API. Falls back to a direct `systemctl --user start` if the updater is unreachable, with a short warm-up retry to absorb a daemon-reload's transient socket downtime.
+11. Installs and auto-enables the bundled SignalK plugins (`signalk-container`, `signalk-updater`, `signalk-doctor`) into `~/.signalk/node_modules/` via the signalk-server container's bundled npm. Plugin config files are written **only** if absent — re-running the installer never overrides a user-disabled plugin.
+12. Installs the SSH-only recovery script at `~/.local/bin/signalk-recovery` (the safety net for when both engine containers are down).
+13. Installs the `signalk` command at `~/.local/bin/signalk` — a dispatcher for `health`, `recover`, `update`, `bug-report`, and `uninstall`. Run `signalk help` for usage. (`signalk update` calls the doctor's `/api/installer/refresh` endpoint to rewrite the host-resident scripts and Quadlet templates without restarting containers.) The installer also persists `~/.local/bin` on your PATH if it isn't already.
+14. Drops a journald retention drop-in at `/etc/systemd/journald.conf.d/signalk.conf` (`SystemMaxUse=500M`, `MaxRetentionSec=14day`) via `sudo`. Idempotent: skipped silently if the drop-in already exists. On Pi this prevents the SD card from filling.
+15. Marks bootstrap-complete in `~/.signalk-doctor/last-good.json` so the doctor knows the install was validated end-to-end. Re-runs check this marker and switch to a "verify mode" summary instead of repeating the full install.
 
-When it finishes you have three URLs reachable from the LAN: `:3000` (SignalK), `:3003` (Updater Console), `:3004` (Doctor Console). The installer binds the engine containers to `0.0.0.0` by default because most users install headless and reach the consoles from another machine. The updater's mutating endpoints and the doctor's `/api/recover` are gated by bearer tokens (see `~/.signalk-{updater,doctor}/token`); the doctor's read-only probes are unauthenticated by design (recovery surface that always answers). To restrict everything to localhost set `SIGNALK_LOCALHOST_ONLY=true` before running the installer — useful on shared/guest WiFi where you'd rather not expose probe output.
+When it finishes you have three URLs: `:3000` (SignalK), `:3003` (Updater Console), `:3004` (Doctor Console). The installer binds the engine containers to `0.0.0.0` by default because most users install headless and reach the consoles from another machine. The updater's mutating endpoints and the doctor's `/api/recover` are gated by bearer tokens (see `~/.signalk-{updater,doctor}/token`); the doctor's read-only probes are unauthenticated by design (recovery surface that always answers). To restrict everything to localhost set `SIGNALK_LOCALHOST_ONLY=true` before running the installer — useful on shared/guest WiFi where you'd rather not expose probe output.
+
+### Quadlet layout
+
+The installer drops three Quadlet files under `~/.config/containers/systemd/`. Key bits, beyond the obvious `Image=` and `ContainerName=`:
+
+| Quadlet | Notable settings |
+|---|---|
+| `signalk-server.container` | `Network=host` so signalk-server listens directly on the host's `:3000`; `UserNS=keep-id` so the in-container `node` user maps to the host user and `~/.signalk/` stays writable; `Restart=always` because the SignalK admin UI's "Restart" button does a clean `process.exit(0)` that `on-failure` wouldn't recover from; `StopTimeout=5` cuts podman's SIGTERM → SIGKILL grace from the default 10s to 5s (signalk-server doesn't trap SIGTERM upstream, so the full grace is dead time on every version switch). |
+| `signalk-updater-server.container` | Pasta networking with `PublishPort=…:3003:3003`; mounts `~/.signalk-updater`, `~/.signalk-doctor`, the Quadlet dir, the podman socket, and the host DBus session bus; pins `Environment=SIGNALK_HEALTH_URL`, `SIGNALK_URL`, `DOCTOR_HEALTH_URL` to `host.containers.internal` so the updater can reach signalk-server (`:3000`) and the doctor (`:3004`) across pasta's network boundary (`127.0.0.1` from inside this container would be its own loopback). |
+| `signalk-doctor-server.container` | Same shape as the updater; mounts `~/.signalk-doctor` rw, `~/.signalk-updater` rw for the shared operation-lock, and `~/.local/bin` rw so the doctor's `/api/installer/refresh` can rewrite the host `signalk` / `signalk-recovery` scripts. |
+
+The updater rewrites `signalk-server.container`'s `Image=` line on each version switch (atomically — snapshot first, then rename + dir-fsync). Everything else in the Quadlet, including the env vars above and `StopTimeout`, is preserved verbatim.
 
 ### Re-running
 
@@ -90,19 +107,12 @@ usbipd bind --busid <BUSID>
 usbipd attach --wsl --busid <BUSID>     # while WSL is running
 ```
 
-Then in WSL, the device shows up as `/dev/ttyUSB0` etc. and you can re-run the hardware re-detect from the Updater Console.
+Then in WSL, the device shows up as `/dev/ttyUSB0` etc. Re-run the bash installer inside WSL to re-detect hardware and rewrite the signalk-server Quadlet's `AddDevice=` lines (the Updater Console's in-browser Hardware tab is a deferred Roadmap item).
 
 ## Recovery
 
-If the install completes but something doesn't work, your two recovery surfaces are:
+If the install completes but something doesn't work, see [docs/recovery.md](recovery.md) for the full playbook. The short version, ordered by ease of use:
 
-1. **Doctor Console** at `http://localhost:3004` — read-only probes + a "Recover" button that restores Quadlets from the last-known-good snapshot.
-2. **`~/.local/bin/signalk-recovery`** — pure bash, zero container dependencies. Works from SSH even if both engine containers are dead.
-
-```bash
-~/.local/bin/signalk-recovery status         # what's running, what's broken
-~/.local/bin/signalk-recovery doctor         # full diagnostics dump
-~/.local/bin/signalk-recovery rollback-all   # restore from snapshots
-```
-
-See [docs/recovery.md](recovery.md) for the deeper recovery playbook.
+1. **Updater Console** at `http://localhost:3003` — Versions tab, "Roll back to previous version."
+2. **Doctor Console** at `http://localhost:3004` — Recover tab, "Recover" button that restores Quadlets from the last-known-good snapshot.
+3. **`~/.local/bin/signalk-recovery`** — pure bash, zero container dependencies. Works from SSH even if both engine containers are dead.

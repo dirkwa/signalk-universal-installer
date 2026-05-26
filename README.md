@@ -2,17 +2,17 @@
 
 Bash/PowerShell bootstrap for the SignalK container stack on Linux, macOS, and Windows (WSL2).
 
-> Status: **v0.1.0 — first end-to-end runnable release.** Engine container images published to GHCR; the `curl … | bash` one-liner is wired up and ready for real-VM smoke testing. See "Roadmap" below for what's deferred.
-
 ## What this installs
 
 A peer-container stack managed by `systemd --user`:
 
 - `signalk-server` — the SignalK Node Server in a container.
-- `signalk-updater-server` — image lifecycle, version switching, self-update, hardware UI (`:3003`).
-- `signalk-doctor-server` — read-only diagnostics, last-known-good recovery, the offline safety net (`:3004`).
+- `signalk-updater-server` — image lifecycle, version switching, self-update, hardware passthrough (`:3003`). Web console with Dashboard / Versions / Logs tabs.
+- `signalk-doctor-server` — read-only diagnostics, last-known-good recovery, the offline safety net (`:3004`). Web console with Health / Drift / Logs / Snapshots / Recover / Installer tabs.
 
-All three run rootless under Podman with `Restart=on-failure` + crashloop guards. Recovery never depends on `signalk-server` being healthy, and never depends on the updater being healthy — the doctor is independent of both, and a host-resident bash script (`~/.local/bin/signalk-recovery`) backs both of them when neither container can respond.
+All three run rootless under Podman. `signalk-updater-server` and `signalk-doctor-server` use `Restart=on-failure`; `signalk-server` uses `Restart=always` (the admin UI's "Restart" button does a clean `process.exit(0)` that `on-failure` wouldn't recover from). Both policies sit behind `StartLimitIntervalSec=300` + `StartLimitBurst=5` crashloop guards. Recovery never depends on `signalk-server` being healthy, and never depends on the updater being healthy — the doctor is independent of both, and a host-resident bash script (`~/.local/bin/signalk-recovery`) backs both of them when neither container can respond.
+
+The installer also installs and auto-enables the three companion SignalK plugins (`signalk-container`, `signalk-updater`, `signalk-doctor`) into `~/.signalk/` so the admin UI gets the in-server side of the stack on first boot.
 
 ## Components
 
@@ -28,7 +28,7 @@ All three run rootless under Podman with `Restart=on-failure` + crashloop guards
 ## Quick start
 
 ```bash
-# Linux (Debian 13, Ubuntu 24.04+, Raspberry Pi OS bookworm+)
+# Linux (Debian 13 / trixie, Ubuntu 24.04+, Raspberry Pi OS trixie+)
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
 
 # macOS (Apple Silicon and Intel; Homebrew required)
@@ -48,11 +48,10 @@ See [docs/installation.md](docs/installation.md) for the full per-platform walkt
 
 ## Roadmap
 
-Things deferred to follow-up PRs (not blockers for v0.1.0):
+Outstanding work:
 
-- **Webapp UI for the engine containers.** Phases 4 and 5 built REST APIs only; a real UI (Vite + React + shadcn) is a separate effort. For now `curl`-driven workflows work end-to-end.
-- **Persistent-label config-panel hiding.** signalk-container 1.11+ will hide Stop/Remove for `io.signalk.persistent=true` containers in its config UI. The label write path is in place (`ContainerConfig.labels`) but the UI affordance isn't.
-- **Hardware re-detect from inside the container.** Phase 10 added the apply path; re-running detection still requires SSH + `signalk-recovery doctor` or `detect-hardware.sh`.
+- **Updater Console Hardware tab.** The hardware-apply REST endpoint and on-disk `~/.signalk-updater/hardware.json` are in place; the in-browser UI for toggling devices is not. Until it lands, re-running hardware detection requires re-running the bash installer (which re-runs `detect-hardware.sh` and the apply path is idempotent on identical input).
+- **Persistent-label config-panel hiding.** Engine Quadlets are stamped with `io.signalk.persistent=true` (`signalk-container` reads this from `ContainerConfig.labels`), but its config panel UI doesn't yet hide Stop / Remove buttons for persistent containers. Stop/Remove on an engine container today is still possible from the panel — a future signalk-container release will gate those controls on the label.
 - **Pi 5 / Pi 4 / macOS / Windows real-hardware smoke tests.** Documented in `docs/installation.md`; runs in front of physical devices.
 
 ## Predecessor
