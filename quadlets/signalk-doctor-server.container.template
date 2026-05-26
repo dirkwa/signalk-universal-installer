@@ -39,6 +39,13 @@ Volume=%h/.signalk-updater:/updater-data:rw,Z
 # 'mount-missing' status on host-script artifacts — the bash one-liner
 # remains the floor.
 Volume=%h/.local/bin:/host-bin:rw,Z
+# Read-only host cgroup + kernel cmdline so the doctor's cgroup-delegation
+# probe can verify rootless podman has memory + pids controllers at both
+# the kernel root cgroup AND delegated to the user slice. Without these,
+# `--memory` / `--pids-limit` on consumer plugins silently no-op. Both
+# pseudo-filesystems — no :Z relabel.
+Volume=/sys/fs/cgroup:/host/cgroup:ro
+Volume=/proc/cmdline:/host/proc/cmdline:ro
 
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/host/dbus
 Environment=QUADLET_DIR=/quadlets
