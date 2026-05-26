@@ -212,7 +212,10 @@ cmd_bug_report() {
                 ;;
         esac
     done
-    if ! mkdir -p "$tarball_dir" 2>/dev/null; then
+    # `--` so a directory name starting with `-` (e.g. someone passing
+    # `--to --help` by mistake, setting tarball_dir="--help") is treated
+    # as an operand, not an option.
+    if ! mkdir -p -- "$tarball_dir" 2>/dev/null; then
         echo "[ERR] cannot create output directory $tarball_dir" >&2
         return 1
     fi
