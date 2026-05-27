@@ -144,10 +144,14 @@ offer_pi_cmdline_fix() {
             return
             ;;
     esac
-    # Collapse any double spaces produced by the strip.
+    # Collapse any double spaces produced by the strip, then trim
+    # leading/trailing whitespace (strip can leave a leading space when
+    # cgroup_disable=memory was the first token).
     proposed=$(tr -s ' ' <<<"$proposed")
-    # Verify line count of the proposed content stays at 1.
-    if [[ $(wc -l <<<"$proposed") -ne 1 ]] && [[ -n "$proposed" ]]; then
+    proposed="${proposed#"${proposed%%[![:space:]]*}"}"
+    proposed="${proposed%"${proposed##*[![:space:]]}"}"
+    # Refuse the patch if it ended up empty or multi-line.
+    if [[ -z "$proposed" ]] || [[ $(wc -l <<<"$proposed") -ne 1 ]]; then
         warn "Refusing to offer auto-patch: proposed cmdline is not a single line."
         return
     fi
@@ -176,6 +180,7 @@ offer_pi_cmdline_fix() {
             return
         fi
     fi
+    # Intentional word-splitting on $sudo_cmd below: empty disappears, non-empty prefixes the command.
     info "Backing up $cmdline → $backup"
     if ! $sudo_cmd cp -p "$cmdline" "$backup"; then
         err "Backup failed; not editing $cmdline."
@@ -187,10 +192,11 @@ offer_pi_cmdline_fix() {
         return
     fi
     # Final safety check: cmdline.txt MUST be a single line; some bootloaders
-    # silently refuse to apply settings past the first newline.
+    # silently refuse to apply settings past the first newline. An empty
+    # file is also a failure mode — restore on any non-1 line count.
     local lines
     lines=$(wc -l <"$cmdline")
-    if [[ "$lines" -ne 1 ]] && [[ -s "$cmdline" ]]; then
+    if [[ "$lines" -ne 1 ]]; then
         err "$cmdline ended up with $lines lines; restoring backup."
         $sudo_cmd cp -p "$backup" "$cmdline" || err "Restore from $backup also failed — fix manually before rebooting."
         return
