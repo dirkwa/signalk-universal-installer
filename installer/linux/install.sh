@@ -149,7 +149,10 @@ DOCTOR_DATA="${HOME}/.signalk-doctor"
 
 UPDATER_URL="http://127.0.0.1:3003"
 DOCTOR_URL="http://127.0.0.1:3004"
-SIGNALK_URL="http://127.0.0.1:3000/signalk"
+# SIGNALK_URL is derived after the privileged-port decision below, once
+# SK_HTTP_PORT is final. Declared empty here so `set -u` stays happy if
+# an early-exit path references it.
+SIGNALK_URL=""
 
 # Privilege escalation. The installer needs root for apt + systemd
 # file writes + journald drop-in + cgroup delegation override. We
@@ -231,6 +234,61 @@ else
     info "Port bind: localhost only (SIGNALK_LOCALHOST_ONLY=true)"
 fi
 
+# Privileged web ports (HTTP 80 / HTTPS 443) — opt-out.
+#
+# signalk-server runs as a non-root user inside the container, and the
+# stack uses Network=host (shares the host's network namespace). On
+# Linux a non-root process can't bind ports < 1024, and a network
+# sysctl can't be set from inside a host-netns container, so the only
+# working lever is the HOST's net.ipv4.ip_unprivileged_port_start. We
+# lower it to 80 (a sudo'd /etc/sysctl.d drop-in) so signalk-server can
+# bind 80/443 directly.
+#
+# Default ON. Interactive runs get a [Y/n] prompt; non-interactive runs
+# (curl|bash with no TTY) proceed with the default unless the operator
+# opted out via SIGNALK_PRIVILEGED_PORTS=0. SIGNALK_PRIVILEGED_PORTS=1
+# forces it on without prompting (CI / unattended).
+#
+# When disabled, ports fall back to the historical 3000/3443 and the
+# sysctl is left untouched.
+PRIV_PORTS="${SIGNALK_PRIVILEGED_PORTS:-prompt}"
+# Normalize common truthy/falsy spellings to 1/0 so SIGNALK_PRIVILEGED_PORTS=yes
+# doesn't silently fall through to the legacy ports. Anything unrecognized
+# (including the empty default) stays "prompt". Mirrors the SIGNALK_LOCALHOST_ONLY
+# handling above.
+case "$PRIV_PORTS" in
+    1 | y | Y | yes | YES | Yes | true | TRUE | True | on | ON | On) PRIV_PORTS=1 ;;
+    0 | n | N | no | NO | No | false | FALSE | False | off | OFF | Off) PRIV_PORTS=0 ;;
+    *) PRIV_PORTS=prompt ;;
+esac
+if [[ "$PRIV_PORTS" = "prompt" ]]; then
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+        printf '\n%sUse standard web ports? HTTP on :80, HTTPS on :443 (default 3000/3443).%s\n' \
+            "$C_BOLD" "$C_RESET" >/dev/tty
+        printf 'This lowers the host net.ipv4.ip_unprivileged_port_start to 80 (sudo). [Y/n] ' >/dev/tty
+        read -r _priv_reply </dev/tty || _priv_reply=""
+        case "$_priv_reply" in
+            n|N|no|NO) PRIV_PORTS=0 ;;
+            *) PRIV_PORTS=1 ;;
+        esac
+    else
+        # No TTY (curl|bash): honor the default-on intent.
+        PRIV_PORTS=1
+    fi
+fi
+
+if [[ "$PRIV_PORTS" = "1" ]]; then
+    SK_HTTP_PORT=80
+    SK_HTTPS_PORT=443
+else
+    SK_HTTP_PORT=3000
+    SK_HTTPS_PORT=3443
+fi
+SIGNALK_URL="http://127.0.0.1:${SK_HTTP_PORT}/signalk"
+# Export so the child `bash preflight.sh` checks the actual ports.
+export SK_HTTP_PORT SK_HTTPS_PORT
+info "signalk-server ports: HTTP :${SK_HTTP_PORT}, HTTPS :${SK_HTTPS_PORT}"
+
 # Detect a previous successful install. install.sh's last step (#18)
 # writes `bootstrappedAt` into ~/.signalk-doctor/last-good.json after
 # every successful pass; presence of that key means at least one full
@@ -263,6 +321,35 @@ if (( PREFLIGHT_RC == 2 )); then
     exit 0
 elif (( PREFLIGHT_RC != 0 )); then
     exit "$PREFLIGHT_RC"
+fi
+
+# 2b. Privileged-port sysctl (only when standard web ports were chosen)
+#
+# Lower net.ipv4.ip_unprivileged_port_start to 80 via a persistent
+# /etc/sysctl.d drop-in so the rootless, host-netns signalk-server
+# container can bind 80/443. Idempotent: re-runs skip the write when
+# the running value is already <= 80. Host-wide change (affects every
+# unprivileged process), documented in docs/installation.md.
+if [[ "$PRIV_PORTS" = "1" ]]; then
+    section "Privileged web ports"
+    PRIV_SYSCTL_KEY="net.ipv4.ip_unprivileged_port_start"
+    PRIV_SYSCTL_FILE="/etc/sysctl.d/80-signalk-unprivileged-ports.conf"
+    current_floor=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)
+    if (( current_floor <= 80 )); then
+        ok "${PRIV_SYSCTL_KEY} already ${current_floor} (≤ 80)"
+    elif [[ "$SUDO" = "MISSING" ]]; then
+        warn "Cannot lower ${PRIV_SYSCTL_KEY} without sudo; 80/443 will fail to bind."
+        warn "Set it manually:  echo '${PRIV_SYSCTL_KEY}=80' | sudo tee ${PRIV_SYSCTL_FILE} && sudo sysctl --system"
+    else
+        info "Lowering ${PRIV_SYSCTL_KEY} to 80 (host-wide, persistent)"
+        if printf '# Managed by signalk-universal-installer — lets the rootless,\n# host-netns signalk-server container bind HTTP :80 / HTTPS :443.\n%s=80\n' \
+            "$PRIV_SYSCTL_KEY" | $SUDO tee "$PRIV_SYSCTL_FILE" >/dev/null \
+            && $SUDO sysctl -q -w "${PRIV_SYSCTL_KEY}=80"; then
+            ok "${PRIV_SYSCTL_KEY}=80 (drop-in ${PRIV_SYSCTL_FILE})"
+        else
+            warn "Failed to apply ${PRIV_SYSCTL_KEY}=80; 80/443 may not bind until fixed."
+        fi
+    fi
 fi
 
 # 3. Install podman if absent
@@ -510,7 +597,8 @@ snapshot_existing signalk-server.container
 snapshot_existing signalk-updater-server.container
 snapshot_existing signalk-doctor-server.container
 
-SERVER_QUADLET=$("$HERE/render-server-quadlet.sh" "$UPDATER_DATA/hardware.json" "$HERE/../../quadlets/signalk-server.container.template")
+SERVER_QUADLET=$("$HERE/render-server-quadlet.sh" "$UPDATER_DATA/hardware.json" "$HERE/../../quadlets/signalk-server.container.template" \
+    | sed -e "s/__SK_HTTP_PORT__/${SK_HTTP_PORT}/g")
 atomic_write "$QUADLET_DIR/signalk-server.container" "$SERVER_QUADLET"
 
 # Substitute both the publish host (set earlier from SIGNALK_LOCALHOST_ONLY)
@@ -519,6 +607,7 @@ atomic_write "$QUADLET_DIR/signalk-server.container" "$SERVER_QUADLET"
 # Image= line because the image contains `/`.
 UPDATER_QUADLET=$(sed \
     -e "s/__PUBLISH_HOST__/${PUBLISH_HOST}/g" \
+    -e "s/__SK_HTTP_PORT__/${SK_HTTP_PORT}/g" \
     -e "s|__UPDATER_IMAGE__|${UPDATER_IMAGE}|g" \
     "$HERE/../../quadlets/signalk-updater-server.container.template")
 atomic_write "$QUADLET_DIR/signalk-updater-server.container" "$UPDATER_QUADLET"
@@ -628,6 +717,29 @@ for p in "${SK_PLUGINS[@]}"; do
         ok "auto-enabled $p"
     fi
 done
+
+# Seed sslport so HTTPS lands on the chosen port once the operator
+# enables TLS (e.g. via the signalk-ssl plugin). We write ONLY when the
+# standard-ports path was chosen AND the key is absent — never clobber a
+# value the user set, and never set `ssl: true` (that's the user's
+# decision; the SSLPORT env var would force it on before a cert exists,
+# which is why we use settings.json, not env, for the HTTPS port).
+if [[ "$PRIV_PORTS" = "1" ]] && command -v jq >/dev/null 2>&1; then
+    settings="$HOME/.signalk/settings.json"
+    [[ -f "$settings" ]] || echo '{}' >"$settings"
+    if [[ "$(jq -r 'has("sslport")' "$settings" 2>/dev/null)" != "true" ]]; then
+        tmp=$(mktemp "${settings}.XXXXXX")
+        if jq --argjson p "$SK_HTTPS_PORT" '.sslport = $p' "$settings" >"$tmp" 2>/dev/null; then
+            mv -f "$tmp" "$settings"
+            ok "seeded sslport=${SK_HTTPS_PORT} in settings.json (HTTPS uses it once you enable SSL)"
+        else
+            rm -f "$tmp"
+            warn "could not seed sslport into settings.json; set SSL Port=${SK_HTTPS_PORT} in the admin UI"
+        fi
+    else
+        ok "settings.json already has sslport (leaving as-is)"
+    fi
+fi
 
 # 14. Bring up signalk-server (prefer updater REST, fall back to systemctl).
 # The updater may have JUST been restarted by the daemon-reload above and
@@ -925,9 +1037,9 @@ if [[ "$VERIFY_MODE" = "1" ]]; then
         verify_check "doctor health (:3004)" "unreachable"
     fi
     if curl -fsS -o /dev/null -m 5 "$SIGNALK_URL" 2>/dev/null; then
-        verify_check "signalk-server (:3000)" "ok"
+        verify_check "signalk-server (:${SK_HTTP_PORT})" "ok"
     else
-        verify_check "signalk-server (:3000)" "unreachable"
+        verify_check "signalk-server (:${SK_HTTP_PORT})" "unreachable"
     fi
 
     # Summary.
@@ -985,7 +1097,7 @@ cat <<EOF
 
 ${SUMMARY_HEADLINE}
 
-  SignalK admin UI : http://${DISPLAY_HOST}:3000
+  SignalK admin UI : http://${DISPLAY_HOST}:${SK_HTTP_PORT}
   Updater Console  : http://${DISPLAY_HOST}:3003
   Doctor Console   : http://${DISPLAY_HOST}:3004
 

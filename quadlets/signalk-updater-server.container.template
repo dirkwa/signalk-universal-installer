@@ -38,15 +38,16 @@ Environment=DOCTOR_DATA=/doctor-data
 Environment=NODE_ENV=production
 Environment=LOG_LEVEL=info
 # signalk-server runs with Network=host, so it listens on the host's
-# 127.0.0.1:3000. This container runs on pasta networking where
-# 127.0.0.1 is its own loopback, not the host's — making the engine's
-# previous default (127.0.0.1:3000) unreachable. `host.containers.internal`
-# is podman's host alias and resolves correctly under pasta.
-# signalk-updater-server 0.6.9+ has a runtime fallback that auto-detects
-# this; pinning it here makes the boundary explicit and survives any
-# future code-default churn.
-Environment=SIGNALK_HEALTH_URL=http://host.containers.internal:3000/signalk
-Environment=SIGNALK_URL=http://host.containers.internal:3000
+# 127.0.0.1:__SK_HTTP_PORT__ (80 or 3000, chosen at install time). This
+# container runs on pasta networking where 127.0.0.1 is its own
+# loopback, not the host's — making the engine's previous default
+# unreachable. `host.containers.internal` is podman's host alias and
+# resolves correctly under pasta. signalk-updater-server 0.6.9+ has a
+# runtime fallback that auto-detects this; pinning the port here (sed'd
+# by the installer) makes the boundary explicit and survives any future
+# code-default churn.
+Environment=SIGNALK_HEALTH_URL=http://host.containers.internal:__SK_HTTP_PORT__/signalk
+Environment=SIGNALK_URL=http://host.containers.internal:__SK_HTTP_PORT__
 # signalk-doctor-server runs its own pasta network and publishes
 # 0.0.0.0:3004. From this container, 127.0.0.1:3004 is OUR loopback,
 # not the host's :3004 — same pasta-net trap that hit signalk-server.
