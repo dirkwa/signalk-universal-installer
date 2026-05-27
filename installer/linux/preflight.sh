@@ -105,7 +105,12 @@ check_cgroups_v2() {
             warn "  # /boot/firmware/cmdline.txt must remain a single line — verify: wc -l /boot/firmware/cmdline.txt"
             warn "  sudo reboot"
             if offer_pi_cmdline_fix strip-disable; then
-                exit 0
+                # Patch landed but the running kernel still lacks the
+                # controller. Exit non-zero so the parent install.sh
+                # (which calls `bash preflight.sh` and runs under set -e)
+                # halts instead of marching on to podman/linger steps
+                # that would silently no-op without memory cgroups.
+                exit 2
             fi
         elif is_pi; then
             warn "On Raspberry Pi, enable the memory controller (one-time, requires sudo + reboot):"
@@ -114,7 +119,7 @@ check_cgroups_v2() {
             warn "  # /boot/firmware/cmdline.txt must remain a single line — verify: wc -l /boot/firmware/cmdline.txt"
             warn "  sudo reboot"
             if offer_pi_cmdline_fix enable-only; then
-                exit 0
+                exit 2
             fi
         fi
         # Already printed via err above; honor FORCE=1 the same way fail() would.
