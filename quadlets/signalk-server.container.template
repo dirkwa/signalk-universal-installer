@@ -22,14 +22,21 @@ Image=ghcr.io/dirkwa/signalk-server:dirkwa
 ContainerName=signalk-server
 Network=host
 
-# Keep the host user's uid/gid inside the container rather than mapping
-# them through subuids. The signalk-server image runs as `node` (uid
-# 1000); on the typical host the invoking user is also uid 1000. With
-# keep-id, container uid 1000 == host uid 1000, so the ~/.signalk
-# bind-mount is writable from inside (otherwise the userns remap puts
-# the in-container `node` user in a subuid range that can't write to
-# host-uid-1000-owned files, and `enableSecurity` etc. fail with 500).
-UserNS=keep-id
+# Map the host invoking user to in-container UID 1000 (the `node`
+# user the signalk-server image runs as) so the ~/.signalk bind mount
+# is owned by `node` from inside the container.
+#
+# Bare `keep-id` only works when the host user is also UID 1000. On
+# hosts where the user was created after `pi` already claimed 1000
+# (so the SignalK user is 1001 or higher), bare keep-id leaves the
+# in-container `node` mapped to some unrelated subuid that can't
+# write to host-UID-1001's ~/.signalk (mode 0700). That manifests as
+# silent enableSecurity / plugin-install failures on the admin UI.
+#
+# The explicit form maps the host user → in-container UID 1000
+# regardless of the host UID; on a host where the user already is
+# UID 1000 it's an identity mapping (no-op).
+UserNS=keep-id:uid=1000,gid=1000
 
 Volume=%h/.signalk:/home/node/.signalk:Z
 Volume=%t/podman/podman.sock:/var/run/docker.sock
