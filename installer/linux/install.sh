@@ -250,7 +250,20 @@ fi
 
 # 2. Pre-flight
 section "Pre-flight"
+# Preflight may apply a kernel-cmdline patch that requires a reboot
+# (Pi memory controller). It signals that case with exit code 2 — its
+# own [OK]/[!] messages already told the operator what to do; we just
+# need to stop cleanly without flagging it as a generic preflight fail.
+set +e
 bash "$HERE/preflight.sh"
+PREFLIGHT_RC=$?
+set -e
+if (( PREFLIGHT_RC == 2 )); then
+    info "Preflight applied a kernel cmdline patch; reboot and re-run this installer."
+    exit 0
+elif (( PREFLIGHT_RC != 0 )); then
+    exit "$PREFLIGHT_RC"
+fi
 
 # 3. Install podman if absent
 section "Podman"
