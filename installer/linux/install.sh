@@ -614,6 +614,8 @@ atomic_write "$QUADLET_DIR/signalk-updater-server.container" "$UPDATER_QUADLET"
 
 DOCTOR_QUADLET=$(sed \
     -e "s/__PUBLISH_HOST__/${PUBLISH_HOST}/g" \
+    -e "s/__SK_HTTP_PORT__/${SK_HTTP_PORT}/g" \
+    -e "s/__SK_HTTPS_PORT__/${SK_HTTPS_PORT}/g" \
     -e "s|__DOCTOR_IMAGE__|${DOCTOR_IMAGE}|g" \
     "$HERE/../../quadlets/signalk-doctor-server.container.template")
 atomic_write "$QUADLET_DIR/signalk-doctor-server.container" "$DOCTOR_QUADLET"

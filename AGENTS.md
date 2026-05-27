@@ -66,7 +66,7 @@ Paths the installer creates and the engine containers depend on:
 |---|---|---|
 | `~/.config/containers/systemd/signalk-server.container` | installer + updater | Quadlet, rewritten on version switch and hardware change. |
 | `~/.config/containers/systemd/signalk-updater-server.container` | installer + updater (self-update) | Quadlet for the updater itself. |
-| `~/.config/containers/systemd/signalk-doctor-server.container` | installer | Quadlet for the doctor; not rewritten at runtime. |
+| `~/.config/containers/systemd/signalk-doctor-server.container` | installer | Quadlet for the doctor; not rewritten at runtime. Carries `SIGNALK_URL` / `SIGNALK_HTTPS_URL` templated from the install-time `SK_HTTP_PORT` / `SK_HTTPS_PORT` (80/443 by default) so the doctor's signalk-health probe tracks the chosen ports and follows the HTTP→HTTPS redirect signalk-server emits once TLS is enabled. |
 | `~/.signalk/` | signalk-server | SignalK data, owned by signalk-server. The installer's writes here are narrow and idempotent: it installs the bundled plugins (`node_modules/`, via the container's own npm), seeds `plugin-config-data/*.json` to auto-enable them (never overwriting an existing file), and — when standard web ports are chosen — seeds `settings.json`'s `sslport` key only if absent (never sets `ssl`, never clobbers an existing value). It writes nothing else here and never touches user-authored config. |
 | `~/.signalk-updater/` | updater container + installer | Tokens, hardware.json, logs. |
 | `~/.signalk-doctor/` | doctor container + installer | Snapshots of Quadlets, last-good.json, tokens. |
