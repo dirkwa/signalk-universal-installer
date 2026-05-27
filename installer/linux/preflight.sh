@@ -98,16 +98,113 @@ check_cgroups_v2() {
             warn "  sudo sed -i 's/\\bcgroup_disable=memory\\b//; s/\$/ cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt"
             warn "  # /boot/firmware/cmdline.txt must remain a single line — verify: wc -l /boot/firmware/cmdline.txt"
             warn "  sudo reboot"
+            offer_pi_cmdline_fix strip-disable
         elif is_pi; then
             warn "On Raspberry Pi, enable the memory controller (one-time, requires sudo + reboot):"
             warn "  sudo cp /boot/firmware/cmdline.txt /boot/firmware/cmdline.txt.bak.\$(date +%Y%m%d)"
             warn "  sudo sed -i 's/\$/ cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt"
             warn "  # /boot/firmware/cmdline.txt must remain a single line — verify: wc -l /boot/firmware/cmdline.txt"
             warn "  sudo reboot"
+            offer_pi_cmdline_fix enable-only
         fi
     else
         ok "cgroups v2 with memory + pids"
     fi
+}
+
+# Offer to apply the cmdline.txt patch interactively. Mode is either
+# "strip-disable" (also removes cgroup_disable=memory) or "enable-only"
+# (just appends the enable flags). Skips silently when there's no TTY
+# (curl|bash from cron, CI), when cmdline.txt isn't where we expect, or
+# when the user declines. Never auto-reboots.
+offer_pi_cmdline_fix() {
+    local mode=$1
+    local cmdline=/boot/firmware/cmdline.txt
+    if [[ ! -f "$cmdline" ]]; then
+        return
+    fi
+    if [[ ! -r /dev/tty ]] || [[ ! -w /dev/tty ]]; then
+        # No controlling terminal — curl|bash from a non-interactive
+        # context. Leave the printed instructions as the only path.
+        return
+    fi
+    local current proposed
+    current=$(cat "$cmdline")
+    case "$mode" in
+        strip-disable)
+            # \b is GNU-sed only; bash regex below is portable and matches
+            # cgroup_disable=memory only as a whole token.
+            proposed=$(sed -E 's/(^|[[:space:]])cgroup_disable=memory($|[[:space:]])/\1\2/g' <<<"$current")
+            proposed="${proposed%$'\n'} cgroup_enable=memory cgroup_memory=1"
+            ;;
+        enable-only)
+            proposed="${current%$'\n'} cgroup_enable=memory cgroup_memory=1"
+            ;;
+        *)
+            return
+            ;;
+    esac
+    # Collapse any double spaces produced by the strip, then trim
+    # leading/trailing whitespace (strip can leave a leading space when
+    # cgroup_disable=memory was the first token).
+    proposed=$(tr -s ' ' <<<"$proposed")
+    proposed="${proposed#"${proposed%%[![:space:]]*}"}"
+    proposed="${proposed%"${proposed##*[![:space:]]}"}"
+    # Refuse the patch if it ended up empty or multi-line.
+    if [[ -z "$proposed" ]] || [[ $(wc -l <<<"$proposed") -ne 1 ]]; then
+        warn "Refusing to offer auto-patch: proposed cmdline is not a single line."
+        return
+    fi
+    printf '\n%sProposed change to %s:%s\n' "$C_BOLD" "$cmdline" "$C_RESET" >/dev/tty
+    diff -u --label "current" --label "proposed" \
+        <(printf '%s\n' "$current") <(printf '%s\n' "$proposed") >/dev/tty || true
+    printf '\nApply this patch now (sudo, no reboot)? [y/N] ' >/dev/tty
+    local reply=""
+    read -r reply </dev/tty || return
+    case "$reply" in
+        y|Y|yes|YES) ;;
+        *)
+            info "Skipped cmdline.txt patch. Apply manually with the commands above when ready."
+            return
+            ;;
+    esac
+    local backup ts
+    ts=$(date +%Y%m%d-%H%M%S)
+    backup="${cmdline}.bak.${ts}"
+    local sudo_cmd=""
+    if [[ $EUID -ne 0 ]]; then
+        if command -v sudo >/dev/null 2>&1; then
+            sudo_cmd="sudo"
+        else
+            err "sudo not available — cannot edit $cmdline as $USER."
+            return
+        fi
+    fi
+    # Intentional word-splitting on $sudo_cmd below: empty disappears, non-empty prefixes the command.
+    info "Backing up $cmdline → $backup"
+    if ! $sudo_cmd cp -p "$cmdline" "$backup"; then
+        err "Backup failed; not editing $cmdline."
+        return
+    fi
+    if ! printf '%s\n' "$proposed" | $sudo_cmd tee "$cmdline" >/dev/null; then
+        err "Write to $cmdline failed; restoring backup."
+        $sudo_cmd cp -p "$backup" "$cmdline" || err "Restore from $backup also failed — fix manually before rebooting."
+        return
+    fi
+    # Final safety check: cmdline.txt MUST be a single line; some bootloaders
+    # silently refuse to apply settings past the first newline. An empty
+    # file is also a failure mode — restore on any non-1 line count.
+    local lines
+    lines=$(wc -l <"$cmdline")
+    if [[ "$lines" -ne 1 ]]; then
+        err "$cmdline ended up with $lines lines; restoring backup."
+        $sudo_cmd cp -p "$backup" "$cmdline" || err "Restore from $backup also failed — fix manually before rebooting."
+        return
+    fi
+    ok "Patched $cmdline (backup at $backup)."
+    warn "Reboot required for the kernel to expose the memory controller:"
+    warn "  sudo reboot"
+    warn "Re-run the installer after the reboot."
 }
 
 # Verify the user slice actually sees memory + pids. The kernel may
