@@ -85,7 +85,13 @@ check_cgroups_v2() {
     grep -qw memory <<<"$ctl" || missing+=" memory"
     grep -qw pids <<<"$ctl" || missing+=" pids"
     if [[ -n "$missing" ]]; then
-        fail "cgroups v2 missing controller(s):$missing"
+        # On a Pi, surface the recipe and the interactive autofix BEFORE
+        # calling fail() — fail() exits, so anything after it is dead code
+        # on a default-config run. If offer_pi_cmdline_fix returns 0, the
+        # patch was applied and the operator just needs to reboot; exit
+        # cleanly so they don't see the FORCE=1 advisory. Print the error
+        # header now so the warn block below is contextually anchored.
+        err "cgroups v2 missing controller(s):$missing"
         if is_pi && [[ -r /proc/cmdline ]] && grep -qw 'cgroup_disable=memory' /proc/cmdline; then
             # Pi OS Trixie ships with cgroup_disable=memory injected by
             # the GPU firmware. Until the memory controller is enabled
@@ -98,15 +104,24 @@ check_cgroups_v2() {
             warn "  sudo sed -i 's/\\bcgroup_disable=memory\\b//; s/\$/ cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt"
             warn "  # /boot/firmware/cmdline.txt must remain a single line — verify: wc -l /boot/firmware/cmdline.txt"
             warn "  sudo reboot"
-            offer_pi_cmdline_fix strip-disable
+            if offer_pi_cmdline_fix strip-disable; then
+                exit 0
+            fi
         elif is_pi; then
             warn "On Raspberry Pi, enable the memory controller (one-time, requires sudo + reboot):"
             warn "  sudo cp /boot/firmware/cmdline.txt /boot/firmware/cmdline.txt.bak.\$(date +%Y%m%d)"
             warn "  sudo sed -i 's/\$/ cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt"
             warn "  # /boot/firmware/cmdline.txt must remain a single line — verify: wc -l /boot/firmware/cmdline.txt"
             warn "  sudo reboot"
-            offer_pi_cmdline_fix enable-only
+            if offer_pi_cmdline_fix enable-only; then
+                exit 0
+            fi
         fi
+        # Already printed via err above; honor FORCE=1 the same way fail() would.
+        if [[ "${FORCE:-0}" != "1" ]]; then
+            die "Aborting. Set FORCE=1 to override (not recommended)."
+        fi
+        warn "FORCE=1, continuing despite failure"
     else
         ok "cgroups v2 with memory + pids"
     fi
@@ -117,16 +132,21 @@ check_cgroups_v2() {
 # (just appends the enable flags). Skips silently when there's no TTY
 # (curl|bash from cron, CI), when cmdline.txt isn't where we expect, or
 # when the user declines. Never auto-reboots.
+#
+# Returns 0 only when the patch was applied successfully (caller should
+# then exit cleanly so the operator sees "reboot, then re-run" instead
+# of the generic preflight-fail message). Returns 1 in every other case
+# so the caller falls through to the normal fail() path.
 offer_pi_cmdline_fix() {
     local mode=$1
     local cmdline=/boot/firmware/cmdline.txt
     if [[ ! -f "$cmdline" ]]; then
-        return
+        return 1
     fi
     if [[ ! -r /dev/tty ]] || [[ ! -w /dev/tty ]]; then
         # No controlling terminal — curl|bash from a non-interactive
         # context. Leave the printed instructions as the only path.
-        return
+        return 1
     fi
     local current proposed
     current=$(cat "$cmdline")
@@ -141,7 +161,7 @@ offer_pi_cmdline_fix() {
             proposed="${current%$'\n'} cgroup_enable=memory cgroup_memory=1"
             ;;
         *)
-            return
+            return 1
             ;;
     esac
     # Collapse any double spaces produced by the strip, then trim
@@ -153,19 +173,19 @@ offer_pi_cmdline_fix() {
     # Refuse the patch if it ended up empty or multi-line.
     if [[ -z "$proposed" ]] || [[ $(wc -l <<<"$proposed") -ne 1 ]]; then
         warn "Refusing to offer auto-patch: proposed cmdline is not a single line."
-        return
+        return 1
     fi
     printf '\n%sProposed change to %s:%s\n' "$C_BOLD" "$cmdline" "$C_RESET" >/dev/tty
     diff -u --label "current" --label "proposed" \
         <(printf '%s\n' "$current") <(printf '%s\n' "$proposed") >/dev/tty || true
     printf '\nApply this patch now (sudo, no reboot)? [y/N] ' >/dev/tty
     local reply=""
-    read -r reply </dev/tty || return
+    read -r reply </dev/tty || return 1
     case "$reply" in
         y|Y|yes|YES) ;;
         *)
             info "Skipped cmdline.txt patch. Apply manually with the commands above when ready."
-            return
+            return 1
             ;;
     esac
     local backup ts
@@ -177,19 +197,19 @@ offer_pi_cmdline_fix() {
             sudo_cmd="sudo"
         else
             err "sudo not available — cannot edit $cmdline as $USER."
-            return
+            return 1
         fi
     fi
     # Intentional word-splitting on $sudo_cmd below: empty disappears, non-empty prefixes the command.
     info "Backing up $cmdline → $backup"
     if ! $sudo_cmd cp -p "$cmdline" "$backup"; then
         err "Backup failed; not editing $cmdline."
-        return
+        return 1
     fi
     if ! printf '%s\n' "$proposed" | $sudo_cmd tee "$cmdline" >/dev/null; then
         err "Write to $cmdline failed; restoring backup."
         $sudo_cmd cp -p "$backup" "$cmdline" || err "Restore from $backup also failed — fix manually before rebooting."
-        return
+        return 1
     fi
     # Final safety check: cmdline.txt MUST be a single line; some bootloaders
     # silently refuse to apply settings past the first newline. An empty
@@ -199,12 +219,13 @@ offer_pi_cmdline_fix() {
     if [[ "$lines" -ne 1 ]]; then
         err "$cmdline ended up with $lines lines; restoring backup."
         $sudo_cmd cp -p "$backup" "$cmdline" || err "Restore from $backup also failed — fix manually before rebooting."
-        return
+        return 1
     fi
     ok "Patched $cmdline (backup at $backup)."
     warn "Reboot required for the kernel to expose the memory controller:"
     warn "  sudo reboot"
     warn "Re-run the installer after the reboot."
+    return 0
 }
 
 # Verify the user slice actually sees memory + pids. The kernel may
