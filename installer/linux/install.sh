@@ -252,6 +252,15 @@ fi
 # When disabled, ports fall back to the historical 3000/3443 and the
 # sysctl is left untouched.
 PRIV_PORTS="${SIGNALK_PRIVILEGED_PORTS:-prompt}"
+# Normalize common truthy/falsy spellings to 1/0 so SIGNALK_PRIVILEGED_PORTS=yes
+# doesn't silently fall through to the legacy ports. Anything unrecognized
+# (including the empty default) stays "prompt". Mirrors the SIGNALK_LOCALHOST_ONLY
+# handling above.
+case "$PRIV_PORTS" in
+    1 | y | Y | yes | YES | Yes | true | TRUE | True | on | ON) PRIV_PORTS=1 ;;
+    0 | n | N | no | NO | No | false | FALSE | False | off | OFF) PRIV_PORTS=0 ;;
+    *) PRIV_PORTS=prompt ;;
+esac
 if [[ "$PRIV_PORTS" = "prompt" ]]; then
     if [[ -r /dev/tty && -w /dev/tty ]]; then
         printf '\n%sUse standard web ports? HTTP on :80, HTTPS on :443 (default 3000/3443).%s\n' \
