@@ -140,7 +140,7 @@ check_cgroups_v2() {
 offer_pi_cmdline_fix() {
     local mode=$1
     local cmdline=/boot/firmware/cmdline.txt
-    if [[ ! -f "$cmdline" ]]; then
+    if [[ ! -f "$cmdline" ]] || [[ ! -r "$cmdline" ]]; then
         return 1
     fi
     if [[ ! -r /dev/tty ]] || [[ ! -w /dev/tty ]]; then
@@ -191,24 +191,23 @@ offer_pi_cmdline_fix() {
     local backup ts
     ts=$(date +%Y%m%d-%H%M%S)
     backup="${cmdline}.bak.${ts}"
-    local sudo_cmd=""
+    local sudo_cmd=()
     if [[ $EUID -ne 0 ]]; then
         if command -v sudo >/dev/null 2>&1; then
-            sudo_cmd="sudo"
+            sudo_cmd=(sudo)
         else
             err "sudo not available — cannot edit $cmdline as $USER."
             return 1
         fi
     fi
-    # Intentional word-splitting on $sudo_cmd below: empty disappears, non-empty prefixes the command.
     info "Backing up $cmdline → $backup"
-    if ! $sudo_cmd cp -p "$cmdline" "$backup"; then
+    if ! "${sudo_cmd[@]}" cp -p "$cmdline" "$backup"; then
         err "Backup failed; not editing $cmdline."
         return 1
     fi
-    if ! printf '%s\n' "$proposed" | $sudo_cmd tee "$cmdline" >/dev/null; then
+    if ! printf '%s\n' "$proposed" | "${sudo_cmd[@]}" tee "$cmdline" >/dev/null; then
         err "Write to $cmdline failed; restoring backup."
-        $sudo_cmd cp -p "$backup" "$cmdline" || err "Restore from $backup also failed — fix manually before rebooting."
+        "${sudo_cmd[@]}" cp -p "$backup" "$cmdline" || err "Restore from $backup also failed — fix manually before rebooting."
         return 1
     fi
     # Final safety check: cmdline.txt MUST be a single line; some bootloaders
@@ -218,7 +217,7 @@ offer_pi_cmdline_fix() {
     lines=$(wc -l <"$cmdline")
     if [[ "$lines" -ne 1 ]]; then
         err "$cmdline ended up with $lines lines; restoring backup."
-        $sudo_cmd cp -p "$backup" "$cmdline" || err "Restore from $backup also failed — fix manually before rebooting."
+        "${sudo_cmd[@]}" cp -p "$backup" "$cmdline" || err "Restore from $backup also failed — fix manually before rebooting."
         return 1
     fi
     ok "Patched $cmdline (backup at $backup)."
