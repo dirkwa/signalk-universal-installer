@@ -18,11 +18,17 @@ REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
 # by install.sh and exported as SK_HTTP_PORT / SK_HTTPS_PORT. Default to
 # the standard web ports when run standalone. The HTTPS port is only
 # bound once the user enables TLS, but checking it on a fresh box is
-# harmless (it'll be free) and catches a collision early. 3003/3004/3010
-# are the fixed engine + backup ports.
+# harmless (it'll be free) and catches a collision early. 3003/3004 are
+# the fixed updater + doctor engine ports.
+#
+# 3010 (signalk-backup) is deliberately NOT checked: this installer
+# doesn't install or bind it (no quadlet uses it), so a fresh install's
+# only occupant is the user's own leftover backup container from a prior
+# run — a false conflict that aborts preflight for no reason. The
+# signalk-backup plugin manages that port on its own when enabled.
 SK_HTTP_PORT=${SK_HTTP_PORT:-80}
 SK_HTTPS_PORT=${SK_HTTPS_PORT:-443}
-PORTS_TO_CHECK=("$SK_HTTP_PORT" "$SK_HTTPS_PORT" 3003 3004 3010)
+PORTS_TO_CHECK=("$SK_HTTP_PORT" "$SK_HTTPS_PORT" 3003 3004)
 PODMAN_MIN_VERSION="4.4"
 
 fail() {
