@@ -257,8 +257,8 @@ PRIV_PORTS="${SIGNALK_PRIVILEGED_PORTS:-prompt}"
 # (including the empty default) stays "prompt". Mirrors the SIGNALK_LOCALHOST_ONLY
 # handling above.
 case "$PRIV_PORTS" in
-    1 | y | Y | yes | YES | Yes | true | TRUE | True | on | ON) PRIV_PORTS=1 ;;
-    0 | n | N | no | NO | No | false | FALSE | False | off | OFF) PRIV_PORTS=0 ;;
+    1 | y | Y | yes | YES | Yes | true | TRUE | True | on | ON | On) PRIV_PORTS=1 ;;
+    0 | n | N | no | NO | No | false | FALSE | False | off | OFF | Off) PRIV_PORTS=0 ;;
     *) PRIV_PORTS=prompt ;;
 esac
 if [[ "$PRIV_PORTS" = "prompt" ]]; then
