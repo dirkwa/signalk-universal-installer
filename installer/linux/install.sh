@@ -574,12 +574,29 @@ SK_PLUGINS=(signalk-container signalk-updater signalk-doctor)
 mkdir -p "$HOME/.signalk"
 
 info "running 'npm install' inside the signalk-server image"
+# UserNS mapping: the signalk-server image runs as `node` (UID 1000).
+# Bare --userns=keep-id maps the invoking HOST user's UID to the same
+# number inside — but on hosts where the invoking user isn't UID 1000
+# (e.g. `dirk` at 1001 because `pi` already owned 1000), that leaves
+# in-container `node` mapped to some unrelated subuid that can't read
+# ~/.signalk (owned by the host user, mode 0700). The explicit form
+# maps host-user → in-container UID 1000 regardless of host UID, so
+# the bind mount is owned by `node` from inside. Identity mapping
+# when the host user already is 1000.
+#
+# Capture output: previously this ran with >/dev/null 2>&1 so the
+# only signal on failure was the generic "npm install failed" warn —
+# operators had to re-run the command by hand to see what broke.
+# Now we tee npm's output to a temp file and replay it inline when
+# the install fails, while still keeping the success path quiet.
+NPM_LOG=$(mktemp)
 if podman run --rm \
-    --userns=keep-id \
+    --userns=keep-id:uid=1000,gid=1000 \
     -v "$HOME/.signalk:/home/node/.signalk:Z" \
     --entrypoint sh \
     "$SK_IMAGE" \
-    -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >/dev/null 2>&1; then
+    -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >"$NPM_LOG" 2>&1; then
+    rm -f "$NPM_LOG"
     for p in "${SK_PLUGINS[@]}"; do
         if [[ -d "$HOME/.signalk/node_modules/$p" ]]; then
             v=$(grep -m1 '"version"' "$HOME/.signalk/node_modules/$p/package.json" 2>/dev/null \
@@ -591,6 +608,9 @@ if podman run --rm \
     done
 else
     warn "npm install failed; plugins not installed. Install from the SignalK appstore later."
+    warn "npm output:"
+    sed 's/^/    /' "$NPM_LOG" >&2
+    rm -f "$NPM_LOG"
 fi
 
 # Auto-enable each plugin (one-time on first install). If a config file
