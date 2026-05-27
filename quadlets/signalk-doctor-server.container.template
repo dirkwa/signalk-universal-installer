@@ -53,6 +53,15 @@ Environment=DATA_DIR=/data
 Environment=LOCK_DIR=/updater-data
 Environment=NODE_ENV=production
 Environment=LOG_LEVEL=info
+# signalk-server HTTP/HTTPS endpoints for the doctor's signalk-health
+# probe. Ports are templated from the install-time SK_HTTP_PORT /
+# SK_HTTPS_PORT decision (80/443 by default). host.containers.internal,
+# not 127.0.0.1: the doctor is in its own netns. The probe hits HTTP
+# first; when SSL is on, signalk-server 302-redirects HTTP to HTTPS, and
+# the probe follows to SIGNALK_HTTPS_URL (verifying nothing — the leaf
+# is self-signed by signalk-ssl's local CA).
+Environment=SIGNALK_URL=http://host.containers.internal:__SK_HTTP_PORT__/signalk
+Environment=SIGNALK_HTTPS_URL=https://host.containers.internal:__SK_HTTPS_PORT__/signalk
 
 Label=io.signalk.persistent=true
 Label=io.signalk.role=doctor
