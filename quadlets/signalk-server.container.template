@@ -41,15 +41,22 @@ UserNS=keep-id:uid=1000,gid=1000
 Volume=%h/.signalk:/home/node/.signalk:Z
 Volume=%t/podman/podman.sock:/var/run/docker.sock
 
-# Allow signalk-server to bind privileged ports (< 1024) without root, so an
-# operator can move HTTPS off the 3443 default to 443 by setting `sslport`
-# in the admin UI (or the SSLPORT env var) — no re-install, no root. The
-# default port stays 3443; this only grants the capability, it does not
-# change the port. CAP_NET_BIND_SERVICE is narrow: it permits binding low
-# ports and nothing else, and is harmless when no low port is in use.
-AddCapability=CAP_NET_BIND_SERVICE
-
 Environment=SIGNALK_NODE_CONF_DIR=/home/node/.signalk
+
+# HTTP listen port. Rendered by the installer: 80 when the operator
+# accepts standard web ports, else 3000. signalk-server reads the PORT
+# env var ahead of settings.json (src/ports.ts). Binding a port < 1024
+# works because the installer lowers the HOST's
+# net.ipv4.ip_unprivileged_port_start to 80 — the container shares the
+# host network namespace (Network=host) and runs as a non-root user, so
+# a Quadlet capability alone (CAP_NET_BIND_SERVICE) does NOT suffice:
+# the cap lands in the bounding set but isn't effective for a non-root
+# process, and a network sysctl can't be set from inside a host-netns
+# container. The host sysctl is the only lever that works for this
+# topology. HTTPS uses `sslport` from settings.json (seeded to 443 by
+# the installer) — deliberately NOT the SSLPORT env var, because that
+# force-enables TLS before a certificate exists.
+Environment=PORT=__SK_HTTP_PORT__
 
 # Cut podman's SIGTERM → SIGKILL grace from the default 10s to 5s.
 # signalk-server doesn't trap SIGTERM (no handler in bin/signalk-server

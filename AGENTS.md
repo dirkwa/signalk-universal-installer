@@ -67,13 +67,13 @@ Paths the installer creates and the engine containers depend on:
 | `~/.config/containers/systemd/signalk-server.container` | installer + updater | Quadlet, rewritten on version switch and hardware change. |
 | `~/.config/containers/systemd/signalk-updater-server.container` | installer + updater (self-update) | Quadlet for the updater itself. |
 | `~/.config/containers/systemd/signalk-doctor-server.container` | installer | Quadlet for the doctor; not rewritten at runtime. |
-| `~/.signalk/` | signalk-server | SignalK data — never touched by installer or doctor. |
+| `~/.signalk/` | signalk-server | SignalK data, owned by signalk-server. The installer's writes here are narrow and idempotent: it installs the bundled plugins (`node_modules/`, via the container's own npm), seeds `plugin-config-data/*.json` to auto-enable them (never overwriting an existing file), and — when standard web ports are chosen — seeds `settings.json`'s `sslport` key only if absent (never sets `ssl`, never clobbers an existing value). It writes nothing else here and never touches user-authored config. |
 | `~/.signalk-updater/` | updater container + installer | Tokens, hardware.json, logs. |
 | `~/.signalk-doctor/` | doctor container + installer | Snapshots of Quadlets, last-good.json, tokens. |
 | `~/.signalk-doctor/signalk-token` | installer | Admin token (mode 0600) generated via `podman exec signalk-server signalk-generate-token -u admin -e 5y …`. Read by the doctor's drift scanner for the admin-gated `/skServer/diagnostics` endpoint. Idempotent: never overwritten by the installer if already non-empty. Rotation is operator-initiated (regenerate, overwrite the file; the doctor invalidates its cache on the next 401/403). |
 | `~/.local/bin/signalk-recovery` | installer | Static bash recovery script — works with zero containers running. |
 
-The installer never writes to `~/.signalk/` and never starts/stops `signalk-server` except via the updater's REST API (with a direct `systemctl --user start` fallback when the updater is unreachable).
+The installer's writes under `~/.signalk/` are limited to the narrow, idempotent set described in the table row above (bundled-plugin install, plugin auto-enable config, and the opt-in `sslport` seed). It never edits user-authored config beyond that, and never starts/stops `signalk-server` except via the updater's REST API (with a direct `systemctl --user start` fallback when the updater is unreachable).
 
 ## Engine images run on `:latest`
 

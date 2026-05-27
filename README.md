@@ -40,7 +40,7 @@ iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows
 
 Then open:
 
-- `http://localhost:3000` — SignalK admin UI.
+- `http://localhost` — SignalK admin UI (port 80 by default; `:3000` if you decline standard ports at install).
 - `http://localhost:3003` — Updater Console.
 - `http://localhost:3004` — Doctor Console.
 

@@ -14,7 +14,15 @@ detect_os
 
 REQUIRED_RAM_MB=${REQUIRED_RAM_MB:-2048}
 REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
-PORTS_TO_CHECK=(3000 3003 3004 3010)
+# signalk-server's HTTP port (and HTTPS, once TLS is enabled) is chosen
+# by install.sh and exported as SK_HTTP_PORT / SK_HTTPS_PORT. Default to
+# the standard web ports when run standalone. The HTTPS port is only
+# bound once the user enables TLS, but checking it on a fresh box is
+# harmless (it'll be free) and catches a collision early. 3003/3004/3010
+# are the fixed engine + backup ports.
+SK_HTTP_PORT=${SK_HTTP_PORT:-80}
+SK_HTTPS_PORT=${SK_HTTPS_PORT:-443}
+PORTS_TO_CHECK=("$SK_HTTP_PORT" "$SK_HTTPS_PORT" 3003 3004 3010)
 PODMAN_MIN_VERSION="4.4"
 
 fail() {

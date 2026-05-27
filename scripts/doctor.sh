@@ -6,9 +6,20 @@
 
 set -euo pipefail
 
+# signalk-server's HTTP port is install-time-configurable (80 or 3000).
+# Read it from the rendered Quadlet's `Environment=PORT=` line so this
+# standalone probe hits the right port without the operator exporting
+# SIGNALK_URL; fall back to 80 (the default) when the line is absent.
+sk_http_port() {
+    local q="${HOME}/.config/containers/systemd/signalk-server.container"
+    local p
+    p=$(sed -n 's/^Environment=PORT=\([0-9][0-9]*\).*/\1/p' "$q" 2>/dev/null | head -1)
+    printf '%s' "${p:-80}"
+}
+
 UPDATER_URL=${UPDATER_URL:-http://127.0.0.1:3003}
 DOCTOR_URL=${DOCTOR_URL:-http://127.0.0.1:3004}
-SIGNALK_URL=${SIGNALK_URL:-http://127.0.0.1:3000/signalk}
+SIGNALK_URL=${SIGNALK_URL:-http://127.0.0.1:$(sk_http_port)/signalk}
 
 check() {
     local name=$1; local url=$2

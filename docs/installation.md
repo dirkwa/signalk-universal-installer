@@ -10,7 +10,7 @@ curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/
 
 The installer:
 
-1. Detects host (OS, arch, distro family) and runs pre-flight: RAM ≥ 2 GB, disk ≥ 5 GB, ports 3000 / 3003 / 3004 / 3010 free, cgroups v2 with memory + pids delegation to the user slice (autofixed when possible), Podman ≥ 4.4.
+1. Detects host (OS, arch, distro family) and runs pre-flight: RAM ≥ 2 GB, disk ≥ 5 GB, the signalk-server ports (80 + 443, or 3000 + 3443 if you decline standard ports) and 3003 / 3004 / 3010 free, cgroups v2 with memory + pids delegation to the user slice (autofixed when possible), Podman ≥ 4.4.
 2. Installs Podman + `uidmap` + `slirp4netns` via `apt` if missing.
 3. Enables `loginctl enable-linger $USER` so the stack survives reboots.
 4. Adds you to `dialout`, `gpio`, `netdev` groups for USB serial / GPIO / CAN. Group memberships only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.
@@ -26,7 +26,7 @@ The installer:
 14. Drops a journald retention drop-in at `/etc/systemd/journald.conf.d/signalk.conf` (`SystemMaxUse=500M`, `MaxRetentionSec=14day`) via `sudo`. Idempotent: skipped silently if the drop-in already exists. On Pi this prevents the SD card from filling.
 15. Marks bootstrap-complete in `~/.signalk-doctor/last-good.json` so the doctor knows the install was validated end-to-end. Re-runs check this marker and switch to a "verify mode" summary instead of repeating the full install.
 
-When it finishes you have three URLs: `:3000` (SignalK), `:3003` (Updater Console), `:3004` (Doctor Console). The installer binds the engine containers to `0.0.0.0` by default because most users install headless and reach the consoles from another machine. The updater's mutating endpoints and the doctor's `/api/recover` are gated by bearer tokens (see `~/.signalk-{updater,doctor}/token`); the doctor's read-only probes are unauthenticated by design (recovery surface that always answers). To restrict everything to localhost set `SIGNALK_LOCALHOST_ONLY=true` before running the installer — useful on shared/guest WiFi where you'd rather not expose probe output.
+When it finishes you have three URLs: `:80` (SignalK — `:3000` if you declined standard ports), `:3003` (Updater Console), `:3004` (Doctor Console). The installer binds the engine containers to `0.0.0.0` by default because most users install headless and reach the consoles from another machine. The updater's mutating endpoints and the doctor's `/api/recover` are gated by bearer tokens (see `~/.signalk-{updater,doctor}/token`); the doctor's read-only probes are unauthenticated by design (recovery surface that always answers). To restrict everything to localhost set `SIGNALK_LOCALHOST_ONLY=true` before running the installer — useful on shared/guest WiFi where you'd rather not expose probe output.
 
 ### Quadlet layout
 
@@ -34,15 +34,25 @@ The installer drops three Quadlet files under `~/.config/containers/systemd/`. K
 
 | Quadlet | Notable settings |
 |---|---|
-| `signalk-server.container` | `Network=host` so signalk-server listens directly on the host's `:3000`; `UserNS=keep-id` so the in-container `node` user maps to the host user and `~/.signalk/` stays writable; `AddCapability=CAP_NET_BIND_SERVICE` so HTTPS can be moved to a privileged port (see below); `Restart=always` because the SignalK admin UI's "Restart" button does a clean `process.exit(0)` that `on-failure` wouldn't recover from; `StopTimeout=5` cuts podman's SIGTERM → SIGKILL grace from the default 10s to 5s (signalk-server doesn't trap SIGTERM upstream, so the full grace is dead time on every version switch). |
-| `signalk-updater-server.container` | Pasta networking with `PublishPort=…:3003:3003`; mounts `~/.signalk-updater`, `~/.signalk-doctor`, the Quadlet dir, the podman socket, and the host DBus session bus; pins `Environment=SIGNALK_HEALTH_URL`, `SIGNALK_URL`, `DOCTOR_HEALTH_URL` to `host.containers.internal` so the updater can reach signalk-server (`:3000`) and the doctor (`:3004`) across pasta's network boundary (`127.0.0.1` from inside this container would be its own loopback). |
+| `signalk-server.container` | `Network=host` so signalk-server listens directly on the host's HTTP port (`:80` by default, `:3000` if you declined standard ports); `Environment=PORT=` carries that choice; `UserNS=keep-id` so the in-container `node` user maps to the host user and `~/.signalk/` stays writable; `Restart=always` because the SignalK admin UI's "Restart" button does a clean `process.exit(0)` that `on-failure` wouldn't recover from; `StopTimeout=5` cuts podman's SIGTERM → SIGKILL grace from the default 10s to 5s (signalk-server doesn't trap SIGTERM upstream, so the full grace is dead time on every version switch). |
+| `signalk-updater-server.container` | Pasta networking with `PublishPort=…:3003:3003`; mounts `~/.signalk-updater`, `~/.signalk-doctor`, the Quadlet dir, the podman socket, and the host DBus session bus; pins `Environment=SIGNALK_HEALTH_URL`, `SIGNALK_URL`, `DOCTOR_HEALTH_URL` to `host.containers.internal` (with the chosen HTTP port substituted in) so the updater can reach signalk-server and the doctor (`:3004`) across pasta's network boundary (`127.0.0.1` from inside this container would be its own loopback). |
 | `signalk-doctor-server.container` | Same shape as the updater; mounts `~/.signalk-doctor` rw, `~/.signalk-updater` rw for the shared operation-lock, and `~/.local/bin` rw so the doctor's `/api/installer/refresh` can rewrite the host `signalk` / `signalk-recovery` scripts. |
 
 The updater rewrites `signalk-server.container`'s `Image=` line on each version switch (atomically — snapshot first, then rename + dir-fsync). Everything else in the Quadlet, including the env vars above and `StopTimeout`, is preserved verbatim.
 
-### HTTPS on port 443
+### Standard web ports (80 / 443)
 
-The stack defaults to plain HTTP on `:3000`. When you enable TLS (e.g. with the [signalk-ssl](https://github.com/dirkwa/signalk-ssl) plugin), signalk-server serves HTTPS on `:3443` by default. To use the standard `:443` instead, set **SSL Port** to `443` in the SignalK admin UI (Server → Settings) — or `SSLPORT=443` in the environment — and restart. No re-install and no root are needed: the Quadlet already grants `CAP_NET_BIND_SERVICE`, which is what lets a non-root process bind a port below 1024. Binding `:443` does **not** free `:80`; signalk-server's plain-HTTP listener and its HTTP→HTTPS redirect both stay on the configured HTTP port (`:3000` by default).
+By default the installer puts signalk-server on the standard web ports — **HTTP `:80`**, and **HTTPS `:443`** once you enable TLS (e.g. with the [signalk-ssl](https://github.com/dirkwa/signalk-ssl) plugin). The interactive installer asks `Use standard web ports? [Y/n]`; a piped `curl … | bash` run takes the default (yes). Decline, and signalk-server stays on the historical `:3000` / `:3443`.
+
+Making a privileged port (< 1024) bind from a rootless, non-root container is **not** a Quadlet capability question. `Network=host` means the container shares the host's network namespace, and the `node` process is non-root — so `AddCapability=CAP_NET_BIND_SERVICE` lands in the bounding set but never becomes *effective* for the process, and a network sysctl can't be set from inside a host-netns container. The only lever that works is the **host's** `net.ipv4.ip_unprivileged_port_start`. When you accept standard ports, the installer lowers it to `80` via a persistent drop-in at `/etc/sysctl.d/80-signalk-unprivileged-ports.conf` (requires sudo). This is a **host-wide** change: any unprivileged process on the box may then bind ports 80–1023.
+
+Mechanics:
+
+- **HTTP** is set with `Environment=PORT=80` in the server Quadlet (signalk-server reads `PORT` ahead of `settings.json`).
+- **HTTPS** is seeded as `sslport: 443` in `~/.signalk/settings.json` — *not* via the `SSLPORT` env var, because that would force `ssl: true` and make signalk-server serve a self-signed cert before you've set up a real one. The seed is written only if `sslport` is absent (your value is never overwritten) and only takes effect once you enable SSL.
+- Binding `:443` does **not** free `:80`; signalk-server's plain-HTTP listener and its HTTP→HTTPS redirect stay on the configured HTTP port.
+
+To stay on the old ports on a one-liner install, set `SIGNALK_PRIVILEGED_PORTS=0` in the environment; to force standard ports without the prompt (CI/unattended), set `SIGNALK_PRIVILEGED_PORTS=1`.
 
 ### Re-running
 

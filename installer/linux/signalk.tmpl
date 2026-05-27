@@ -19,7 +19,7 @@ SK_VERSION="__SK_VERSION__"
 
 UPDATER_URL=${UPDATER_URL:-http://127.0.0.1:3003}
 DOCTOR_URL=${DOCTOR_URL:-http://127.0.0.1:3004}
-SIGNALK_URL=${SIGNALK_URL:-http://127.0.0.1:3000/signalk}
+SIGNALK_URL=${SIGNALK_URL:-http://127.0.0.1:__SK_HTTP_PORT__/signalk}
 DOCTOR_DATA="${DOCTOR_DATA:-${HOME}/.signalk-doctor}"
 QUADLET_DIR="${HOME}/.config/containers/systemd"
 UNITS=(signalk-server signalk-updater-server signalk-doctor-server)
