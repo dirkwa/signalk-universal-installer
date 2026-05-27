@@ -34,11 +34,15 @@ The installer drops three Quadlet files under `~/.config/containers/systemd/`. K
 
 | Quadlet | Notable settings |
 |---|---|
-| `signalk-server.container` | `Network=host` so signalk-server listens directly on the host's `:3000`; `UserNS=keep-id` so the in-container `node` user maps to the host user and `~/.signalk/` stays writable; `Restart=always` because the SignalK admin UI's "Restart" button does a clean `process.exit(0)` that `on-failure` wouldn't recover from; `StopTimeout=5` cuts podman's SIGTERM → SIGKILL grace from the default 10s to 5s (signalk-server doesn't trap SIGTERM upstream, so the full grace is dead time on every version switch). |
+| `signalk-server.container` | `Network=host` so signalk-server listens directly on the host's `:3000`; `UserNS=keep-id` so the in-container `node` user maps to the host user and `~/.signalk/` stays writable; `AddCapability=CAP_NET_BIND_SERVICE` so HTTPS can be moved to a privileged port (see below); `Restart=always` because the SignalK admin UI's "Restart" button does a clean `process.exit(0)` that `on-failure` wouldn't recover from; `StopTimeout=5` cuts podman's SIGTERM → SIGKILL grace from the default 10s to 5s (signalk-server doesn't trap SIGTERM upstream, so the full grace is dead time on every version switch). |
 | `signalk-updater-server.container` | Pasta networking with `PublishPort=…:3003:3003`; mounts `~/.signalk-updater`, `~/.signalk-doctor`, the Quadlet dir, the podman socket, and the host DBus session bus; pins `Environment=SIGNALK_HEALTH_URL`, `SIGNALK_URL`, `DOCTOR_HEALTH_URL` to `host.containers.internal` so the updater can reach signalk-server (`:3000`) and the doctor (`:3004`) across pasta's network boundary (`127.0.0.1` from inside this container would be its own loopback). |
 | `signalk-doctor-server.container` | Same shape as the updater; mounts `~/.signalk-doctor` rw, `~/.signalk-updater` rw for the shared operation-lock, and `~/.local/bin` rw so the doctor's `/api/installer/refresh` can rewrite the host `signalk` / `signalk-recovery` scripts. |
 
 The updater rewrites `signalk-server.container`'s `Image=` line on each version switch (atomically — snapshot first, then rename + dir-fsync). Everything else in the Quadlet, including the env vars above and `StopTimeout`, is preserved verbatim.
+
+### HTTPS on port 443
+
+The stack defaults to plain HTTP on `:3000`. When you enable TLS (e.g. with the [signalk-ssl](https://github.com/dirkwa/signalk-ssl) plugin), signalk-server serves HTTPS on `:3443` by default. To use the standard `:443` instead, set **SSL Port** to `443` in the SignalK admin UI (Server → Settings) — or `SSLPORT=443` in the environment — and restart. No re-install and no root are needed: the Quadlet already grants `CAP_NET_BIND_SERVICE`, which is what lets a non-root process bind a port below 1024. Binding `:443` does **not** free `:80`; signalk-server's plain-HTTP listener and its HTTP→HTTPS redirect both stay on the configured HTTP port (`:3000` by default).
 
 ### Re-running
 
