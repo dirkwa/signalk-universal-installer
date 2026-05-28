@@ -917,16 +917,17 @@ JOURNALD_DESIRED='# Installed by signalk-universal-installer
 [Journal]
 SystemMaxUse=500M
 MaxRetentionSec=14day'
-# Read back via $SUDO: the drop-in is written by root and may be mode 0600,
-# so an unprivileged `cat` returns Permission denied → empty string → the
-# comparison never matches and we'd re-apply (sudo prompt + restart) on every
-# run. $SUDO is "" when already root, "sudo" otherwise.
-if [[ "$($SUDO cat "$JOURNALD_DROPIN" 2>/dev/null)" == "$JOURNALD_DESIRED" ]]; then
+# Plain `cat` (no $SUDO) so the no-op re-run never prompts for a password.
+# This works because we write the drop-in world-readable 0644 below — it's
+# plain config with no secrets, matching stock /etc/systemd/journald.conf and
+# our own /etc/sysctl.d drop-in. A 0600 file (how `$SUDO tee` left it before)
+# would make this read fail for the unprivileged user and re-apply every run.
+if [[ "$(cat "$JOURNALD_DROPIN" 2>/dev/null)" == "$JOURNALD_DESIRED" ]]; then
     ok "journald limits already applied (skipping)"
 else
     info "Capping journald to 500M / 14 days (requires sudo)"
     $SUDO install -d -m 0755 /etc/systemd/journald.conf.d
-    printf '%s\n' "$JOURNALD_DESIRED" | $SUDO tee "$JOURNALD_DROPIN" >/dev/null
+    printf '%s\n' "$JOURNALD_DESIRED" | $SUDO install -m 0644 /dev/stdin "$JOURNALD_DROPIN"
     $SUDO systemctl restart systemd-journald
     ok "journald limits applied"
 fi

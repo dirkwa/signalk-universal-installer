@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
-# Verifies install.sh's journald drop-in guard is idempotent across re-runs.
+# Verifies install.sh's journald drop-in guard is idempotent AND silent on
+# no-op re-runs (no sudo password prompt).
 #
-# Regression guard for the bug fixed alongside this test: PR #51 added an
-# "already applied (skipping)" check, but read the drop-in back with a plain
-# `cat`. The file is written by root via `$SUDO tee` and lands mode 0600, so
-# on a re-run the unprivileged installer's `cat` hits Permission denied →
-# empty string → the comparison never matches → the script re-prompts for
-# sudo and restarts journald on every single run.
+# Two bugs this guards against, both around the "already applied (skipping)"
+# check #51 introduced:
 #
-# This test extracts the guard's condition straight out of install.sh and
-# exercises it against a root-only (0600) drop-in file using a fake $SUDO
-# that mimics privilege escalation. The plain-cat form fails the assertion;
-# the $SUDO-cat form passes. Run from the repo root.
+#   1. The drop-in was written by root via `$SUDO tee`, landing mode 0600.
+#      The guard read it back with a plain `cat` as the unprivileged user →
+#      Permission denied → empty string → never matched → re-applied (sudo
+#      prompt + journald restart) on every single run.
+#   2. The first fix read it back via `$SUDO cat`. That matched correctly,
+#      but sudo prompted for a password just to read the file — so a no-op
+#      run still demanded a password for no reason.
+#
+# The correct shape: write the drop-in world-readable 0644 (it's plain
+# config, no secrets — matches stock journald.conf and our sysctl drop-in)
+# and read it back with a plain `cat`. A matching re-run then touches sudo
+# zero times. This test asserts that shape against the real install.sh.
+# Run from the repo root.
 
 set -euo pipefail
 
@@ -24,8 +30,8 @@ fi
 
 fail=0
 
-# 1. Pull the desired payload and the guard condition out of install.sh so
-#    this test tracks the real source rather than a hand-copied duplicate.
+# 1. Pull the desired payload out of install.sh so this test tracks the real
+#    source rather than a hand-copied duplicate.
 JOURNALD_DESIRED=$(awk '
     /^JOURNALD_DESIRED=/ { inblock = 1; sub(/^JOURNALD_DESIRED=./, ""); }
     inblock {
@@ -40,60 +46,57 @@ if [[ -z "$JOURNALD_DESIRED" ]]; then
 fi
 echo "[i] parsed desired journald payload (${#JOURNALD_DESIRED} bytes)"
 
-# The guard line we assert on. It must read the drop-in via $SUDO so the
-# comparison works even when the file is root-only 0600. The grep patterns
-# are literal install.sh source text, so they're single-quoted on purpose.
-# shellcheck disable=SC2016
-GUARD_LINE=$(grep -nE '== "\$JOURNALD_DESIRED"' "$INSTALL_SH" | head -1)
+# shellcheck disable=SC2016  # grep patterns are literal install.sh source text
+GUARD_LINE=$(grep -nE 'JOURNALD_DROPIN" 2>/dev/null\)" == "\$JOURNALD_DESIRED"' "$INSTALL_SH" | head -1)
 echo "[i] guard line: ${GUARD_LINE:-<not found>}"
 
-# 2. Static check: the guard must escalate with $SUDO when reading the
-#    drop-in back. A bare `cat "$JOURNALD_DROPIN"` is the regression.
+# 2a. Static check: the read-back must be a PLAIN cat. `$SUDO cat` here would
+#     re-introduce the password prompt on no-op runs (bug #2).
+# shellcheck disable=SC2016
+if grep -qE '\$\(cat "\$JOURNALD_DROPIN" 2>/dev/null\)" == "\$JOURNALD_DESIRED"' "$INSTALL_SH"; then
+    echo "  [OK]   guard reads drop-in with a plain cat (no sudo prompt on no-op)"
+else
+    echo "  [MISS] guard read-back is not a plain cat — a no-op re-run will touch sudo"
+    fail=1
+fi
 # shellcheck disable=SC2016
 if grep -qE '\$\(\$SUDO cat "\$JOURNALD_DROPIN"' "$INSTALL_SH"; then
-    echo "  [OK]   guard reads drop-in via \$SUDO"
-else
-    echo "  [MISS] guard does NOT read drop-in via \$SUDO — root-only 0600 file will fail the re-run check"
+    echo "  [MISS] guard reads via \$SUDO — prompts for a password just to skip"
     fail=1
 fi
 
-# 3. Behavioural check: simulate a root-written 0600 drop-in and confirm the
-#    guard condition reports "already applied" on the second run, as the
-#    unprivileged installer would experience it.
+# 2b. Static check: the WRITE must set mode 0644 so the plain read above can
+#     succeed for the unprivileged user. A bare `$SUDO tee` (root umask 0600)
+#     is what made the plain read fail in the first place (bug #1).
+# shellcheck disable=SC2016
+if grep -qE '\$SUDO install -m 0644 .* "\$JOURNALD_DROPIN"' "$INSTALL_SH"; then
+    echo "  [OK]   drop-in is written world-readable (0644)"
+else
+    echo "  [MISS] drop-in write does not force 0644 — root umask may leave it 0600 and unreadable"
+    fail=1
+fi
+
+# 3. Behavioural check: a 0644 drop-in written with the desired payload must
+#    be readable — and equal — via a plain cat as the current (unprivileged)
+#    user, so the guard skips without escalating.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 DROPIN="$tmp/signalk.conf"
 printf '%s\n' "$JOURNALD_DESIRED" > "$DROPIN"
+chmod 0644 "$DROPIN"
 
-# Fake $SUDO: reads succeed (mimics escalation). We can't actually chmod the
-# file unreadable as ourselves in CI (we own it), so we model the privilege
-# split directly: PLAIN reads simulate the unprivileged path, SUDO reads the
-# escalated path. The regression is that the unprivileged read comes back
-# empty for a 0600 file.
-plain_read=""          # unprivileged cat on a root-only file → empty
-sudo_read=$(cat "$DROPIN")   # escalated cat → full content
-
-# 3a. The buggy form (plain cat) must NOT match — proving the bug is real.
-if [[ "$plain_read" == "$JOURNALD_DESIRED" ]]; then
-    echo "  [MISS] plain-cat form unexpectedly matched — test no longer reproduces the bug"
-    fail=1
+if [[ "$(cat "$DROPIN" 2>/dev/null)" == "$JOURNALD_DESIRED" ]]; then
+    echo "  [OK]   plain cat of a 0644 drop-in matches desired payload → guard skips, no sudo"
 else
-    echo "  [OK]   plain-cat (unprivileged) read does not match → would re-apply (the bug)"
-fi
-
-# 3b. The fixed form ($SUDO cat) must match → guard skips correctly.
-if [[ "$sudo_read" == "$JOURNALD_DESIRED" ]]; then
-    echo "  [OK]   \$SUDO-cat read matches desired payload → guard skips re-apply"
-else
-    echo "  [MISS] \$SUDO-cat read did not match desired payload"
+    echo "  [MISS] plain cat of a 0644 drop-in did not match desired payload"
     fail=1
 fi
 
 if (( fail )); then
     echo
-    echo "[ERR] journald drop-in guard is not idempotent — see entries above." >&2
+    echo "[ERR] journald drop-in guard is not idempotent/silent — see entries above." >&2
     exit 1
 fi
 echo
-echo "[OK] journald drop-in guard is idempotent."
+echo "[OK] journald drop-in guard is idempotent and silent on no-op re-runs."
