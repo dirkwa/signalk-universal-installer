@@ -31,12 +31,17 @@ fi
 # narrow shape detect-hardware.sh emits.
 hardware_block() {
     if command -v jq >/dev/null 2>&1; then
+        # Each clause is parenthesized so its `|` pipeline stays local to
+        # the array element. Without the parens, jq's `|` binds across the
+        # whole comma-list: the serial stream gets piped into the next
+        # clause's `select(.enabled ...)`, which indexes the already-built
+        # "AddDevice=..." string and errors with "Cannot index string".
         jq -r '
           [
-            (.serial // [])[] | select(.enabled == true) | "AddDevice=" + .byId,
-            (.can // [])[] | select(.enabled == true) | "AddDevice=/dev/" + .interface,
-            (.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=/run/dbus:/run/dbus:ro",
-            (.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem"
+            ((.serial // [])[] | select(.enabled == true) | "AddDevice=" + .byId),
+            ((.can // [])[] | select(.enabled == true) | "AddDevice=/dev/" + .interface),
+            ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=/run/dbus:/run/dbus:ro"),
+            ((.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem")
           ] | .[]
         ' "$HW_FILE"
     else
