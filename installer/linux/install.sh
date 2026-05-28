@@ -917,7 +917,11 @@ JOURNALD_DESIRED='# Installed by signalk-universal-installer
 [Journal]
 SystemMaxUse=500M
 MaxRetentionSec=14day'
-if [[ -f "$JOURNALD_DROPIN" ]] && [[ "$(cat "$JOURNALD_DROPIN" 2>/dev/null)" == "$JOURNALD_DESIRED" ]]; then
+# Read back via $SUDO: the drop-in is written by root and may be mode 0600,
+# so an unprivileged `cat` returns Permission denied → empty string → the
+# comparison never matches and we'd re-apply (sudo prompt + restart) on every
+# run. $SUDO is "" when already root, "sudo" otherwise.
+if [[ "$($SUDO cat "$JOURNALD_DROPIN" 2>/dev/null)" == "$JOURNALD_DESIRED" ]]; then
     ok "journald limits already applied (skipping)"
 else
     info "Capping journald to 500M / 14 days (requires sudo)"
