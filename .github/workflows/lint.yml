@@ -44,3 +44,6 @@ jobs:
 
       - name: orphan container detection
         run: bash scripts/test/check-orphan-detection.sh
+
+      - name: precise port-conflict check
+        run: bash scripts/test/check-port-precise.sh

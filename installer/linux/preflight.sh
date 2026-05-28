@@ -19,7 +19,10 @@ REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
 # the standard web ports when run standalone. The HTTPS port is only
 # bound once the user enables TLS, but checking it on a fresh box is
 # harmless (it'll be free) and catches a collision early. 3003/3004 are
-# the fixed updater + doctor engine ports.
+# the fixed updater + doctor engine ports. 3000 is signalk-server's
+# default fallback port: when its chosen port (80) is already taken,
+# signalk-server falls back to 3000 — so a stray server squatting 3000
+# is exactly how a duplicate instance hides. Checking it catches that.
 #
 # 3010 (signalk-backup) is deliberately NOT checked: this installer
 # doesn't install or bind it (no quadlet uses it), so a fresh install's
@@ -28,8 +31,21 @@ REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
 # signalk-backup plugin manages that port on its own when enabled.
 SK_HTTP_PORT=${SK_HTTP_PORT:-80}
 SK_HTTPS_PORT=${SK_HTTPS_PORT:-443}
-PORTS_TO_CHECK=("$SK_HTTP_PORT" "$SK_HTTPS_PORT" 3003 3004)
+PORTS_TO_CHECK=("$SK_HTTP_PORT" "$SK_HTTPS_PORT" 3000 3003 3004)
 PODMAN_MIN_VERSION="4.4"
+
+# Which managed container is expected to hold each port. On a re-run a bound
+# port is only "expected" if its owning managed container is actually
+# running — otherwise something else (a stray container, an unrelated
+# service) holds it and that's a real conflict, even in verify mode.
+port_owner() {
+    case "$1" in
+        "$SK_HTTP_PORT" | "$SK_HTTPS_PORT" | 3000) echo "signalk-server" ;;
+        3003) echo "signalk-updater-server" ;;
+        3004) echo "signalk-doctor-server" ;;
+        *) echo "" ;;
+    esac
+}
 
 fail() {
     err "$@"
@@ -62,27 +78,49 @@ check_disk() {
 
 # `bootstrappedAt` in ~/.signalk-doctor/last-good.json is written by
 # install.sh's last step on every successful pass. Its presence means
-# this isn't a fresh install — ports being held by signalk-* services
-# is the expected state, not a collision.
+# this isn't a fresh install — ports held by the managed signalk-*
+# containers are the expected state, not a collision.
 is_verify_mode() {
     local marker="${HOME}/.signalk-doctor/last-good.json"
     [[ -f "$marker" ]] && grep -q '"bootstrappedAt"' "$marker" 2>/dev/null
 }
 
+# True if a named container is currently running. Used to decide whether a
+# bound port is held by the managed container that should own it.
+managed_container_running() {
+    local name=$1
+    command -v podman >/dev/null 2>&1 || return 1
+    podman ps --filter "name=^${name}$" --format '{{.Names}}' 2>/dev/null \
+        | grep -qx "$name"
+}
+
 check_ports() {
-    local p
+    local p owner
+    # A real conflict: port bound on a fresh install, OR bound on a re-run
+    # but the managed container that should own it is NOT running (so
+    # something else holds it — e.g. a stray duplicate server on 3000).
     local conflicts=()
+    # Expected on a re-run: bound and the owning managed container is up.
+    local expected=()
+    local verify=0
+    is_verify_mode && verify=1
     for p in "${PORTS_TO_CHECK[@]}"; do
-        if ss -ltn "( sport = :$p )" 2>/dev/null | tail -n +2 | grep -q .; then
+        ss -ltn "( sport = :$p )" 2>/dev/null | tail -n +2 | grep -q . || continue
+        owner=$(port_owner "$p")
+        if (( verify )) && [[ -n "$owner" ]] && managed_container_running "$owner"; then
+            expected+=("$p")
+        else
             conflicts+=("$p")
         fi
     done
     if (( ${#conflicts[@]} > 0 )); then
-        if is_verify_mode; then
-            ok "Ports ${conflicts[*]} bound (expected — existing install)"
+        if (( verify )); then
+            fail "Port(s) in use but not by the expected managed container: ${conflicts[*]} — a stray/duplicate process is holding them. Check 'podman ps' for unmanaged containers, or stop the conflicting service."
         else
             fail "Port(s) already in use: ${conflicts[*]} — stop the conflicting service or set a different port"
         fi
+    elif (( ${#expected[@]} > 0 )); then
+        ok "Ports ${expected[*]} held by the managed signalk containers (expected — existing install)"
     else
         ok "Ports ${PORTS_TO_CHECK[*]} are free"
     fi
