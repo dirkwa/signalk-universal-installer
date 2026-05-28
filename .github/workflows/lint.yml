@@ -41,3 +41,6 @@ jobs:
 
       - name: render server quadlet
         run: bash scripts/test/check-render-quadlet.sh
+
+      - name: orphan container detection
+        run: bash scripts/test/check-orphan-detection.sh

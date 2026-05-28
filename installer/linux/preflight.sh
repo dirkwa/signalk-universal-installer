@@ -373,6 +373,73 @@ check_legacy_install() {
     fi
 }
 
+# Filter `Name|Image` lines (stdin) down to orphan container names: those
+# whose image reference contains "signalk-server" (tag/owner-agnostic) but
+# whose name is not one of the three Quadlet-managed containers. Split out
+# from check_orphan_containers so it can be unit-tested with fixture input.
+_orphan_names_from_ps() {
+    local managed="signalk-server signalk-updater-server signalk-doctor-server"
+    local name image
+    # `|| [[ -n "$name" ]]` so a final line with no trailing newline is still
+    # processed (read returns non-zero at EOF but has assigned the fields).
+    while IFS='|' read -r name image || [[ -n "$name" ]]; do
+        [[ -z "$name" ]] && continue
+        case "$image" in
+            *signalk-server*) ;;
+            *) continue ;;
+        esac
+        case " $managed " in
+            *" $name "*) continue ;;
+        esac
+        printf '%s\n' "$name"
+    done
+}
+
+# Detect containers running a signalk-server image that are NOT the
+# Quadlet-managed `signalk-server`. These come from ad-hoc `podman run`
+# (e.g. a capability/bind probe whose entrypoint booted a full server) and
+# survive across re-runs because they aren't systemd-managed and carry
+# random names, so no `name=signalk-` filter ever sees them. On Network=host
+# they squat signalk-server's port (or its 3000 fallback) and serve stale
+# code from an older image — which looks exactly like "my changes aren't
+# arriving." Offer to remove them interactively; warn otherwise.
+check_orphan_containers() {
+    if ! command -v podman >/dev/null 2>&1; then
+        return 0
+    fi
+    local orphans=()
+    mapfile -t orphans < <(podman ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | _orphan_names_from_ps)
+
+    if (( ${#orphans[@]} == 0 )); then
+        ok "No orphan signalk-server containers"
+        return 0
+    fi
+
+    warn "Unmanaged signalk-server container(s) running: ${orphans[*]}"
+    warn "These are not part of the systemd stack. On host networking they can"
+    warn "squat signalk-server's port and serve stale code from an older image."
+
+    if [[ ! -r /dev/tty ]] || [[ ! -w /dev/tty ]]; then
+        warn "Remove them with:  podman rm -f ${orphans[*]}"
+        return 0
+    fi
+    printf '\nRemove these orphan container(s) now? [y/N] ' >/dev/tty
+    local reply=""
+    read -r reply </dev/tty || return 0
+    case "$reply" in
+        y|Y|yes|YES)
+            if podman rm -f "${orphans[@]}" >/dev/null 2>&1; then
+                ok "Removed orphan container(s): ${orphans[*]}"
+            else
+                warn "Failed to remove some orphan container(s). Remove manually: podman rm -f ${orphans[*]}"
+            fi
+            ;;
+        *)
+            info "Left orphan container(s) in place. Remove later: podman rm -f ${orphans[*]}"
+            ;;
+    esac
+}
+
 check_distro_blocked() {
     # Debian 12 (bookworm) ships podman 4.3.1; Quadlet support arrived
     # in 4.4. We previously enabled bookworm-backports to upgrade, but
@@ -414,6 +481,12 @@ main() {
     check_linger
     check_storage_fs
     check_legacy_install
+    check_orphan_containers
 }
 
-main "$@"
+# Only run the checks when executed directly. When sourced (e.g. by the
+# test harness to exercise individual helpers like _orphan_names_from_ps),
+# define the functions but don't run main.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
