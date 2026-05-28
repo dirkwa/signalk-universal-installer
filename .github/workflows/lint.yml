@@ -38,3 +38,6 @@ jobs:
 
       - name: journald drop-in idempotency
         run: bash scripts/test/check-journald-idempotent.sh
+
+      - name: render server quadlet
+        run: bash scripts/test/check-render-quadlet.sh
