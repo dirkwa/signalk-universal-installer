@@ -47,3 +47,6 @@ jobs:
 
       - name: precise port-conflict check
         run: bash scripts/test/check-port-precise.sh
+
+      - name: privileged-port prompt skip
+        run: bash scripts/test/check-priv-ports-skip-prompt.sh

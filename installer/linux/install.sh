@@ -261,6 +261,17 @@ case "$PRIV_PORTS" in
     0 | n | N | no | NO | No | false | FALSE | False | off | OFF | Off) PRIV_PORTS=0 ;;
     *) PRIV_PORTS=prompt ;;
 esac
+# If no explicit choice was given (still "prompt") but a prior run already
+# lowered the privileged-port floor, the operator answered "yes" before —
+# don't ask again. The sysctl drop-in is this installer's own persistent
+# artifact, written 0644 (world-readable, no sudo needed to detect) only
+# when standard ports were chosen. Its presence is the durable record of
+# that decision, so re-runs honour it silently.
+PRIV_SYSCTL_FILE="/etc/sysctl.d/80-signalk-unprivileged-ports.conf"
+if [[ "$PRIV_PORTS" = "prompt" && -f "$PRIV_SYSCTL_FILE" ]]; then
+    PRIV_PORTS=1
+    info "Standard web ports already configured (${PRIV_SYSCTL_FILE}); keeping :80/:443."
+fi
 if [[ "$PRIV_PORTS" = "prompt" ]]; then
     if [[ -r /dev/tty && -w /dev/tty ]]; then
         printf '\n%sUse standard web ports? HTTP on :80, HTTPS on :443 (default 3000/3443).%s\n' \
@@ -333,7 +344,8 @@ fi
 if [[ "$PRIV_PORTS" = "1" ]]; then
     section "Privileged web ports"
     PRIV_SYSCTL_KEY="net.ipv4.ip_unprivileged_port_start"
-    PRIV_SYSCTL_FILE="/etc/sysctl.d/80-signalk-unprivileged-ports.conf"
+    # PRIV_SYSCTL_FILE is set near the prompt above (used there to detect a
+    # prior "yes" and skip re-prompting).
     current_floor=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)
     if (( current_floor <= 80 )); then
         ok "${PRIV_SYSCTL_KEY} already ${current_floor} (≤ 80)"
