@@ -86,8 +86,10 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/render-server-quadlet.sh \
         installer/linux/install-recovery-script.sh \
         installer/linux/install-signalk-command.sh \
+        installer/linux/install-socketcan-script.sh \
         installer/linux/signalk.tmpl \
         installer/linux/signalk-recovery.tmpl \
+        installer/linux/signalk-socketcan.tmpl \
         installer/linux/legacy-cleanup.sh \
         installer/linux/lib/colors.sh \
         installer/linux/lib/distro.sh \
@@ -698,6 +700,7 @@ ok "daemon-reload OK"
 section "Host CLI tools"
 bash "$HERE/install-recovery-script.sh"
 INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
+bash "$HERE/install-socketcan-script.sh"
 
 # 11b. signalk-server drift apply
 # Re-runs of the installer may change PORT or the image tag (operator picks

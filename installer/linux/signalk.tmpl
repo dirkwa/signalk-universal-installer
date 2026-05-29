@@ -5,6 +5,7 @@
 # Usage:
 #   signalk health         show stack health (containers, services, URLs)
 #   signalk recover [...]  delegate to ~/.local/bin/signalk-recovery
+#   signalk socketcan [..] Pi CAN-HAT detection + setup recipe
 #   signalk update         refresh installer scripts + Quadlet templates via doctor
 #   signalk bug-report [--to <dir>]
 #                          bundle logs + state into <dir>/signalk-bug-report-*.tar.gz
@@ -68,6 +69,22 @@ cmd_recover() {
         exit 1
     fi
     exec "$HOME/.local/bin/signalk-recovery" "$@"
+}
+
+cmd_socketcan() {
+    # Thin delegate into the sibling helper installed by
+    # install-socketcan-script.sh. Same pattern as cmd_recover so the
+    # dispatcher doesn't carry the body. On older installs that don't
+    # yet have the helper, point the operator at `signalk update` so
+    # the doctor's installer-refresh endpoint pulls the new artifact
+    # without re-running the bash bootstrap one-liner.
+    if [[ ! -x "$HOME/.local/bin/signalk-socketcan" ]]; then
+        echo "[ERR] ~/.local/bin/signalk-socketcan is missing." >&2
+        echo "  Run 'signalk update' to refresh installer artifacts, or re-run" >&2
+        echo "  the bash bootstrap one-liner." >&2
+        exit 1
+    fi
+    exec "$HOME/.local/bin/signalk-socketcan" "$@"
 }
 
 cmd_update() {
@@ -924,6 +941,7 @@ cmd_bug_report() {
 case "${1:-help}" in
     health)     cmd_health ;;
     recover)    shift; cmd_recover "$@" ;;
+    socketcan)  shift; cmd_socketcan "$@" ;;
     update)     cmd_update ;;
     bug-report) shift; cmd_bug_report "$@" ;;
     uninstall)  cmd_uninstall ;;
