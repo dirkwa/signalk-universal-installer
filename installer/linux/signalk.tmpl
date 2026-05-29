@@ -229,6 +229,10 @@ cmd_bug_report() {
     local outdir
     outdir=$(mktemp -d -t signalk-bug-report.XXXXXX)
     local bundle="$outdir/signalk-bug-report-$stamp"
+    # Declared here so the assignment inside the `{ … } >hardware-raw.txt`
+    # brace group below is a plain re-bind. Brace groups don't open a
+    # subshell, but `local` inside a redirected block reads oddly.
+    local cfgfile=""
     mkdir -p "$bundle"
 
     echo "[i] Collecting diagnostics into $bundle"
@@ -667,7 +671,7 @@ cmd_bug_report() {
             echo
             # /boot/firmware/cmdline.txt + config.txt are Pi OS's canonical
             # locations on bookworm+. Older Pi OS used /boot/. Try both.
-            local cfgfile=""
+            cfgfile=""
             for candidate in /boot/firmware/config.txt /boot/config.txt; do
                 if [[ -r "$candidate" ]]; then
                     cfgfile="$candidate"
