@@ -128,7 +128,7 @@ candump can0
 # typical NMEA 2000 messages from the bus.
 ```
 
-Re-running `signalk socketcan status` after this will show `socketcanCandidate.configApplied=true` and `socketcanCandidate.ipLinkUp=true` in `~/.signalk-updater/hardware.json`.
+Re-running `signalk socketcan status` after this will reflect the applied configuration and the live interface in `~/.signalk-updater/hardware.json`. The exact JSON keys under `socketcanCandidate` are an implementation detail and may change between releases — read the file with `jq .socketcanCandidate ~/.signalk-updater/hardware.json` to see the current shape.
 
 ## Wiring SignalK to the can0 interface
 

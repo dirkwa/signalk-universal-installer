@@ -29,18 +29,21 @@ HARDWARE_JSON="${UPDATER_DATA}/hardware.json"
 DOC_URL="https://dirkwa.github.io/signalk-universal-installer/docs/socketcan.html"
 
 # ─── output helpers ────────────────────────────────────────────────────
-# Match the dispatcher's [i]/[OK]/[!]/[ERR] convention so the CLI feels
-# consistent. We don't source lib/colors.sh because this script may be
-# refreshed by the doctor onto a host that doesn't have lib/ next to it.
-if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
-    C_BOLD=$(tput bold 2>/dev/null || true)
-    C_BLUE=$(tput setaf 4 2>/dev/null || true)
-    C_GREEN=$(tput setaf 2 2>/dev/null || true)
-    C_YELLOW=$(tput setaf 3 2>/dev/null || true)
-    C_RED=$(tput setaf 1 2>/dev/null || true)
-    C_RESET=$(tput sgr0 2>/dev/null || true)
+# Mirrors installer/linux/lib/colors.sh exactly: same ANSI escapes,
+# same `[[ -t 1 && -z "${NO_COLOR:-}" ]]` gate. We can't `source` the
+# lib because this script is shipped standalone to ~/.local/bin/ (and
+# the doctor's installer-refresh delivers it on its own). Inlining
+# matches the lib byte-for-byte so behaviour stays aligned without
+# the dependency. Same helper signatures (info/ok/warn/err/section).
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_RED=$'\033[0;31m'
+    C_GREEN=$'\033[0;32m'
+    C_YELLOW=$'\033[0;33m'
+    C_BLUE=$'\033[0;34m'
+    C_BOLD=$'\033[1m'
+    C_RESET=$'\033[0m'
 else
-    C_BOLD=""; C_BLUE=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_RESET=""
+    C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_BOLD=''; C_RESET=''
 fi
 info()    { printf '%s[i]%s %s\n' "$C_BLUE"   "$C_RESET" "$*"; }
 ok()      { printf '%s[OK]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
@@ -343,7 +346,14 @@ cmd_status() {
         overlays=$(existing_overlays)
         if [[ -n "$overlays" ]]; then
             ok "Existing CAN/SPI overlay(s):"
-            printf '    %s\n' "$overlays"
+            # existing_overlays returns one overlay per line; printf with
+            # a single quoted string would only indent the first row.
+            # Walk line-by-line so multi-overlay HATs (Waveshare's three)
+            # all get the indent.
+            while IFS= read -r overlay_line; do
+                [[ -n "$overlay_line" ]] || continue
+                printf '    %s\n' "$overlay_line"
+            done <<<"$overlays"
         else
             warn "No CAN/SPI overlay configured."
         fi
@@ -416,7 +426,10 @@ cmd_interactive() {
     overlays=$(existing_overlays)
     if [[ -n "$overlays" ]]; then
         ok "Existing CAN/SPI overlay(s) in config.txt:"
-        printf '    %s\n' "$overlays"
+        while IFS= read -r overlay_line; do
+            [[ -n "$overlay_line" ]] || continue
+            printf '    %s\n' "$overlay_line"
+        done <<<"$overlays"
     else
         info "No CAN/SPI overlay in config.txt yet."
     fi
