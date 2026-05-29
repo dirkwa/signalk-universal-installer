@@ -20,13 +20,17 @@
 #   9. Pull all three images
 #  10. Render and atomic-write three Quadlets
 #  11. systemctl --user daemon-reload
-#  12. Start doctor + updater services
+#  11a. Install ~/.local/bin/{signalk,signalk-recovery} (CLI dispatcher:
+#       health / recover / bug-report / uninstall). Installed BEFORE any
+#       container restart so the operator always has these tools when
+#       something below fails. Also guarantees the source dir for the
+#       doctor Quadlet's `~/.local/bin` bind-mount exists.
+#  11b. signalk-server drift apply (restart only if Quadlet drifted)
+#  12. Start doctor + updater services (warn-and-continue on failure)
 #  13. Wait for doctor + updater health
 #  14. Ask the updater to start signalk-server (with systemctl fallback)
 #  15. Wait for signalk-server health
-#  16. Install ~/.local/bin/signalk-recovery
-#  16b. Install ~/.local/bin/signalk (CLI dispatcher: health/recover/bug-report/uninstall)
-#  16c. Append a PATH snippet to the user's login-shell rc
+#  16. Append a PATH snippet to the user's login-shell rc
 #  17. Journald drop-in (sudo)
 #  18. Mark bootstrap-complete in last-good.json
 #  18b. (re-runs only) Verification pass: report healthy/broken checkpoints
@@ -669,6 +673,23 @@ section "systemd-user daemon-reload"
 systemctl --user daemon-reload
 ok "daemon-reload OK"
 
+# 11a. Install host CLI tools (`signalk` + `signalk-recovery`) BEFORE any
+# container restart that might fail. Two reasons:
+#
+# 1) `signalk uninstall` and `signalk bug-report` must be available to the
+#    operator when a peer-container start fails downstream. Installing the
+#    CLI after the failure point (as previous versions did) left the
+#    operator with no installer-provided way to clean up or gather logs.
+# 2) The doctor Quadlet bind-mounts `~/.local/bin` (for the doctor's
+#    /api/installer/refresh endpoint). install-recovery-script.sh and
+#    install-signalk-command.sh both `mkdir -p ~/.local/bin`, so running
+#    them here guarantees the source path exists before the doctor unit
+#    starts. (PR2 makes the mkdir explicit at Quadlet-render time as
+#    belt-and-braces against future re-ordering.)
+section "Host CLI tools"
+bash "$HERE/install-recovery-script.sh"
+INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
+
 # 11b. signalk-server drift apply
 # Re-runs of the installer may change PORT or the image tag (operator picks
 # standard ports at the prompt, or bumps the engine channel). The rewritten
@@ -700,10 +721,37 @@ fi
 # is a no-op — the old container keeps running and the new `Image=` line
 # on disk goes unused until the next reboot. `restart` is equivalent to
 # `start` for inactive units, so the first-boot path is unaffected.
+#
+# Failure handling: a bare `systemctl restart` exits non-zero and, under
+# `set -e`, would abort the whole installer here. That hides the actual
+# reason from the operator (systemd only prints "control process exited
+# with error code") AND skips the rest of the install — including the
+# health-check warns, the bundled plugin install, and (most painfully)
+# the `signalk` CLI install that the operator would need for
+# `signalk bug-report` or `signalk uninstall`. So restart_peer_unit
+# captures status + the recent journal inline and returns non-zero
+# without aborting; the downstream wait_for_http retries cover the case
+# where the unit recovers on its own.
 section "(Re)starting peer containers"
-systemctl --user restart signalk-doctor-server.service
-systemctl --user restart signalk-updater-server.service
-ok "doctor and updater units (re)started"
+restart_peer_unit() {
+    local unit=$1
+    if systemctl --user restart "$unit"; then
+        ok "$unit restarted"
+        return 0
+    fi
+    warn "$unit failed to restart — capturing diagnostics:"
+    {
+        echo "--- systemctl --user status $unit ---"
+        systemctl --user --no-pager --full status "$unit" 2>&1 || true
+        echo
+        echo "--- journalctl --user -n 50 -u $unit ---"
+        journalctl --user --no-pager -n 50 -u "$unit" 2>&1 || true
+    } | sed 's/^/    /' >&2
+    warn "continuing — health checks below will retry, and 'signalk bug-report' captures full state"
+    return 1
+}
+restart_peer_unit signalk-doctor-server.service || true
+restart_peer_unit signalk-updater-server.service || true
 
 # 13. Wait for health (first-boot tolerant per R1.3)
 section "Health checks"
@@ -905,15 +953,7 @@ else
     fi
 fi
 
-# 16. Recovery script
-section "Host recovery script"
-bash "$HERE/install-recovery-script.sh"
-
-# 16b. `signalk` command dispatcher
-section "signalk command"
-INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
-
-# 16c. Ensure ~/.local/bin is on PATH for future logins.
+# 16. Ensure ~/.local/bin is on PATH for future logins.
 #
 # Debian-derived /etc/profile.d/ adds ~/.local/bin to PATH only when the
 # directory existed at login time. Operators running our installer for
