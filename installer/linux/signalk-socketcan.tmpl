@@ -436,14 +436,16 @@ cmd_interactive() {
 
     mods=$(loaded_can_modules)
     if [[ -n "$mods" ]]; then
-        ok "Loaded modules: $(echo "$mods" | tr '\n' ' ')"
+        # paste joins lines with a separator (no trailing one), unlike
+        # `tr '\n' ' '` which would leave a dangling space at end-of-line.
+        ok "Loaded modules: $(echo "$mods" | paste -sd ' ' -)"
     else
         info "No CAN-related kernel modules loaded."
     fi
 
     ifaces=$(can_interfaces)
     if [[ -n "$ifaces" ]]; then
-        ok "Existing CAN interface(s): $(echo "$ifaces" | tr '\n' ' ')"
+        ok "Existing CAN interface(s): $(echo "$ifaces" | paste -sd ' ' -)"
     else
         info "No CAN interface present."
     fi
