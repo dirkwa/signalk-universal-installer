@@ -605,6 +605,36 @@ atomic_write() {
     mv -f "$tmp" "$target"
 }
 
+# Echo a one-line reason describing how the running signalk-server container
+# differs from what the installer just rendered, or empty when they match.
+# Truth source is the running container's `.Config.Env` + `.ImageName`, not
+# Quadlet text — file diffs are noisy (template tweaks, the operator-owned
+# user-additions block, hardware-detect deltas that have already been picked
+# up by a prior restart). Used to decide whether `signalk-server.service`
+# needs a `systemctl --user restart` to apply the rewritten Quadlet.
+signalk_server_drift_reason() {
+    podman container exists signalk-server 2>/dev/null || { echo ""; return 0; }
+    local state run_port run_image
+    state=$(podman inspect signalk-server --format '{{.State.Status}}' 2>/dev/null || echo unknown)
+    if [[ "$state" != "running" ]]; then
+        echo "container state=$state"
+        return 0
+    fi
+    run_port=$(podman inspect signalk-server \
+        --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+        | sed -n 's/^PORT=//p' | head -1)
+    run_image=$(podman inspect signalk-server --format '{{.ImageName}}' 2>/dev/null)
+    if [[ "$run_port" != "$SK_HTTP_PORT" ]]; then
+        echo "PORT env: running=${run_port:-<unset>} rendered=$SK_HTTP_PORT"
+        return 0
+    fi
+    if [[ -n "$run_image" && "$run_image" != "$SK_IMAGE" ]]; then
+        echo "image: running=$run_image rendered=$SK_IMAGE"
+        return 0
+    fi
+    echo ""
+}
+
 snapshot_existing signalk-server.container
 snapshot_existing signalk-updater-server.container
 snapshot_existing signalk-doctor-server.container
@@ -638,6 +668,31 @@ ok "Quadlets written to $QUADLET_DIR"
 section "systemd-user daemon-reload"
 systemctl --user daemon-reload
 ok "daemon-reload OK"
+
+# 11b. signalk-server drift apply
+# Re-runs of the installer may change PORT or the image tag (operator picks
+# standard ports at the prompt, or bumps the engine channel). The rewritten
+# Quadlet is on disk and daemon-reload above has parsed it, but the running
+# container keeps its old env until the unit is restarted. The peer-restart
+# block below uses `restart` for doctor+updater for exactly this reason;
+# signalk-server needs the same treatment, gated on observable drift so
+# no-change re-runs (token refresh, journald drop-in, recovery-script
+# regeneration) leave the running container alone.
+section "signalk-server"
+SK_DRIFT_REASON=$(signalk_server_drift_reason)
+if ! podman container exists signalk-server 2>/dev/null; then
+    ok "signalk-server not yet running (will start in a later step)"
+elif [[ -z "$SK_DRIFT_REASON" ]]; then
+    ok "signalk-server matches rendered Quadlet (no restart needed)"
+else
+    info "config changed: $SK_DRIFT_REASON"
+    info "restarting signalk-server.service to apply"
+    if systemctl --user restart signalk-server.service; then
+        ok "signalk-server restarted"
+    else
+        warn "systemctl --user restart signalk-server.service failed"
+    fi
+fi
 
 # 12. (Re)start doctor + updater
 # `restart` instead of `start` so a re-run picks up the rewritten Quadlet
@@ -1058,7 +1113,25 @@ if [[ "$VERIFY_MODE" = "1" ]]; then
     if curl -fsS -o /dev/null -m 5 "$SIGNALK_URL" 2>/dev/null; then
         verify_check "signalk-server (:${SK_HTTP_PORT})" "ok"
     else
-        verify_check "signalk-server (:${SK_HTTP_PORT})" "unreachable"
+        # Probe failed — surface the most actionable hint we can derive.
+        # The bare "unreachable" line on its own sends operators to the
+        # doctor when in practice the failure is almost always Quadlet
+        # drift that the 11b restart should have applied (and either
+        # didn't, or the operator is on an older installer).
+        verify_actual_port=$(ss -ltn 2>/dev/null \
+            | awk -v p=":${SK_HTTP_PORT}" '$4 ~ /:(80|3000|443|3443)$/ && $4 !~ p {sub(/.*:/,"",$4); print $4}' \
+            | sort -u | paste -sd, -)
+        verify_drift=$(signalk_server_drift_reason)
+        if [[ -n "$verify_actual_port" ]]; then
+            verify_check "signalk-server (:${SK_HTTP_PORT})" \
+                "container listening on :${verify_actual_port} instead — run 'systemctl --user restart signalk-server.service'"
+        elif [[ -n "$verify_drift" ]]; then
+            verify_check "signalk-server (:${SK_HTTP_PORT})" \
+                "unreachable; ${verify_drift} — run 'systemctl --user restart signalk-server.service'"
+        else
+            verify_check "signalk-server (:${SK_HTTP_PORT})" \
+                "unreachable; check 'journalctl --user -u signalk-server.service'"
+        fi
     fi
 
     # Summary.
