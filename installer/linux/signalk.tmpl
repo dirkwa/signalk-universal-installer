@@ -638,9 +638,22 @@ cmd_bug_report() {
         ls -la /dev/serial/by-path/ 2>&1 || echo "(absent)"
         echo
         echo "=== /dev/ttyUSB* /dev/ttyACM* ==="
-        # Wildcard with nullglob-ish behaviour via ls; falls through to
-        # the placeholder when no match.
-        ls -la /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || echo "(no ttyUSB/ttyACM devices)"
+        # Capture once and branch on emptiness rather than
+        # `ls … || echo "(no devices)"`. The naive form fires the
+        # placeholder whenever ANY pattern is unmatched, even when the
+        # other matched — e.g. a host with /dev/ttyUSB0 but no ttyACM
+        # would show the device AND a misleading "(no … devices)" line
+        # right below it.
+        # `|| true` keeps `set -e` from aborting when neither glob
+        # matches; the `[[ -n ]]` check below differentiates "no
+        # devices" (empty capture) from "ls failed for some other
+        # reason" (also empty — same UX as before, no need to fork).
+        tty_list=$(ls -la /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || true)
+        if [[ -n "$tty_list" ]]; then
+            printf '%s\n' "$tty_list"
+        else
+            echo "(no ttyUSB/ttyACM devices)"
+        fi
         echo
         echo "=== ip -br link ==="
         ip -br link 2>&1 || true
@@ -657,8 +670,13 @@ cmd_bug_report() {
         if command -v lsmod >/dev/null 2>&1; then
             # Match $1 directly rather than `^(…)\b` because mawk (default
             # awk on Debian) doesn't understand `\b` and silently drops
-            # every row, leaving just the header in the bundle.
-            lsmod 2>/dev/null | awk 'NR==1 || $1 ~ /^(can|can_raw|can_dev|vcan|mcp251x|mcp251xfd|peak_usb|peak_pci|kvaser_usb|gs_usb|slcan|ftdi_sio|ch341|pl2303|cp210x|cdc_acm)$/'
+            # every row, leaving just the header in the bundle. Trailing
+            # `|| true` keeps the bug-report run from aborting under
+            # `set -euo pipefail` if lsmod itself errors — every other
+            # collector in this block is guarded the same way.
+            lsmod 2>/dev/null \
+                | awk 'NR==1 || $1 ~ /^(can|can_raw|can_dev|vcan|mcp251x|mcp251xfd|peak_usb|peak_pci|kvaser_usb|gs_usb|slcan|ftdi_sio|ch341|pl2303|cp210x|cdc_acm)$/' \
+                || true
         else
             echo "(lsmod not installed)"
         fi
@@ -790,8 +808,9 @@ cmd_bug_report() {
     echo "SignalK plugin configuration bodies (which routinely hold secrets) are also"
     echo "NEVER included; settings.json is included with pipedProviders' options"
     echo "redacted. Container env values are redacted in inspect dumps (keys"
-    echo "preserved). dmesg output may contain MAC addresses and filesystem paths —"
-    echo "review the tarball before sharing on a public issue tracker."
+    echo "preserved). The hardware enumeration (ip -br addr) and dmesg output may"
+    echo "contain IP/MAC addresses and filesystem paths — review the tarball before"
+    echo "sharing on a public issue tracker."
 
     # Optional upload + issue-opening. Two prompts because the privacy
     # tradeoff is real: filebin.net is unauthenticated public storage
