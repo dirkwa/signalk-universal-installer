@@ -600,6 +600,167 @@ cmd_bug_report() {
         fi
     } >"$bundle/storage-and-cgroup.txt" 2>&1
 
+    # Raw hardware bus enumeration — the "why didn't detection see my
+    # device" file. ~/.signalk-updater/hardware.json reports the post-
+    # detection summary (`serial: []`, `can: []`, etc.). When that comes
+    # back empty for a user who insists they have a CAN HAT / NMEA cable
+    # plugged in, this file is what we'd ask them to paste anyway:
+    #   - lsusb: vendor/product IDs even if no /dev/serial/by-id link
+    #     (covers raw-USB N2K devices, unclassified cables).
+    #   - /dev/serial/by-id + /dev/serial/by-path: what udev exposes,
+    #     stable names.
+    #   - ip -br link: every interface incl. can0 whether up or down;
+    #     ethernet, podman bridges.
+    #   - Pi config.txt dtoverlay/dtparam lines: answers "is the HAT
+    #     wired into device-tree?" for socketcan + SPI hats.
+    #   - Loaded kernel modules in the can/usb-serial families: tells
+    #     us whether socketcan is registered even when no interface is
+    #     up — distinguishes "module missing" from "interface down."
+    # Privacy: lsusb shows vendor IDs (not secrets). `ip` calls show
+    # IPs and MACs — same data any LAN-attached attacker could trivially
+    # see; acceptable for an opt-in bug report.
+    {
+        echo "=== lsusb ==="
+        if command -v lsusb >/dev/null 2>&1; then
+            lsusb 2>&1 || true
+        else
+            echo "(lsusb not installed)"
+        fi
+        echo
+        echo "=== /dev/serial/by-id ==="
+        ls -la /dev/serial/by-id/ 2>&1 || echo "(absent — no USB serial enumerated)"
+        echo
+        echo "=== /dev/serial/by-path ==="
+        ls -la /dev/serial/by-path/ 2>&1 || echo "(absent)"
+        echo
+        echo "=== /dev/ttyUSB* /dev/ttyACM* ==="
+        # Wildcard with nullglob-ish behaviour via ls; falls through to
+        # the placeholder when no match.
+        ls -la /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || echo "(no ttyUSB/ttyACM devices)"
+        echo
+        echo "=== ip -br link ==="
+        ip -br link 2>&1 || true
+        echo
+        echo "=== ip -br addr ==="
+        ip -br addr 2>&1 || true
+        echo
+        echo "=== loaded modules (can / usb-serial families) ==="
+        # Use lsmod | awk so columns stay aligned. Module families chosen
+        # for marine-hardware coverage: socketcan core (`can`, `can_raw`),
+        # MCP251x SPI hats, Peak/Kvaser/Geschwister Schneider USB CAN,
+        # SLCAN; FTDI/CH341/PL2303/CP210x USB-serial chips powering most
+        # NMEA0183 + N2K USB gateways.
+        if command -v lsmod >/dev/null 2>&1; then
+            lsmod 2>/dev/null | awk 'NR==1 || /^(can|can_raw|can_dev|vcan|mcp251x|mcp251xfd|peak_usb|peak_pci|kvaser_usb|gs_usb|slcan|ftdi_sio|ch341|pl2303|cp210x|cdc_acm)\b/'
+        else
+            echo "(lsmod not installed)"
+        fi
+        echo
+        # Pi-specific: device-tree model + config.txt overlay/param
+        # lines + vcgencmd power/thermal state. Gated on /proc/device-tree
+        # so we don't emit empty Pi sections on non-Pi hosts.
+        if [[ -r /proc/device-tree/model ]] \
+            && grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null; then
+            echo "=== /proc/device-tree/model ==="
+            tr -d '\0' </proc/device-tree/model 2>&1 || true
+            echo
+            echo
+            # /boot/firmware/cmdline.txt + config.txt are Pi OS's canonical
+            # locations on bookworm+. Older Pi OS used /boot/. Try both.
+            local cfgfile=""
+            for candidate in /boot/firmware/config.txt /boot/config.txt; do
+                if [[ -r "$candidate" ]]; then
+                    cfgfile="$candidate"
+                    break
+                fi
+            done
+            echo "=== ${cfgfile:-config.txt} dtoverlay / dtparam ==="
+            if [[ -n "$cfgfile" ]]; then
+                grep -E '^\s*(dtoverlay|dtparam)=' "$cfgfile" 2>&1 \
+                    || echo "(no dtoverlay/dtparam lines)"
+            else
+                echo "(config.txt not readable at /boot/firmware or /boot)"
+            fi
+            echo
+            echo "=== vcgencmd get_throttled ==="
+            # 0x0 = clean. Bits 0/16 = currently/historically undervoltage,
+            # 1/17 = arm-freq capped, 2/18 = throttled, 3/19 = soft temp
+            # limit. One line answers "is your PSU healthy?"
+            if command -v vcgencmd >/dev/null 2>&1; then
+                vcgencmd get_throttled 2>&1 || true
+                echo
+                echo "=== vcgencmd measure_temp ==="
+                vcgencmd measure_temp 2>&1 || true
+            else
+                echo "(vcgencmd not installed)"
+            fi
+        fi
+    } >"$bundle/hardware-raw.txt" 2>&1
+
+    # Host headroom + recent kernel events — the "is the host itself
+    # healthy?" file. Separate from storage-and-cgroup.txt (rootless
+    # podman plumbing) because these are general-host concerns that
+    # explain seemingly-unrelated symptoms:
+    #   - Disk full → containers fail to write, journald drops entries,
+    #     signalk-server "randomly" stops.
+    #   - Inodes exhausted (common on Pi OS SD cards) → same as above,
+    #     but `df -h` looks fine.
+    #   - dmesg warn/err → USB enumeration failures, undervoltage
+    #     brownouts, OOM kills, EMMC corruption, MCP251x init errors.
+    #   - Failed systemd-user units → e.g. dbus broker down → bluetooth
+    #     probe will always say "missing" regardless of our config.
+    #   - Listening sockets on signalk ports → confirms what bound where
+    #     (signalk-server vs. a stray dev server on :3000).
+    # dmesg can carry MAC addresses and filesystem paths. The bundle
+    # README below already warns users to review before sharing; this
+    # comment keeps the rationale next to the collection.
+    {
+        echo "=== df -hT ==="
+        df -hT 2>&1 || true
+        echo
+        echo "=== df -i ==="
+        df -i 2>&1 || true
+        echo
+        echo "=== systemctl --user --failed ==="
+        systemctl --user --failed 2>&1 || true
+        echo
+        echo "=== systemd-analyze --user time ==="
+        systemd-analyze --user time 2>&1 || true
+        echo
+        echo "=== ss -tln (signalk ports) ==="
+        # Match the four ports the installer cares about (80/443 standard,
+        # 3000/3443 default signalk, 3003 updater, 3004 doctor). Grep
+        # filters keep this short even on hosts with hundreds of listeners.
+        if command -v ss >/dev/null 2>&1; then
+            ss -tln 2>&1 | awk 'NR==1 || /:(80|443|3000|3003|3004|3443)\>/' \
+                || true
+        else
+            echo "(ss not installed)"
+        fi
+        echo
+        echo "=== dmesg --level=err,warn (last 200) ==="
+        # Filtered first: only warn+err, drops "USB device enumerated OK"
+        # chatter while keeping every failure signal we care about.
+        # Rootless dmesg is restricted to root since kernel.dmesg_restrict
+        # = 1 on Debian; best-effort, fall through to the placeholder
+        # when the kernel refuses.
+        if dmesg --level=err,warn --notime 2>/dev/null | tail -200 >/dev/null 2>&1; then
+            dmesg -T --level=err,warn 2>&1 | tail -200 || true
+        else
+            echo "(dmesg restricted to root on this host — try 'sudo dmesg' manually)"
+        fi
+        echo
+        echo "=== dmesg (last 200, unfiltered tail for recent context) ==="
+        # Unfiltered tail surfaces "what just happened" — useful when the
+        # warn/err filter would miss a clean USB hot-plug event right
+        # before the bug report ran.
+        if dmesg --notime 2>/dev/null | tail -1 >/dev/null 2>&1; then
+            dmesg -T 2>&1 | tail -200 || true
+        else
+            echo "(dmesg restricted to root on this host — try 'sudo dmesg' manually)"
+        fi
+    } >"$bundle/host-extra.txt" 2>&1
+
     # Tar it up.
     local tarball="$tarball_dir/signalk-bug-report-$stamp.tar.gz"
     tar -C "$outdir" -czf "$tarball" "signalk-bug-report-$stamp"
@@ -611,12 +772,15 @@ cmd_bug_report() {
     echo
     echo "Contents are limited to host metadata, container state, recent journals,"
     echo "doctor probes + snapshot index, updater state (image tags/digests/versions),"
-    echo "per-container inspect + log tail for every signalk-* container, and"
-    echo "SignalK plugin metadata. Auth tokens are reported as presence-only"
-    echo "(mode + 'present') and their values are NEVER included. SignalK plugin"
-    echo "configuration bodies (which routinely hold secrets) are also NEVER included;"
-    echo "settings.json is included with pipedProviders' options redacted. Container"
-    echo "env values are redacted in inspect dumps (keys preserved)."
+    echo "per-container inspect + log tail for every signalk-* container, raw hardware"
+    echo "bus enumeration (lsusb / serial / CAN / Pi config.txt overlays), and a host"
+    echo "headroom snapshot (df + ss + dmesg warn/err tail). Auth tokens are reported"
+    echo "as presence-only (mode + 'present') and their values are NEVER included."
+    echo "SignalK plugin configuration bodies (which routinely hold secrets) are also"
+    echo "NEVER included; settings.json is included with pipedProviders' options"
+    echo "redacted. Container env values are redacted in inspect dumps (keys"
+    echo "preserved). dmesg output may contain MAC addresses and filesystem paths —"
+    echo "review the tarball before sharing on a public issue tracker."
 
     # Optional upload + issue-opening. Two prompts because the privacy
     # tradeoff is real: filebin.net is unauthenticated public storage
