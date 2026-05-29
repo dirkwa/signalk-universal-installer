@@ -1,0 +1,559 @@
+#!/usr/bin/env bash
+# signalk-socketcan — host-resident Pi CAN-HAT detection & setup helper.
+# Installed by signalk-universal-installer. Normally invoked via the
+# dispatcher as `signalk socketcan`, but standalone-runnable.
+#
+# v1 scope: detect + advise only. Does NOT modify /boot/firmware/config.txt
+# or anything that needs sudo; the operator runs the printed recipe
+# themselves. The single mutation this script performs is updating its
+# OWN file at ~/.signalk-updater/hardware.json with a `socketcanCandidate`
+# field so the bug-report bundle (and, eventually, the updater UI) can
+# see what HAT the operator picked.
+#
+# Why detect+advise instead of auto-edit: a wrong dtoverlay= line can
+# prevent the Pi from booting. The sudo-+-diff-+-confirm pattern from
+# preflight.sh is reusable, but the blast radius of config.txt mistakes
+# is higher than cmdline.txt's (config.txt can mis-configure HDMI,
+# memory split, GPIO pinmux); v2 may add auto-apply once we have a
+# safety story.
+#
+# Usage:
+#   signalk-socketcan           — interactive: detect, ask which HAT, print recipe
+#   signalk-socketcan status    — terse summary; no prompts, no writes
+#   signalk-socketcan help      — usage text
+
+set -euo pipefail
+
+UPDATER_DATA="${HOME}/.signalk-updater"
+HARDWARE_JSON="${UPDATER_DATA}/hardware.json"
+DOC_URL="https://dirkwa.github.io/signalk-universal-installer/docs/socketcan.html"
+
+# ─── output helpers ────────────────────────────────────────────────────
+# Match the dispatcher's [i]/[OK]/[!]/[ERR] convention so the CLI feels
+# consistent. We don't source lib/colors.sh because this script may be
+# refreshed by the doctor onto a host that doesn't have lib/ next to it.
+if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
+    C_BOLD=$(tput bold 2>/dev/null || true)
+    C_BLUE=$(tput setaf 4 2>/dev/null || true)
+    C_GREEN=$(tput setaf 2 2>/dev/null || true)
+    C_YELLOW=$(tput setaf 3 2>/dev/null || true)
+    C_RED=$(tput setaf 1 2>/dev/null || true)
+    C_RESET=$(tput sgr0 2>/dev/null || true)
+else
+    C_BOLD=""; C_BLUE=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_RESET=""
+fi
+info()    { printf '%s[i]%s %s\n' "$C_BLUE"   "$C_RESET" "$*"; }
+ok()      { printf '%s[OK]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn()    { printf '%s[!]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+err()     { printf '%s[ERR]%s %s\n' "$C_RED"  "$C_RESET" "$*" >&2; }
+section() { printf '\n%s== %s ==%s\n' "$C_BOLD" "$*" "$C_RESET"; }
+
+usage() {
+    cat <<EOF
+signalk-socketcan — Pi CAN-HAT detection & setup helper.
+
+Usage:
+  signalk socketcan          Interactive: detect HAT, print copy-pasteable
+                             recipe (config.txt overlay + bitrate persistence),
+                             record the chosen HAT in hardware.json.
+  signalk socketcan status   Terse summary of current state (no prompts).
+  signalk socketcan help     This text.
+
+Supported HATs:
+  1. Waveshare 2-CH CAN HAT (dual MCP2515 on SPI)
+  2. PiCAN-M / PiCAN3 (MCP251xFD CAN-FD on SPI; marine NMEA 2000 micro-c)
+  3. Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT, etc.)
+  4. USB CAN adapter (gs_usb, Peak, Kvaser, SLCAN)
+  5. Custom dtoverlay (you supply the line)
+
+Recipe persistence uses systemd-networkd's CAN bitrate support. Pi OS
+defaults to NetworkManager; the recipe explains the trade-off and an
+alternative ip-link service unit if you prefer not to enable networkd.
+
+Bitrate is 250000 (NMEA 2000 standard). Other CAN buses (engine ECU,
+J1939 industrial, classic 125k boats) use different bitrates; edit the
+networkd file if your bus is not NMEA 2000.
+
+See: ${DOC_URL}
+EOF
+}
+
+# ─── probes ────────────────────────────────────────────────────────────
+
+# is_pi: reuses the gate from signalk.tmpl's bug-report Pi block.
+# We don't source lib/distro.sh because that path isn't shipped to
+# ~/.local/bin (and the doctor's installer-refresh wouldn't carry it).
+is_pi() {
+    [[ -r /proc/device-tree/model ]] && grep -qi 'raspberry pi' /proc/device-tree/model
+}
+
+# pi_model: human-readable Pi revision, e.g. "Raspberry Pi 5 Model B Rev 1.0".
+pi_model() {
+    tr -d '\0' </proc/device-tree/model 2>/dev/null || echo "unknown"
+}
+
+# config_txt_path: Pi OS bookworm+ moved /boot to /boot/firmware. Try both.
+config_txt_path() {
+    for p in /boot/firmware/config.txt /boot/config.txt; do
+        if [[ -r "$p" ]]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# existing_overlays: print any current dtoverlay= line that mentions a
+# CAN driver, one per line. Empty output = nothing configured yet.
+existing_overlays() {
+    local cfg
+    if ! cfg=$(config_txt_path); then
+        return 0
+    fi
+    grep -E '^\s*dtoverlay=(mcp2515|mcp251xfd|spi)' "$cfg" 2>/dev/null || true
+}
+
+# loaded_can_modules: print loaded CAN/USB-CAN modules. Mirrors the
+# mawk-compatible filter from signalk.tmpl's bug-report hardware-raw
+# section so the two stay aligned.
+loaded_can_modules() {
+    if ! command -v lsmod >/dev/null 2>&1; then
+        return 0
+    fi
+    lsmod 2>/dev/null \
+        | awk '$1 ~ /^(mcp251x|mcp251xfd|can|can_raw|can_dev|vcan|gs_usb|peak_usb|peak_pci|kvaser_usb|slcan)$/ { print $1 }' \
+        || true
+}
+
+# can_interfaces: print all SocketCAN interfaces, one per line.
+can_interfaces() {
+    if ! command -v ip >/dev/null 2>&1; then
+        return 0
+    fi
+    ip -o link show type can 2>/dev/null | awk -F': ' '{print $2}' | sort -u || true
+}
+
+# can_bitrate <iface>: print current bitrate, or empty if not set / iface absent.
+can_bitrate() {
+    local iface=$1
+    if ! command -v ip >/dev/null 2>&1; then
+        return 0
+    fi
+    # `ip -d link show <iface>` includes a 'bitrate NNN' field when the
+    # interface is configured as a CAN device with a bitrate.
+    ip -d link show "$iface" 2>/dev/null \
+        | awk '/bitrate/ { for (i=1;i<=NF;i++) if ($i=="bitrate") { print $(i+1); exit } }' \
+        || true
+}
+
+# can_state <iface>: print interface oper state (UP/DOWN/UNKNOWN), empty if iface absent.
+can_state() {
+    local iface=$1
+    if ! command -v ip >/dev/null 2>&1; then
+        return 0
+    fi
+    ip -br link show "$iface" 2>/dev/null | awk '{print $2}' || true
+}
+
+# ─── HAT catalog ───────────────────────────────────────────────────────
+# Single source of truth for the menu, the recipe, and the hardware.json
+# field. Each `hat_<n>_*` group is one menu entry.
+
+hat_1_id="waveshare-2ch-mcp2515"
+hat_1_name="Waveshare 2-CH CAN HAT (dual MCP2515)"
+hat_1_overlays=(
+    "dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25"
+    "dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=24"
+    "dtoverlay=spi-bcm2835-overlay"
+)
+
+hat_2_id="picanm-mcp251xfd"
+hat_2_name="PiCAN-M / PiCAN3 (MCP251xFD CAN-FD)"
+hat_2_overlays=(
+    "dtoverlay=mcp251xfd-spi0-0,oscillator=20000000,interrupt=25"
+)
+
+hat_3_id="generic-mcp2515"
+hat_3_name="Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT, etc.)"
+# Recipe is built at runtime: we ask the operator for the oscillator
+# frequency (8 or 16 MHz — both are common on cheap clones) before
+# emitting the single-overlay line.
+
+hat_4_id="usb-can"
+hat_4_name="USB CAN adapter (gs_usb / Peak / Kvaser / SLCAN)"
+# No config.txt edit — kernel auto-loads the driver on plug-in.
+
+hat_5_id="custom"
+hat_5_name="Custom dtoverlay (you supply the line)"
+# Operator's lines collected during the prompt; populated at runtime.
+
+# ─── recipe rendering ──────────────────────────────────────────────────
+
+# print_recipe <hat_id> <display_name> <bitrate> <overlay-1> [<overlay-2> ...]
+# Emits a numbered, copy-pasteable recipe. The shape stays consistent
+# across HATs so the operator can compare across models. USB-CAN skips
+# the config.txt section.
+print_recipe() {
+    local hat_id=$1 display_name=$2 bitrate=$3
+    shift 3
+    local overlays=("$@")
+    local cfg
+    cfg=$(config_txt_path || echo "/boot/firmware/config.txt")
+
+    section "Recipe for ${display_name}"
+    echo
+
+    local step=1
+    if (( ${#overlays[@]} > 0 )); then
+        echo "${step}. Add to ${cfg} (requires sudo + reboot):"
+        echo
+        local line
+        for line in "${overlays[@]}"; do
+            printf '     %s\n' "$line"
+        done
+        echo
+        step=$((step + 1))
+
+        echo "${step}. Reboot:"
+        echo
+        echo "     sudo reboot"
+        echo
+        step=$((step + 1))
+    else
+        # USB-CAN preamble — the driver auto-loads when the device is
+        # plugged in (gs_usb, peak_usb, etc.); we still need bitrate
+        # persistence below.
+        echo "${step}. Plug in the USB CAN adapter (driver auto-loads)."
+        echo "   Verify enumeration:  lsusb && dmesg | tail -20"
+        echo
+        step=$((step + 1))
+    fi
+
+    echo "${step}. After reboot/plug-in, persist the NMEA 2000 bitrate via systemd-networkd:"
+    echo
+    echo "     sudo tee /etc/systemd/network/80-signalk-can0.network > /dev/null <<'EOF'"
+    echo "     [Match]"
+    echo "     Name=can0"
+    echo
+    echo "     [CAN]"
+    echo "     BitRate=${bitrate}"
+    echo "     EOF"
+    echo
+    echo "     sudo systemctl enable --now systemd-networkd"
+    echo
+    echo "   NOTE: Pi OS Trixie defaults to NetworkManager; enabling systemd-networkd"
+    echo "   for can0 is safe (NM ignores CAN interfaces) but is a permanent change."
+    echo "   Alternative: a one-shot ip-link service unit — see ${DOC_URL}"
+    echo
+    step=$((step + 1))
+
+    echo "${step}. Verify:"
+    echo
+    echo "     ip -br link show type can     # can0 should be UP"
+    echo "     candump can0                  # NMEA 2000 traffic should appear"
+    echo "                                   # (install: sudo apt install can-utils)"
+    echo
+    echo "After verifying, re-run 'signalk socketcan status' to update hardware.json."
+    echo
+    echo "Recipe id: ${hat_id}    Bitrate: ${bitrate}"
+}
+
+# ─── hardware.json writer ──────────────────────────────────────────────
+
+# write_candidate <hat_id> <display_name> <bitrate> <configApplied> <ipLinkUp> <overlay-1> [<overlay-2> ...]
+# Updates the operator's own ~/.signalk-updater/hardware.json with a
+# `socketcanCandidate` field. Other fields (serial, can, bluetooth, gpio)
+# are preserved. Uses jq when available; falls back to a verbatim
+# rewrite of the field when not (we keep the file intact in that case
+# and just print a notice, since hand-merging JSON is fragile).
+write_candidate() {
+    local hat_id=$1 display_name=$2 bitrate=$3 cfg_applied=$4 ip_up=$5
+    shift 5
+    local overlays=("$@")
+
+    mkdir -p "$UPDATER_DATA"
+
+    # If hardware.json doesn't exist yet, the bash installer hasn't run
+    # detection. Seed an empty one so the candidate has somewhere to go.
+    if [[ ! -f "$HARDWARE_JSON" ]]; then
+        printf '{\n  "serial": [],\n  "can": [],\n  "bluetooth": {"dbusAvailable": false, "enabled": false},\n  "gpio": {"platform": "none", "enabled": false}\n}\n' \
+            >"$HARDWARE_JSON"
+        info "seeded ${HARDWARE_JSON} (next 'signalk' installer run will populate detected hardware)"
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        warn "jq not installed; skipping hardware.json update."
+        warn "  Install jq and re-run 'signalk socketcan' to record the candidate."
+        return 0
+    fi
+
+    # Build the overlays JSON array. Empty overlays (USB-CAN) → [].
+    local overlays_json="[]"
+    if (( ${#overlays[@]} > 0 )); then
+        overlays_json=$(printf '%s\n' "${overlays[@]}" | jq -R . | jq -s .)
+    fi
+
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    local tmp
+    tmp=$(mktemp -t hardware.json.XXXXXX)
+    if jq \
+        --arg writtenAt "$now" \
+        --arg hat "$hat_id" \
+        --arg displayName "$display_name" \
+        --argjson overlays "$overlays_json" \
+        --argjson bitrate "$bitrate" \
+        --argjson configApplied "$cfg_applied" \
+        --argjson ipLinkUp "$ip_up" \
+        '.socketcanCandidate = {
+            writtenAt: $writtenAt,
+            hat: $hat,
+            displayName: $displayName,
+            configTxtOverlays: $overlays,
+            bitrate: $bitrate,
+            configApplied: $configApplied,
+            ipLinkUp: $ipLinkUp
+        }' "$HARDWARE_JSON" >"$tmp"; then
+        mv "$tmp" "$HARDWARE_JSON"
+        ok "recorded socketcanCandidate in ${HARDWARE_JSON}"
+    else
+        rm -f "$tmp"
+        warn "failed to update ${HARDWARE_JSON}; left untouched"
+        return 1
+    fi
+}
+
+# ─── status command ────────────────────────────────────────────────────
+
+cmd_status() {
+    if ! is_pi; then
+        err "signalk socketcan is a Raspberry Pi feature; this host is not a Pi."
+        return 1
+    fi
+
+    section "Host"
+    info "Model:  $(pi_model)"
+    info "Kernel: $(uname -r 2>/dev/null || echo unknown)"
+
+    section "config.txt"
+    local cfg overlays
+    if cfg=$(config_txt_path); then
+        info "Path: ${cfg}"
+        overlays=$(existing_overlays)
+        if [[ -n "$overlays" ]]; then
+            ok "Existing CAN/SPI overlay(s):"
+            printf '    %s\n' "$overlays"
+        else
+            warn "No CAN/SPI overlay configured."
+        fi
+    else
+        warn "config.txt not readable at /boot/firmware or /boot."
+    fi
+
+    section "Kernel modules"
+    local mods
+    mods=$(loaded_can_modules)
+    if [[ -n "$mods" ]]; then
+        ok "Loaded CAN-related modules:"
+        # loaded_can_modules emits one module per line; indent each.
+        while IFS= read -r mod; do
+            [[ -n "$mod" ]] || continue
+            printf '    %s\n' "$mod"
+        done <<<"$mods"
+    else
+        warn "No CAN-related modules loaded."
+    fi
+
+    section "Interfaces"
+    local ifaces
+    ifaces=$(can_interfaces)
+    if [[ -n "$ifaces" ]]; then
+        local iface
+        while IFS= read -r iface; do
+            [[ -n "$iface" ]] || continue
+            local state bitrate
+            state=$(can_state "$iface")
+            bitrate=$(can_bitrate "$iface")
+            ok "${iface}: state=${state:-?} bitrate=${bitrate:-unconfigured}"
+        done <<<"$ifaces"
+    else
+        warn "No CAN interface present."
+    fi
+
+    section "Recorded candidate"
+    if [[ -f "$HARDWARE_JSON" ]] && command -v jq >/dev/null 2>&1; then
+        local candidate
+        candidate=$(jq -r '.socketcanCandidate // empty' "$HARDWARE_JSON" 2>/dev/null || true)
+        if [[ -n "$candidate" ]]; then
+            jq '.socketcanCandidate' "$HARDWARE_JSON"
+        else
+            info "(no socketcanCandidate recorded yet — run 'signalk socketcan')"
+        fi
+    else
+        info "(hardware.json or jq absent — run 'signalk socketcan' interactively)"
+    fi
+}
+
+# ─── interactive command ───────────────────────────────────────────────
+
+cmd_interactive() {
+    if ! is_pi; then
+        err "signalk socketcan is a Raspberry Pi feature; this host is not a Pi."
+        return 1
+    fi
+
+    section "Detecting"
+    info "Pi model:  $(pi_model)"
+
+    local cfg overlays mods ifaces
+    if cfg=$(config_txt_path); then
+        info "config.txt: ${cfg}"
+    else
+        warn "config.txt not found in /boot/firmware or /boot — Pi-OS-only paths"
+    fi
+
+    overlays=$(existing_overlays)
+    if [[ -n "$overlays" ]]; then
+        ok "Existing CAN/SPI overlay(s) in config.txt:"
+        printf '    %s\n' "$overlays"
+    else
+        info "No CAN/SPI overlay in config.txt yet."
+    fi
+
+    mods=$(loaded_can_modules)
+    if [[ -n "$mods" ]]; then
+        ok "Loaded modules: $(echo "$mods" | tr '\n' ' ')"
+    else
+        info "No CAN-related kernel modules loaded."
+    fi
+
+    ifaces=$(can_interfaces)
+    if [[ -n "$ifaces" ]]; then
+        ok "Existing CAN interface(s): $(echo "$ifaces" | tr '\n' ' ')"
+    else
+        info "No CAN interface present."
+    fi
+
+    section "Which HAT do you have?"
+    cat <<EOF
+  1. ${hat_1_name}
+  2. ${hat_2_name}
+  3. ${hat_3_name}
+  4. ${hat_4_name}
+  5. ${hat_5_name}
+  q. Quit without changes
+EOF
+    echo
+    local choice=""
+    # Guard read against EOF so a non-interactive stdin doesn't trip
+    # set -e — same pattern the dispatcher uses for its upload prompt.
+    if ! read -r -p "Choice [1-5/q]: " choice; then
+        choice="q"
+    fi
+    echo
+
+    case "$choice" in
+        1)
+            handle_recipe "$hat_1_id" "$hat_1_name" "${hat_1_overlays[@]}"
+            ;;
+        2)
+            handle_recipe "$hat_2_id" "$hat_2_name" "${hat_2_overlays[@]}"
+            ;;
+        3)
+            local osc=""
+            if ! read -r -p "Oscillator frequency? [8000000/16000000, default 16000000]: " osc; then
+                osc=""
+            fi
+            osc=${osc:-16000000}
+            if [[ ! "$osc" =~ ^[0-9]+$ ]]; then
+                err "Oscillator must be numeric (Hz). Got: $osc"
+                return 1
+            fi
+            local generic_overlay="dtoverlay=mcp2515-can0,oscillator=${osc},interrupt=25"
+            handle_recipe "$hat_3_id" "$hat_3_name" "$generic_overlay"
+            ;;
+        4)
+            handle_recipe "$hat_4_id" "$hat_4_name"
+            ;;
+        5)
+            local custom=""
+            echo "Enter your dtoverlay= line(s), one per line. Empty line to finish."
+            local custom_overlays=()
+            while true; do
+                if ! read -r -p "> " custom; then
+                    break
+                fi
+                [[ -z "$custom" ]] && break
+                custom_overlays+=("$custom")
+            done
+            if (( ${#custom_overlays[@]} == 0 )); then
+                err "No overlay lines entered; aborting."
+                return 1
+            fi
+            handle_recipe "$hat_5_id" "$hat_5_name" "${custom_overlays[@]}"
+            ;;
+        q|Q|"")
+            info "no changes; bye"
+            return 0
+            ;;
+        *)
+            err "Unknown choice: $choice"
+            return 1
+            ;;
+    esac
+}
+
+# handle_recipe <hat_id> <display_name> [overlay-1 ...]
+# Common path after the menu: print the recipe + record the candidate.
+# configApplied / ipLinkUp are set from observed state so re-running
+# after applying the recipe updates the flags.
+handle_recipe() {
+    local hat_id=$1 display_name=$2
+    shift 2
+    local overlays=("$@")
+    local bitrate=250000
+
+    # configApplied: any non-empty existing_overlays counts as "operator
+    # already started." We deliberately don't try to match exact overlay
+    # strings — operators tweak oscillator values and interrupt pins.
+    local cfg_applied=false
+    if [[ -n "$(existing_overlays)" ]]; then
+        cfg_applied=true
+    fi
+
+    # ipLinkUp: a CAN interface exists AND its bitrate is the recipe's
+    # bitrate. Anything else (interface present but bitrate unset, or
+    # bitrate mismatched) means the persistence step isn't complete.
+    local ip_up=false
+    local ifaces
+    ifaces=$(can_interfaces)
+    if [[ -n "$ifaces" ]]; then
+        local iface
+        while IFS= read -r iface; do
+            [[ -n "$iface" ]] || continue
+            local br
+            br=$(can_bitrate "$iface")
+            if [[ "$br" == "$bitrate" ]]; then
+                ip_up=true
+                break
+            fi
+        done <<<"$ifaces"
+    fi
+
+    print_recipe "$hat_id" "$display_name" "$bitrate" "${overlays[@]}"
+    write_candidate "$hat_id" "$display_name" "$bitrate" "$cfg_applied" "$ip_up" "${overlays[@]}"
+}
+
+# ─── dispatch ──────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    ""|interactive)        cmd_interactive ;;
+    status)                cmd_status ;;
+    help|--help|-h)        usage ;;
+    *)
+        err "Unknown subcommand: $1"
+        usage
+        exit 1
+        ;;
+esac
