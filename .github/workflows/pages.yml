@@ -53,9 +53,16 @@ jobs:
           [ -d docs ] && cp -r docs dist/
           cp README.md dist/index.md
 
-          # Inject version into shell + powershell installers
-          find dist/installer -type f \( -name '*.sh' -o -name '*.ps1' \) -print0 |
-            xargs -0 sed -i "s|INSTALLER_VERSION:-0.0.0-scaffold|INSTALLER_VERSION:-${INSTALLER_VERSION}|g; s|'0.0.0-scaffold'|'${INSTALLER_VERSION}'|g"
+          # Inject version into shell + powershell installers and *.tmpl
+          # dispatcher templates. The .tmpl files are fetched verbatim by the
+          # doctor's /api/installer/refresh, so baking the version in here
+          # means `signalk version` reports the same value after a refresh
+          # as after a fresh bootstrap. The bash one-liner's install-time
+          # substitution becomes a no-op against the published artifact and
+          # still works against a local checkout (where the placeholder is
+          # untouched).
+          find dist/installer -type f \( -name '*.sh' -o -name '*.ps1' -o -name '*.tmpl' \) -print0 |
+            xargs -0 sed -i "s|INSTALLER_VERSION:-0.0.0-scaffold|INSTALLER_VERSION:-${INSTALLER_VERSION}|g; s|'0.0.0-scaffold'|'${INSTALLER_VERSION}'|g; s|__SK_VERSION__|${INSTALLER_VERSION}|g"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
