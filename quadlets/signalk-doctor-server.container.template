@@ -38,6 +38,8 @@ Volume=%h/.signalk-updater:/updater-data:rw,Z
 # Older installs that don't yet expose this mount fall back to
 # 'mount-missing' status on host-script artifacts — the bash one-liner
 # remains the floor.
+# Dependency: install.sh must `mkdir -p ~/.local/bin` before this unit
+# starts. On a fresh Pi OS install this path is otherwise absent.
 Volume=%h/.local/bin:/host-bin:rw,Z
 # Read-only host cgroup + kernel cmdline so the doctor's cgroup-delegation
 # probe can verify rootless podman has memory + pids controllers at both
