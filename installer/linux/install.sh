@@ -589,6 +589,15 @@ ok "all images pulled"
 # 10. Quadlet rendering
 section "Quadlet rendering"
 mkdir -p "$QUADLET_DIR"
+# The doctor Quadlet bind-mounts ~/.local/bin for its
+# /api/installer/refresh endpoint. On a fresh Pi OS install this
+# directory does not exist yet (Debian's ~/.profile only adds it to
+# PATH if it's already present), and a missing bind source can
+# manifest as a confusing systemd unit-start failure on first run.
+# install-{recovery-script,signalk-command}.sh both also mkdir this
+# path; the explicit pre-create here removes the dependency on their
+# ordering relative to the doctor restart.
+mkdir -p "$HOME/.local/bin"
 
 snapshot_existing() {
     local name=$1
