@@ -655,7 +655,10 @@ cmd_bug_report() {
         # SLCAN; FTDI/CH341/PL2303/CP210x USB-serial chips powering most
         # NMEA0183 + N2K USB gateways.
         if command -v lsmod >/dev/null 2>&1; then
-            lsmod 2>/dev/null | awk 'NR==1 || /^(can|can_raw|can_dev|vcan|mcp251x|mcp251xfd|peak_usb|peak_pci|kvaser_usb|gs_usb|slcan|ftdi_sio|ch341|pl2303|cp210x|cdc_acm)\b/'
+            # Match $1 directly rather than `^(…)\b` because mawk (default
+            # awk on Debian) doesn't understand `\b` and silently drops
+            # every row, leaving just the header in the bundle.
+            lsmod 2>/dev/null | awk 'NR==1 || $1 ~ /^(can|can_raw|can_dev|vcan|mcp251x|mcp251xfd|peak_usb|peak_pci|kvaser_usb|gs_usb|slcan|ftdi_sio|ch341|pl2303|cp210x|cdc_acm)$/'
         else
             echo "(lsmod not installed)"
         fi
@@ -735,7 +738,12 @@ cmd_bug_report() {
         # 3000/3443 default signalk, 3003 updater, 3004 doctor. Awk
         # filters keep this short even on hosts with hundreds of listeners.
         if command -v ss >/dev/null 2>&1; then
-            ss -tln 2>&1 | awk 'NR==1 || /:(80|443|3000|3003|3004|3443)\>/' \
+            # `($|[^0-9])` rather than `\>` because the latter is a GNU
+            # awk extension; mawk treats it as a literal `>` and the
+            # filter would drop every row. The non-digit/end-anchor
+            # form is POSIX and still rejects e.g. :8080 when we ask
+            # for :80.
+            ss -tln 2>&1 | awk 'NR==1 || /:(80|443|3000|3003|3004|3443)($|[^0-9])/' \
                 || true
         else
             echo "(ss not installed)"
