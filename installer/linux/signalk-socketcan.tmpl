@@ -478,13 +478,28 @@ EOF
             ;;
         5)
             local custom=""
-            echo "Enter your dtoverlay= line(s), one per line. Empty line to finish."
+            local confirm=""
+            echo "Enter your dtoverlay= / dtparam= line(s), one per line. Empty line to finish."
             local custom_overlays=()
             while true; do
                 if ! read -r -p "> " custom; then
                     break
                 fi
                 [[ -z "$custom" ]] && break
+                # Format guard: config.txt lines are conventionally
+                # dtoverlay= or dtparam=. Anything else is almost
+                # always a typo (e.g. operator pasted a bare overlay
+                # name without the prefix, or a kernel cmdline flag).
+                # Warn but allow override — there are obscure valid
+                # forms (gpio=, hdmi_force_hotplug=, etc.) we'd hate
+                # to block hard.
+                if [[ ! "$custom" =~ ^(dtoverlay|dtparam)= ]]; then
+                    warn "Line doesn't start with dtoverlay= or dtparam=: $custom"
+                    if ! read -r -p "Use anyway? [y/N] " confirm; then
+                        confirm=""
+                    fi
+                    [[ "$confirm" =~ ^[Yy]$ ]] || continue
+                fi
                 custom_overlays+=("$custom")
             done
             if (( ${#custom_overlays[@]} == 0 )); then
