@@ -179,7 +179,7 @@ fi
 
 # 1. Detect host
 detect_os
-section "SignalK Universal Installer v${INSTALLER_VERSION}"
+section "SignalK Universal Installer v${INSTALLER_VERSION#v}"
 info "Host: ${DISTRO_PRETTY} (${ARCH_NORM})"
 if [[ "$SUDO" = "MISSING" ]]; then
     err "Running as non-root user '$USER' and sudo is not installed."

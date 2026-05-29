@@ -35,6 +35,9 @@ jobs:
             v="${GITHUB_REF_NAME#v}"
           else
             v="$(git describe --tags --always --dirty 2>/dev/null || echo dev-${GITHUB_SHA::7})"
+            # Strip leading `v` so install.sh's `v${INSTALLER_VERSION}` doesn't
+            # render as `vv0.1.0-NN-gXXXXXXX`. Tag branch already strips.
+            v="${v#v}"
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
