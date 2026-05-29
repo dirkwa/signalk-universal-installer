@@ -256,7 +256,10 @@ print_recipe() {
     echo "     candump can0                  # NMEA 2000 traffic should appear"
     echo "                                   # (install: sudo apt install can-utils)"
     echo
-    echo "After verifying, re-run 'signalk socketcan status' to update hardware.json."
+    echo "After verifying, re-run 'signalk socketcan' (the interactive flow)"
+    echo "to refresh hardware.json with the now-applied state."
+    echo "('signalk socketcan status' is read-only — it shows current state but"
+    echo " does not write to hardware.json.)"
     echo
     echo "Recipe id: ${hat_id}    Bitrate: ${bitrate}"
 }
@@ -481,8 +484,13 @@ EOF
                 osc=""
             fi
             osc=${osc:-16000000}
-            if [[ ! "$osc" =~ ^[0-9]+$ ]]; then
-                err "Oscillator must be numeric (Hz). Got: $osc"
+            # The prompt advertises only the two common values; honor that
+            # contract. Boards with unusual oscillators (12 MHz, 20 MHz on
+            # some Chinese clones) belong on option 5 (custom dtoverlay)
+            # where the operator types the whole line themselves.
+            if [[ "$osc" != "8000000" && "$osc" != "16000000" ]]; then
+                err "Oscillator must be 8000000 or 16000000 (Hz). Got: $osc"
+                err "For other values, use menu option 5 (Custom dtoverlay)."
                 return 1
             fi
             local generic_overlay="dtoverlay=mcp2515-can0,oscillator=${osc},interrupt=25"
@@ -552,23 +560,26 @@ handle_recipe() {
         cfg_applied=true
     fi
 
-    # ipLinkUp: a CAN interface exists AND its bitrate is the recipe's
-    # bitrate. Anything else (interface present but bitrate unset, or
-    # bitrate mismatched) means the persistence step isn't complete.
+    # ipLinkUp: target the specific interface the recipe configures
+    # (can0 — every overlay in the catalog declares mcp2515-can0 or
+    # mcp251xfd-spi0-0 → can0, and the recipe's networkd file does
+    # `Match Name=can0`). Three checks must all pass: interface exists,
+    # link is UP, bitrate matches the recipe. Anything weaker treats a
+    # `vcan0` test interface or a second-channel `can1` as success when
+    # the actual recipe target is down.
     local ip_up=false
-    local ifaces
-    ifaces=$(can_interfaces)
-    if [[ -n "$ifaces" ]]; then
-        local iface
-        while IFS= read -r iface; do
-            [[ -n "$iface" ]] || continue
-            local br
-            br=$(can_bitrate "$iface")
-            if [[ "$br" == "$bitrate" ]]; then
-                ip_up=true
-                break
-            fi
-        done <<<"$ifaces"
+    local target_iface="can0"
+    local target_state
+    target_state=$(can_state "$target_iface")
+    if [[ "$target_state" == "UP" || "$target_state" == "UNKNOWN" ]]; then
+        # UNKNOWN is the normal state for CAN devices with no link-layer
+        # carrier semantics; treat both as live. DOWN is the only state
+        # that disqualifies.
+        local target_br
+        target_br=$(can_bitrate "$target_iface")
+        if [[ "$target_br" == "$bitrate" ]]; then
+            ip_up=true
+        fi
     fi
 
     print_recipe "$hat_id" "$display_name" "$bitrate" "${overlays[@]}"
