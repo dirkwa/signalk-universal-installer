@@ -668,7 +668,6 @@ cmd_bug_report() {
             echo "=== /proc/device-tree/model ==="
             tr -d '\0' </proc/device-tree/model 2>&1 || true
             echo
-            echo
             # /boot/firmware/cmdline.txt + config.txt are Pi OS's canonical
             # locations on bookworm+. Older Pi OS used /boot/. Try both.
             cfgfile=""
@@ -732,8 +731,8 @@ cmd_bug_report() {
         systemd-analyze --user time 2>&1 || true
         echo
         echo "=== ss -tln (signalk ports) ==="
-        # Match the four ports the installer cares about (80/443 standard,
-        # 3000/3443 default signalk, 3003 updater, 3004 doctor). Grep
+        # Match the six ports the installer cares about: 80/443 standard,
+        # 3000/3443 default signalk, 3003 updater, 3004 doctor. Awk
         # filters keep this short even on hosts with hundreds of listeners.
         if command -v ss >/dev/null 2>&1; then
             ss -tln 2>&1 | awk 'NR==1 || /:(80|443|3000|3003|3004|3443)\>/' \
