@@ -30,7 +30,7 @@ The interactive flow:
 | 5 | SLCAN (Lawicel CANUSB serial mode, CANable slcan firmware) | No | `slcan` line discipline via `slcand` |
 | 6 | Custom dtoverlay | Yes | you supply the line(s) |
 
-> **Heads-up: PiCAN-M and PiCAN3 use the classical MCP2515, not the MCP251xFD.** Earlier `signalk socketcan` releases (v0.1.0-63-g1cab022 / `signalk-universal-installer` PR #72 first version) emitted an `mcp251xfd-spi0-0` overlay for these adapters, which is the wrong chip family AND not even a real overlay name. If you ran the old recipe, `can0` will never come up. The current recipe is correct (`dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25`).
+> **Heads-up: PiCAN-M and PiCAN3 use the classical MCP2515, not the MCP251xFD.** Some earlier guides (including a previous version of this helper) suggested an `mcp251xfd-spi0-0` overlay for these adapters — wrong chip family, and `mcp251xfd-spi0-0` isn't a real overlay name. If you applied that recipe, `can0` will never come up. The correct overlay is `dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25`.
 
 ### 1. Waveshare 2-CH CAN HAT
 
@@ -101,11 +101,16 @@ Lawicel CANUSB in serial mode, CANable in slcan firmware, generic FTDI/ACM seria
 No `config.txt` edit, **no Pi required**. The recipe installs `can-utils` and a systemd-system service unit that runs `slcand` and brings `can0` up:
 
 ```text
-1. sudo apt install -y can-utils
+1. Install can-utils (package name is `can-utils` on every major distro):
+
+     Debian / Ubuntu / Raspberry Pi OS:  sudo apt install -y can-utils
+     Fedora / RHEL / CentOS Stream:      sudo dnf install -y can-utils
+     Arch / Manjaro:                     sudo pacman -S can-utils
+     openSUSE:                           sudo zypper in can-utils
 
 2. Create a systemd unit:
 
-     sudo tee /etc/systemd/system/signalk-slcan-can0.service > /dev/null <<EOF
+     sudo tee /etc/systemd/system/signalk-slcan-can0.service > /dev/null <<'EOF'
      [Unit]
      Description=SLCAN can0 (NMEA 2000 250 kbit/s)
 
@@ -212,7 +217,7 @@ You should see PGNs appearing in the **Data Browser** within seconds.
 
 **SLCAN service flapping** — `systemctl status signalk-slcan-can0.service` shows the journal slice. Check that `/dev/serial/by-id/<your-adapter>` actually exists; the `ExecStartPre` loop in the unit waits for it but won't give up. If the adapter never enumerates, `lsusb` and `dmesg | tail` will tell you why.
 
-**`signalk bug-report` for context** — include `hardware-raw.txt` (added in PR #71) which shows your loaded modules, ip link state, and config.txt dtoverlay lines all in one place. Plus `socketcanCandidate` from `hardware.json` if you ran `signalk socketcan`.
+**`signalk bug-report` for context** — the bundle's `hardware-raw.txt` shows your loaded modules, ip link state, and config.txt dtoverlay lines all in one place. Plus `socketcanCandidate` from `hardware.json` if you ran `signalk socketcan`.
 
 ## Out of scope (today)
 

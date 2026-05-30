@@ -580,6 +580,20 @@ EOF
                 err "No tty path provided; aborting."
                 return 1
             fi
+            # Sanity-check the tty path before it lands in a systemd
+            # unit. Real /dev/serial/by-id paths are limited to
+            # [A-Za-z0-9._/-] by udev; anything outside that set is
+            # an accidental paste (stray quote, dollar sign, backtick,
+            # whitespace) and would either break the unit file or, if
+            # the operator pastes the recipe block as-is, expand
+            # unsafely in the operator's shell. Refuse hard rather
+            # than emit a recipe that will silently produce a broken
+            # service.
+            if [[ ! "$slcan_tty" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+                err "tty path contains characters outside [A-Za-z0-9._/-]: $slcan_tty"
+                err "Real /dev/serial/by-id paths never contain shell metacharacters."
+                return 1
+            fi
             handle_slcan_recipe "$hat_5_id" "$hat_5_name" "$slcan_tty"
             ;;
         6)
@@ -685,13 +699,21 @@ print_slcan_recipe() {
 
     section "Recipe for ${display_name}"
     echo
-    echo "1. Install can-utils (provides slcand and candump):"
+    echo "1. Install can-utils (provides slcand and candump). Use your distro's"
+    echo "   package manager — the package is named 'can-utils' everywhere:"
     echo
-    echo "     sudo apt install -y can-utils"
+    echo "     Debian / Ubuntu / Raspberry Pi OS:  sudo apt install -y can-utils"
+    echo "     Fedora / RHEL / CentOS Stream:      sudo dnf install -y can-utils"
+    echo "     Arch / Manjaro:                     sudo pacman -S can-utils"
+    echo "     openSUSE:                           sudo zypper in can-utils"
     echo
     echo "2. Create a systemd unit that attaches the tty and brings can0 up:"
     echo
-    echo "     sudo tee /etc/systemd/system/signalk-slcan-can0.service > /dev/null <<EOF"
+    # Use '<<'\''EOF'\''' so the operator's shell does NOT expand `$i` /
+    # `$((i+1))` inside ExecStartPre when they paste the recipe block.
+    # With unquoted <<EOF those would expand to empty/zero at paste-time
+    # and the unit's wait loop becomes broken.
+    echo "     sudo tee /etc/systemd/system/signalk-slcan-can0.service > /dev/null <<'EOF'"
     echo "     [Unit]"
     echo "     Description=SLCAN can0 (NMEA 2000 250 kbit/s)"
     echo
