@@ -697,12 +697,18 @@ print_slcan_recipe() {
     echo
     echo "     [Service]"
     echo "     Type=simple"
-    echo "     # Wait for the USB-serial tty to enumerate (covers cold-boot"
-    echo "     # races where the SLCAN adapter hasn't bound to its driver yet)."
-    echo "     ExecStartPre=/bin/sh -c 'until [ -e ${tty} ]; do sleep 1; done'"
+    echo "     # Wait up to 30s for the USB-serial tty to enumerate (covers"
+    echo "     # cold-boot races where the SLCAN adapter hasn't bound to its"
+    echo "     # driver yet). Bounded so a missing adapter fails fast instead"
+    echo "     # of waiting out systemd's DefaultTimeoutStartSec=90s silently."
+    echo "     ExecStartPre=/bin/sh -c 'i=0; while [ ! -e ${tty} ] && [ \$i -lt 30 ]; do sleep 1; i=\$((i+1)); done; [ -e ${tty} ]'"
     echo "     # -F foreground / -o open / -c close-on-exit / -s5 250 kbit/s"
     echo "     ExecStart=/usr/bin/slcand -F -o -c -s${bitrate_code} ${tty} can0"
-    echo "     ExecStartPost=/usr/sbin/ip link set up can0"
+    # Bare `ip` (not /usr/sbin/ip): the path varies across distros
+    # (Debian /usr/sbin, RHEL /sbin, Arch /usr/bin); systemd's
+    # default $PATH for service units includes the standard sbin
+    # dirs so resolution works portably.
+    echo "     ExecStartPost=ip link set up can0"
     echo "     Restart=on-failure"
     echo "     RestartSec=5"
     echo

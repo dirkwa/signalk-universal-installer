@@ -111,9 +111,9 @@ No `config.txt` edit, **no Pi required**. The recipe installs `can-utils` and a 
 
      [Service]
      Type=simple
-     ExecStartPre=/bin/sh -c 'until [ -e /dev/serial/by-id/<your-adapter> ]; do sleep 1; done'
+     ExecStartPre=/bin/sh -c 'i=0; while [ ! -e /dev/serial/by-id/<your-adapter> ] && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; [ -e /dev/serial/by-id/<your-adapter> ]'
      ExecStart=/usr/bin/slcand -F -o -c -s5 /dev/serial/by-id/<your-adapter> can0
-     ExecStartPost=/usr/sbin/ip link set up can0
+     ExecStartPost=ip link set up can0
      Restart=on-failure
      RestartSec=5
 
