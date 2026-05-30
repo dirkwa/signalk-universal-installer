@@ -2,7 +2,7 @@
 
 A guided setup helper for getting NMEA 2000 (or other CAN) buses talking to SignalK. Targets the six common ways to put a CAN port on the host: dual-channel Waveshare, marine PiCAN-M / PiCAN3, generic single-channel MCP2515 boards, SocketCAN-native USB CAN adapters, SLCAN serial-mode USB adapters, and custom dtoverlays. The first three are Pi-only (they edit `/boot/firmware/config.txt`); the USB-CAN and SLCAN paths work on any Linux.
 
-`signalk socketcan` is a **detect-and-advise** helper. It will not edit `/boot/firmware/config.txt` for you in v1 — a wrong `dtoverlay=` line can prevent the Pi from booting, and the blast radius of config.txt mistakes is bigger than the cmdline.txt patch the installer already does. The command tells you exactly what to add; you run sudo.
+`signalk socketcan` is a **detect-and-advise** helper. It will not edit `/boot/firmware/config.txt` for you — a wrong `dtoverlay=` line can prevent the Pi from booting, and the blast radius of config.txt mistakes is bigger than the cmdline.txt patch the installer already does. The command tells you exactly what to add; you run sudo.
 
 ## TL;DR
 
@@ -74,7 +74,7 @@ dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25
 
 Rest of the recipe is the same as Waveshare from step 2 onward.
 
-CAN-FD products (PiCAN FD, PiCAN FD Duo) are a separate menu entry on the roadmap; they'd use `dtoverlay=mcp251xfd,spi0-0,interrupt=25` (no `oscillator=` for the upstream 40 MHz crystal default).
+CAN-FD products (PiCAN FD, PiCAN FD Duo) need a different overlay: `dtoverlay=mcp251xfd,spi0-0,interrupt=25` (no `oscillator=` — the upstream device-tree default matches the 40 MHz crystal).
 
 ### 3. Generic single-channel MCP2515
 
@@ -221,6 +221,6 @@ You should see PGNs appearing in the **Data Browser** within seconds.
 
 ## Out of scope (today)
 
-- **Auto-applying the config.txt patch with sudo prompt.** v2 candidate. The cmdline.txt patch the installer already does is a precedent, but config.txt's blast radius (HDMI, memory split, GPIO pinmux) is wider.
-- **CAN-FD data bitrate.** v1 uses classical CAN @ 250 kbit/s. Future PiCAN FD / Waveshare CAN-FD HAT entries would add CAN-FD with a separate data bitrate (2 Mbit/s, 4 Mbit/s, 5 Mbit/s); needs more options on the networkd side.
+- **Auto-applying the config.txt patch with sudo prompt.** The cmdline.txt patch the installer already does is a precedent, but config.txt's blast radius (HDMI, memory split, GPIO pinmux) is wider.
+- **CAN-FD data bitrate.** Current recipes use classical CAN @ 250 kbit/s. PiCAN FD / Waveshare CAN-FD HAT entries would add CAN-FD with a separate data bitrate (2 Mbit/s, 4 Mbit/s, 5 Mbit/s); needs more options on the networkd side.
 - **Auto-discovering SLCAN tty when more than one is plugged in.** The current flow asks the operator to paste a full path. A future version might offer a numbered sub-menu.

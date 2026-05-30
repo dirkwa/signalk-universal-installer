@@ -53,29 +53,32 @@ section() { printf '\n%s== %s ==%s\n' "$C_BOLD" "$*" "$C_RESET"; }
 
 usage() {
     cat <<EOF
-signalk-socketcan — Pi CAN-HAT detection & setup helper.
+signalk-socketcan — CAN-adapter detection & setup helper for SignalK.
 
 Usage:
-  signalk socketcan          Interactive: detect HAT, print copy-pasteable
-                             recipe (config.txt overlay + bitrate persistence),
-                             record the chosen HAT in hardware.json.
+  signalk socketcan          Interactive: detect the adapter, print a
+                             copy-pasteable recipe (Pi HAT: config.txt
+                             overlay; USB-CAN: networkd file; SLCAN:
+                             systemd service unit), record the chosen
+                             adapter in hardware.json.
   signalk socketcan status   Terse summary of current state (no prompts).
   signalk socketcan help     This text.
 
-Supported HATs:
-  1. Waveshare 2-CH CAN HAT (dual MCP2515 on SPI)
-  2. PiCAN-M / PiCAN3 (MCP251xFD CAN-FD on SPI; marine NMEA 2000 micro-c)
-  3. Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT, etc.)
-  4. USB CAN adapter (gs_usb, Peak, Kvaser, SLCAN)
-  5. Custom dtoverlay (you supply the line)
+Supported adapters:
+  1. Waveshare 2-CH CAN HAT (dual MCP2515 on SPI)          [Pi only]
+  2. PiCAN-M / PiCAN3 (MCP2515 on SPI; marine NMEA 2000)    [Pi only]
+  3. Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT) [Pi only]
+  4. USB CAN — SocketCAN-native (gs_usb, Peak, Kvaser)      [any Linux]
+  5. SLCAN (Lawicel CANUSB serial, CANable slcan firmware)  [any Linux]
+  6. Custom dtoverlay (you supply the line)                 [Pi only]
 
-Recipe persistence uses systemd-networkd's CAN bitrate support. Pi OS
-defaults to NetworkManager; the recipe explains the trade-off and an
-alternative ip-link service unit if you prefer not to enable networkd.
+Recipe persistence uses systemd-networkd's CAN BitRate= for Pi HATs and
+SocketCAN-native USB adapters. The SLCAN recipe ships a systemd .service
+unit that invokes slcand and brings can0 up — no networkd needed.
 
 Bitrate is 250000 (NMEA 2000 standard). Other CAN buses (engine ECU,
 J1939 industrial, classic 125k boats) use different bitrates; edit the
-networkd file if your bus is not NMEA 2000.
+networkd file (or the SLCAN unit's -s code) if your bus is not NMEA 2000.
 
 See: ${DOC_URL}
 EOF
