@@ -53,29 +53,32 @@ section() { printf '\n%s== %s ==%s\n' "$C_BOLD" "$*" "$C_RESET"; }
 
 usage() {
     cat <<EOF
-signalk-socketcan — Pi CAN-HAT detection & setup helper.
+signalk-socketcan — CAN-adapter detection & setup helper for SignalK.
 
 Usage:
-  signalk socketcan          Interactive: detect HAT, print copy-pasteable
-                             recipe (config.txt overlay + bitrate persistence),
-                             record the chosen HAT in hardware.json.
+  signalk socketcan          Interactive: detect the adapter, print a
+                             copy-pasteable recipe (Pi HAT: config.txt
+                             overlay; USB-CAN: networkd file; SLCAN:
+                             systemd service unit), record the chosen
+                             adapter in hardware.json.
   signalk socketcan status   Terse summary of current state (no prompts).
   signalk socketcan help     This text.
 
-Supported HATs:
-  1. Waveshare 2-CH CAN HAT (dual MCP2515 on SPI)
-  2. PiCAN-M / PiCAN3 (MCP251xFD CAN-FD on SPI; marine NMEA 2000 micro-c)
-  3. Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT, etc.)
-  4. USB CAN adapter (gs_usb, Peak, Kvaser, SLCAN)
-  5. Custom dtoverlay (you supply the line)
+Supported adapters:
+  1. Waveshare 2-CH CAN HAT (dual MCP2515 on SPI)          [Pi only]
+  2. PiCAN-M / PiCAN3 (MCP2515 on SPI; marine NMEA 2000)    [Pi only]
+  3. Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT) [Pi only]
+  4. USB CAN — SocketCAN-native (gs_usb, Peak, Kvaser)      [any Linux]
+  5. SLCAN (Lawicel CANUSB serial, CANable slcan firmware)  [any Linux]
+  6. Custom dtoverlay (you supply the line)                 [Pi only]
 
-Recipe persistence uses systemd-networkd's CAN bitrate support. Pi OS
-defaults to NetworkManager; the recipe explains the trade-off and an
-alternative ip-link service unit if you prefer not to enable networkd.
+Recipe persistence uses systemd-networkd's CAN BitRate= for Pi HATs and
+SocketCAN-native USB adapters. The SLCAN recipe ships a systemd .service
+unit that invokes slcand and brings can0 up — no networkd needed.
 
 Bitrate is 250000 (NMEA 2000 standard). Other CAN buses (engine ECU,
 J1939 industrial, classic 125k boats) use different bitrates; edit the
-networkd file if your bus is not NMEA 2000.
+networkd file (or the SLCAN unit's -s code) if your bus is not NMEA 2000.
 
 See: ${DOC_URL}
 EOF
@@ -164,16 +167,29 @@ can_state() {
 
 hat_1_id="waveshare-2ch-mcp2515"
 hat_1_name="Waveshare 2-CH CAN HAT (dual MCP2515)"
+# Interrupt pins are the FACTORY-SOLDER defaults documented in the
+# Waveshare 2-CH CAN HAT wiki: INT_0=GPIO23, INT_1=GPIO25. Users with
+# reworked 0-ohm jumpers can override via menu option 6 (custom).
+# `dtparam=spi=on` is auto-enabled by mcp2515-can*; do NOT add it.
+# `dtoverlay=spi-bcm2835-overlay` is not a real overlay — it was on
+# Waveshare's wiki at one point and we copy-pasted it; the upstream
+# Raspberry Pi overlays README has no entry by that name.
 hat_1_overlays=(
-    "dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25"
-    "dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=24"
-    "dtoverlay=spi-bcm2835-overlay"
+    "dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=23"
+    "dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25"
 )
 
-hat_2_id="picanm-mcp251xfd"
-hat_2_name="PiCAN-M / PiCAN3 (MCP251xFD CAN-FD)"
+# PiCAN-M and PiCAN3 ship the MCP2515 (NOT MCP251xFD), per Copperhill's
+# own driver-installation blog post. Earlier versions of this helper
+# emitted `dtoverlay=mcp251xfd-spi0-0,oscillator=20000000,...` which
+# is wrong for two reasons: (1) wrong chip family, (2) `mcp251xfd-spi0-0`
+# is not a valid overlay name. The CAN-FD variant is a separate
+# product ("PiCAN FD"); if we add that, it gets its own menu entry
+# using `dtoverlay=mcp251xfd,spi0-0,interrupt=25`.
+hat_2_id="picanm-mcp2515"
+hat_2_name="PiCAN-M / PiCAN3 (MCP2515, marine NMEA 2000)"
 hat_2_overlays=(
-    "dtoverlay=mcp251xfd-spi0-0,oscillator=20000000,interrupt=25"
+    "dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25"
 )
 
 hat_3_id="generic-mcp2515"
@@ -182,12 +198,23 @@ hat_3_name="Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT, etc.)"
 # frequency (8 or 16 MHz — both are common on cheap clones) before
 # emitting the single-overlay line.
 
-hat_4_id="usb-can"
-hat_4_name="USB CAN adapter (gs_usb / Peak / Kvaser / SLCAN)"
-# No config.txt edit — kernel auto-loads the driver on plug-in.
+# SocketCAN-native USB adapters: drivers in-tree, autoloaded via
+# modalias on USB enumeration, expose canN as a netdev with no
+# userspace daemon. gs_usb / candleLight / CANable-in-candleLight-mode,
+# Peak PCAN-USB (peak_usb), Kvaser Leaf/USBcan (kvaser_usb).
+hat_4_id="usb-can-native"
+hat_4_name="USB CAN adapter — SocketCAN-native (gs_usb / Peak / Kvaser)"
 
-hat_5_id="custom"
-hat_5_name="Custom dtoverlay (you supply the line)"
+# SLCAN adapters use a serial line discipline; the kernel needs
+# `slcand` (from can-utils) to attach a tty to a can netdev before
+# canN appears. Lawicel CANUSB in serial mode, CANable in slcan
+# firmware, generic FTDI/ACM serial CAN bridges. Recipe emits an
+# explicit slcand invocation plus a systemd unit to make it persist.
+hat_5_id="slcan"
+hat_5_name="SLCAN adapter (Lawicel CANUSB serial mode, CANable slcan firmware)"
+
+hat_6_id="custom"
+hat_6_name="Custom dtoverlay (you supply the line)"
 # Operator's lines collected during the prompt; populated at runtime.
 
 # ─── recipe rendering ──────────────────────────────────────────────────
@@ -333,13 +360,14 @@ write_candidate() {
 # ─── status command ────────────────────────────────────────────────────
 
 cmd_status() {
-    if ! is_pi; then
-        err "signalk socketcan is a Raspberry Pi feature; this host is not a Pi."
-        return 1
-    fi
-
+    # No Pi gate — USB-CAN and SLCAN paths work on any Linux. The
+    # config.txt section below short-circuits cleanly on non-Pi.
     section "Host"
-    info "Model:  $(pi_model)"
+    if is_pi; then
+        info "Model:  $(pi_model)"
+    else
+        info "Model:  $(uname -m) (non-Pi — Pi-only menu options will refuse)"
+    fi
     info "Kernel: $(uname -r 2>/dev/null || echo unknown)"
 
     section "config.txt"
@@ -351,7 +379,7 @@ cmd_status() {
             ok "Existing CAN/SPI overlay(s):"
             # existing_overlays returns one overlay per line; printf with
             # a single quoted string would only indent the first row.
-            # Walk line-by-line so multi-overlay HATs (Waveshare's three)
+            # Walk line-by-line so multi-overlay HATs (Waveshare's two)
             # all get the indent.
             while IFS= read -r overlay_line; do
                 [[ -n "$overlay_line" ]] || continue
@@ -360,8 +388,10 @@ cmd_status() {
         else
             warn "No CAN/SPI overlay configured."
         fi
-    else
+    elif is_pi; then
         warn "config.txt not readable at /boot/firmware or /boot."
+    else
+        info "(non-Pi host — no config.txt to inspect; use USB-CAN paths)"
     fi
 
     section "Kernel modules"
@@ -411,30 +441,33 @@ cmd_status() {
 # ─── interactive command ───────────────────────────────────────────────
 
 cmd_interactive() {
-    if ! is_pi; then
-        err "signalk socketcan is a Raspberry Pi feature; this host is not a Pi."
-        return 1
-    fi
-
+    # No early Pi gate — USB-CAN (option 4) and SLCAN (option 5) work
+    # on any Linux. Pi-only menu options gate themselves below with a
+    # clear message that points at the USB-CAN routes.
     section "Detecting"
-    info "Pi model:  $(pi_model)"
+    if is_pi; then
+        info "Pi model:  $(pi_model)"
+    else
+        info "Host:      $(uname -m) (non-Pi — only USB-CAN and SLCAN paths apply)"
+    fi
 
     local cfg overlays mods ifaces
     if cfg=$(config_txt_path); then
         info "config.txt: ${cfg}"
+        overlays=$(existing_overlays)
+        if [[ -n "$overlays" ]]; then
+            ok "Existing CAN/SPI overlay(s) in config.txt:"
+            while IFS= read -r overlay_line; do
+                [[ -n "$overlay_line" ]] || continue
+                printf '    %s\n' "$overlay_line"
+            done <<<"$overlays"
+        else
+            info "No CAN/SPI overlay in config.txt yet."
+        fi
     else
-        warn "config.txt not found in /boot/firmware or /boot — Pi-OS-only paths"
-    fi
-
-    overlays=$(existing_overlays)
-    if [[ -n "$overlays" ]]; then
-        ok "Existing CAN/SPI overlay(s) in config.txt:"
-        while IFS= read -r overlay_line; do
-            [[ -n "$overlay_line" ]] || continue
-            printf '    %s\n' "$overlay_line"
-        done <<<"$overlays"
-    else
-        info "No CAN/SPI overlay in config.txt yet."
+        # Non-Pi: there's no config.txt to inspect. Don't emit a warning
+        # — that just adds noise on x86 hosts using USB-CAN.
+        info "config.txt: (not a Pi-OS host — skipping overlay probe)"
     fi
 
     mods=$(loaded_can_modules)
@@ -460,25 +493,43 @@ cmd_interactive() {
   3. ${hat_3_name}
   4. ${hat_4_name}
   5. ${hat_5_name}
+  6. ${hat_6_name}
   q. Quit without changes
 EOF
     echo
     local choice=""
     # Guard read against EOF so a non-interactive stdin doesn't trip
     # set -e — same pattern the dispatcher uses for its upload prompt.
-    if ! read -r -p "Choice [1-5/q]: " choice; then
+    if ! read -r -p "Choice [1-6/q]: " choice; then
         choice="q"
     fi
     echo
 
+    # Pi-only menu options (1/2/3/6) all need /boot/firmware/config.txt
+    # editable by the operator. On non-Pi hosts those options refuse
+    # with a pointer at the USB-CAN routes; options 4 (SocketCAN-native
+    # USB) and 5 (SLCAN) work on any Linux.
+    require_pi() {
+        if ! is_pi; then
+            err "Menu option $1 needs a Raspberry Pi (it edits config.txt)."
+            err "On non-Pi Linux use option 4 (USB SocketCAN-native) or"
+            err "option 5 (SLCAN) instead — both work without device-tree."
+            return 1
+        fi
+        return 0
+    }
+
     case "$choice" in
         1)
+            require_pi 1 || return 1
             handle_recipe "$hat_1_id" "$hat_1_name" "${hat_1_overlays[@]}"
             ;;
         2)
+            require_pi 2 || return 1
             handle_recipe "$hat_2_id" "$hat_2_name" "${hat_2_overlays[@]}"
             ;;
         3)
+            require_pi 3 || return 1
             local osc=""
             if ! read -r -p "Oscillator frequency? [8000000/16000000, default 16000000]: " osc; then
                 osc=""
@@ -486,11 +537,11 @@ EOF
             osc=${osc:-16000000}
             # The prompt advertises only the two common values; honor that
             # contract. Boards with unusual oscillators (12 MHz, 20 MHz on
-            # some Chinese clones) belong on option 5 (custom dtoverlay)
+            # some Chinese clones) belong on option 6 (custom dtoverlay)
             # where the operator types the whole line themselves.
             if [[ "$osc" != "8000000" && "$osc" != "16000000" ]]; then
                 err "Oscillator must be 8000000 or 16000000 (Hz). Got: $osc"
-                err "For other values, use menu option 5 (Custom dtoverlay)."
+                err "For other values, use menu option 6 (Custom dtoverlay)."
                 return 1
             fi
             local generic_overlay="dtoverlay=mcp2515-can0,oscillator=${osc},interrupt=25"
@@ -500,6 +551,56 @@ EOF
             handle_recipe "$hat_4_id" "$hat_4_name"
             ;;
         5)
+            # SLCAN flow: collect the tty path, then dispatch to a
+            # specialised handler. `handle_slcan_recipe` is its own
+            # function — the recipe shape is different (systemd unit
+            # invoking slcand, not a config.txt edit).
+            local slcan_tty=""
+            local tty_default=""
+            # If there's exactly one /dev/serial/by-id/* entry, suggest
+            # it. Multiple → no default (operator picks). Zero → ask.
+            local by_id_count=0
+            if [[ -d /dev/serial/by-id ]]; then
+                by_id_count=$(find /dev/serial/by-id -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+                if (( by_id_count == 1 )); then
+                    tty_default=$(find /dev/serial/by-id -mindepth 1 -maxdepth 1 2>/dev/null | head -1)
+                fi
+            fi
+            if [[ -n "$tty_default" ]]; then
+                if ! read -r -p "SLCAN tty path [default: $tty_default]: " slcan_tty; then
+                    slcan_tty=""
+                fi
+                slcan_tty=${slcan_tty:-$tty_default}
+            else
+                if (( by_id_count > 1 )); then
+                    echo "Multiple /dev/serial/by-id/ entries — pick one and paste its full path."
+                fi
+                if ! read -r -p "SLCAN tty path (e.g. /dev/serial/by-id/usb-...): " slcan_tty; then
+                    slcan_tty=""
+                fi
+            fi
+            if [[ -z "$slcan_tty" ]]; then
+                err "No tty path provided; aborting."
+                return 1
+            fi
+            # Sanity-check the tty path before it lands in a systemd
+            # unit. Real /dev/serial/by-id paths are limited to
+            # [A-Za-z0-9._/-] by udev; anything outside that set is
+            # an accidental paste (stray quote, dollar sign, backtick,
+            # whitespace) and would either break the unit file or, if
+            # the operator pastes the recipe block as-is, expand
+            # unsafely in the operator's shell. Refuse hard rather
+            # than emit a recipe that will silently produce a broken
+            # service.
+            if [[ ! "$slcan_tty" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+                err "tty path contains characters outside [A-Za-z0-9._/-]: $slcan_tty"
+                err "Real /dev/serial/by-id paths never contain shell metacharacters."
+                return 1
+            fi
+            handle_slcan_recipe "$hat_5_id" "$hat_5_name" "$slcan_tty"
+            ;;
+        6)
+            require_pi 6 || return 1
             local custom=""
             local confirm=""
             echo "Enter your dtoverlay= / dtparam= line(s), one per line. Empty line to finish."
@@ -529,7 +630,7 @@ EOF
                 err "No overlay lines entered; aborting."
                 return 1
             fi
-            handle_recipe "$hat_5_id" "$hat_5_name" "${custom_overlays[@]}"
+            handle_recipe "$hat_6_id" "$hat_6_name" "${custom_overlays[@]}"
             ;;
         q|Q|"")
             info "no changes; bye"
@@ -561,12 +662,12 @@ handle_recipe() {
     fi
 
     # ipLinkUp: target the specific interface the recipe configures
-    # (can0 — every overlay in the catalog declares mcp2515-can0 or
-    # mcp251xfd-spi0-0 → can0, and the recipe's networkd file does
-    # `Match Name=can0`). Three checks must all pass: interface exists,
-    # link is UP, bitrate matches the recipe. Anything weaker treats a
-    # `vcan0` test interface or a second-channel `can1` as success when
-    # the actual recipe target is down.
+    # (can0 — every overlay in the catalog declares mcp2515-can0 →
+    # can0, and the recipe's networkd file does `Match Name=can0`).
+    # Three checks must all pass: interface exists, link is UP,
+    # bitrate matches the recipe. Anything weaker treats a `vcan0`
+    # test interface or a second-channel `can1` as success when the
+    # actual recipe target is down.
     local ip_up=false
     local target_iface="can0"
     local target_state
@@ -584,6 +685,111 @@ handle_recipe() {
 
     print_recipe "$hat_id" "$display_name" "$bitrate" "${overlays[@]}"
     write_candidate "$hat_id" "$display_name" "$bitrate" "$cfg_applied" "$ip_up" "${overlays[@]}"
+}
+
+# ─── SLCAN recipe path ────────────────────────────────────────────────
+# SLCAN adapters are different: no config.txt edit, no kernel-autoload,
+# no systemd-networkd config. Instead `slcand` from can-utils must be
+# running on a serial tty to instantiate canX. We emit a systemd
+# .service unit so the attachment is durable across reboots.
+
+# print_slcan_recipe <hat_id> <display_name> <tty>
+print_slcan_recipe() {
+    local hat_id=$1 display_name=$2 tty=$3
+    # slcand bitrate codes: 0=10k 1=20k 2=50k 3=100k 4=125k 5=250k
+    # 6=500k 7=800k 8=1000k. NMEA 2000 is 250k → -s5.
+    local bitrate_code=5
+
+    section "Recipe for ${display_name}"
+    echo
+    echo "1. Install can-utils (provides slcand and candump). Use your distro's"
+    echo "   package manager — the package is named 'can-utils' everywhere:"
+    echo
+    echo "     Debian / Ubuntu / Raspberry Pi OS:  sudo apt install -y can-utils"
+    echo "     Fedora / RHEL / CentOS Stream:      sudo dnf install -y can-utils"
+    echo "     Arch / Manjaro:                     sudo pacman -S can-utils"
+    echo "     openSUSE:                           sudo zypper in can-utils"
+    echo
+    echo "2. Create a systemd unit that attaches the tty and brings can0 up:"
+    echo
+    # Use '<<'\''EOF'\''' so the operator's shell does NOT expand `$i` /
+    # `$((i+1))` inside ExecStartPre when they paste the recipe block.
+    # With unquoted <<EOF those would expand to empty/zero at paste-time
+    # and the unit's wait loop becomes broken.
+    echo "     sudo tee /etc/systemd/system/signalk-slcan-can0.service > /dev/null <<'EOF'"
+    echo "     [Unit]"
+    echo "     Description=SLCAN can0 (NMEA 2000 250 kbit/s)"
+    echo
+    echo "     [Service]"
+    echo "     Type=simple"
+    echo "     # Wait up to 30s for the USB-serial tty to enumerate (covers"
+    echo "     # cold-boot races where the SLCAN adapter hasn't bound to its"
+    echo "     # driver yet). Bounded so a missing adapter fails fast instead"
+    echo "     # of waiting out systemd's DefaultTimeoutStartSec=90s silently."
+    echo "     ExecStartPre=/bin/sh -c 'i=0; while [ ! -e ${tty} ] && [ \$i -lt 30 ]; do sleep 1; i=\$((i+1)); done; [ -e ${tty} ]'"
+    echo "     # -F foreground / -o open / -c close-on-exit / -s5 250 kbit/s"
+    echo "     ExecStart=/usr/bin/slcand -F -o -c -s${bitrate_code} ${tty} can0"
+    # Bare `ip` (not /usr/sbin/ip): the path varies across distros
+    # (Debian /usr/sbin, RHEL /sbin, Arch /usr/bin); systemd's
+    # default $PATH for service units includes the standard sbin
+    # dirs so resolution works portably.
+    echo "     ExecStartPost=ip link set up can0"
+    echo "     Restart=on-failure"
+    echo "     RestartSec=5"
+    echo
+    echo "     [Install]"
+    echo "     WantedBy=multi-user.target"
+    echo "     EOF"
+    echo
+    echo "     sudo systemctl daemon-reload"
+    echo "     sudo systemctl enable --now signalk-slcan-can0.service"
+    echo
+    echo "3. Verify:"
+    echo
+    echo "     systemctl status signalk-slcan-can0.service"
+    echo "     ip -br link show type can     # can0 should be UP"
+    echo "     candump can0                  # NMEA 2000 traffic should appear"
+    echo
+    echo "After verifying, re-run 'signalk socketcan' (the interactive flow)"
+    echo "to refresh hardware.json with the now-applied state."
+    echo "('signalk socketcan status' is read-only — it shows current state but"
+    echo " does not write to hardware.json.)"
+    echo
+    echo "Recipe id: ${hat_id}    Bitrate: 250000    tty: ${tty}"
+}
+
+# handle_slcan_recipe <hat_id> <display_name> <tty>
+handle_slcan_recipe() {
+    local hat_id=$1 display_name=$2 tty=$3
+    local bitrate=250000
+
+    # configApplied for SLCAN: a signalk-slcan-* service unit exists.
+    # Best-effort detection — false negatives are fine (operator may
+    # have used a different unit name) but a true positive is
+    # informative.
+    local cfg_applied=false
+    if systemctl list-unit-files 'signalk-slcan-*' 2>/dev/null \
+        | grep -q '\.service'; then
+        cfg_applied=true
+    fi
+
+    # ipLinkUp: same can0 + UP/UNKNOWN + bitrate gate as handle_recipe.
+    local ip_up=false
+    local target_state
+    target_state=$(can_state "can0")
+    if [[ "$target_state" == "UP" || "$target_state" == "UNKNOWN" ]]; then
+        local target_br
+        target_br=$(can_bitrate "can0")
+        if [[ "$target_br" == "$bitrate" ]]; then
+            ip_up=true
+        fi
+    fi
+
+    print_slcan_recipe "$hat_id" "$display_name" "$tty"
+    # write_candidate is shared — we pass no overlays (configTxtOverlays
+    # stays []) since SLCAN doesn't use config.txt. The systemd unit
+    # path lives in the recipe text only; hardware.json doesn't track it.
+    write_candidate "$hat_id" "$display_name" "$bitrate" "$cfg_applied" "$ip_up"
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────────
