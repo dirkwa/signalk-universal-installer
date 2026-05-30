@@ -366,6 +366,21 @@ write_candidate() {
 cmd_status() {
     # No Pi gate — USB-CAN and SLCAN paths work on any Linux. The
     # config.txt section below short-circuits cleanly on non-Pi.
+
+    # Collect probe values once up front; downstream sections share them
+    # AND the "Detected configuration" derivation needs all three at once.
+    # `overlay_lines` (not `overlays`) so this newline-joined string
+    # doesn't collide with the array-typed `overlays` used in
+    # print_recipe / write_candidate above.
+    local cfg=""
+    cfg=$(config_txt_path 2>/dev/null || true)
+    local overlay_lines=""
+    overlay_lines=$(existing_overlays)
+    local mods=""
+    mods=$(loaded_can_modules)
+    local ifaces=""
+    ifaces=$(can_interfaces)
+
     section "Host"
     if is_pi; then
         info "Model:  $(pi_model)"
@@ -375,11 +390,9 @@ cmd_status() {
     info "Kernel: $(uname -r 2>/dev/null || echo unknown)"
 
     section "config.txt"
-    local cfg overlays
-    if cfg=$(config_txt_path); then
+    if [[ -n "$cfg" ]]; then
         info "Path: ${cfg}"
-        overlays=$(existing_overlays)
-        if [[ -n "$overlays" ]]; then
+        if [[ -n "$overlay_lines" ]]; then
             ok "Existing CAN/SPI overlay(s):"
             # existing_overlays returns one overlay per line; printf with
             # a single quoted string would only indent the first row.
@@ -388,7 +401,7 @@ cmd_status() {
             while IFS= read -r overlay_line; do
                 [[ -n "$overlay_line" ]] || continue
                 printf '    %s\n' "$overlay_line"
-            done <<<"$overlays"
+            done <<<"$overlay_lines"
         else
             warn "No CAN/SPI overlay configured."
         fi
@@ -399,8 +412,6 @@ cmd_status() {
     fi
 
     section "Kernel modules"
-    local mods
-    mods=$(loaded_can_modules)
     if [[ -n "$mods" ]]; then
         ok "Loaded CAN-related modules:"
         # loaded_can_modules emits one module per line; indent each.
@@ -413,8 +424,6 @@ cmd_status() {
     fi
 
     section "Interfaces"
-    local ifaces
-    ifaces=$(can_interfaces)
     if [[ -n "$ifaces" ]]; then
         local iface
         while IFS= read -r iface; do
@@ -428,18 +437,134 @@ cmd_status() {
         warn "No CAN interface present."
     fi
 
-    section "Recorded candidate"
-    if [[ -f "$HARDWARE_JSON" ]] && command -v jq >/dev/null 2>&1; then
-        local candidate
-        candidate=$(jq -r '.socketcanCandidate // empty' "$HARDWARE_JSON" 2>/dev/null || true)
-        if [[ -n "$candidate" ]]; then
-            jq '.socketcanCandidate' "$HARDWARE_JSON"
-        else
-            info "(no socketcanCandidate recorded yet — run 'signalk socketcan')"
-        fi
-    else
-        info "(hardware.json or jq absent — run 'signalk socketcan' interactively)"
+    # ─── live-derived detected configuration ─────────────────────────
+    # Identify which catalog HAT the live system most resembles. This
+    # is computed fresh from config.txt + lsmod + ip link every run, so
+    # it cannot go stale relative to the kernel state. The persisted
+    # `socketcanCandidate` field in hardware.json is a separate concept
+    # (the operator's last interactive intent, kept for future
+    # auto-installer flows) and intentionally NOT shown here.
+    section "Detected configuration"
+    local detected
+    detected=$(detect_configuration "$overlay_lines" "$mods" "$ifaces")
+    printf '%s\n' "$detected"
+}
+
+# detect_configuration <overlay_lines> <mods> <ifaces>
+# Pure function: returns a 1-2 line description of the most likely
+# configuration. All input is the live-probe output from
+# existing_overlays / loaded_can_modules / can_interfaces; no
+# side-effects, no JSON read. `cfg_overlays` avoids the array-typed
+# `overlays` name used by print_recipe / write_candidate above.
+detect_configuration() {
+    local cfg_overlays=$1 mods=$2 ifaces=$3
+
+    # Helper to test for an overlay matching a regex anywhere in the
+    # multi-line overlays string. Using grep so SC2076 stays away
+    # from a `=~` literal-vs-regex confusion.
+    has_overlay() {
+        local pat=$1
+        printf '%s\n' "$cfg_overlays" | grep -qE "$pat"
+    }
+
+    # Helper: is module $1 in the loaded list?
+    has_module() {
+        printf '%s\n' "$mods" | grep -qxE "$1"
+    }
+
+    # Helper: is interface $1 in the live list?
+    has_iface() {
+        printf '%s\n' "$ifaces" | grep -qxE "$1"
+    }
+
+    # MCP251xFD overlay → CAN-FD chip (PiCAN FD / Waveshare CAN-FD HAT).
+    # No menu entry yet, but we can still name it so the operator isn't
+    # left thinking they have nothing.
+    if has_overlay '^\s*dtoverlay=mcp251xfd'; then
+        printf '[OK] CAN-FD adapter (MCP251xFD on SPI) — PiCAN FD or similar.\n'
+        printf '     Helper does not yet have a menu entry for CAN-FD; the config\n'
+        printf '     is correct if can0 is UP at the right bitrate.\n'
+        return 0
     fi
+
+    # Two MCP2515 overlays (can0 + can1) → Waveshare 2-CH HAT.
+    # Look at the interrupt pins to flag factory vs reworked vs the
+    # earlier-buggy-recipe defaults.
+    if has_overlay 'dtoverlay=mcp2515-can0' && has_overlay 'dtoverlay=mcp2515-can1'; then
+        local pins
+        # Pull every "interrupt=NN" value, sorted, comma-joined.
+        pins=$(printf '%s\n' "$cfg_overlays" \
+            | grep -oE 'interrupt=[0-9]+' \
+            | sort -u | paste -sd ',' -)
+        local label="Waveshare 2-CH CAN HAT (dual MCP2515)"
+        case "$pins" in
+            "interrupt=23,interrupt=25")
+                printf '[OK] %s — factory solder defaults.\n' "$label"
+                ;;
+            "interrupt=24,interrupt=25")
+                printf '[!]  %s — pins 24/25 match the EARLIER BUGGY default\n' "$label"
+                printf '     emitted by signalk socketcan before its catalog fix. Real\n'
+                printf '     Waveshare factory wiring is interrupt=23 + interrupt=25.\n'
+                printf '     If can0 is UP and candump shows zero frames, this is why.\n'
+                ;;
+            *)
+                printf '[OK] %s — non-default interrupt pins (%s); likely reworked\n' "$label" "$pins"
+                printf '     jumpers. Verify by candump.\n'
+                ;;
+        esac
+        return 0
+    fi
+
+    # Single MCP2515 overlay → PiCAN-M / PiCAN3 / generic single-chan.
+    # Can't reliably distinguish PiCAN family from a generic board with
+    # config.txt alone; report the chip + oscillator.
+    if has_overlay 'dtoverlay=mcp2515-can0'; then
+        local osc
+        osc=$(printf '%s\n' "$cfg_overlays" \
+            | grep -m1 -oE 'oscillator=[0-9]+' \
+            | cut -d= -f2)
+        printf '[OK] Single-channel MCP2515 on SPI (oscillator=%s).\n' "${osc:-?}"
+        printf '     Matches PiCAN-M / PiCAN3 (marine NMEA 2000) or any generic\n'
+        printf '     MCP2515 board. Cannot distinguish from config.txt alone.\n'
+        return 0
+    fi
+
+    # No SPI overlay — fall back to module-based identification for
+    # USB and SLCAN paths.
+    if has_module 'gs_usb'; then
+        printf '[OK] USB CAN adapter — gs_usb (candleLight / CANable in CL mode).\n'
+        return 0
+    fi
+    if has_module 'peak_usb'; then
+        printf '[OK] USB CAN adapter — Peak PCAN-USB.\n'
+        return 0
+    fi
+    if has_module 'kvaser_usb'; then
+        printf '[OK] USB CAN adapter — Kvaser Leaf / USBcan.\n'
+        return 0
+    fi
+    if has_module 'slcan'; then
+        # slcan is loaded but a can interface only appears once slcand
+        # attaches a tty. Distinguish the two states.
+        if [[ -n "$ifaces" ]] && has_iface 'can[0-9]+'; then
+            printf '[OK] SLCAN adapter — slcand has attached the tty.\n'
+        else
+            printf '[!]  SLCAN driver loaded but no can interface present.\n'
+            printf '     slcand must be running to attach a tty (see menu option 5).\n'
+        fi
+        return 0
+    fi
+
+    # No overlay, no relevant module, but a can interface exists →
+    # likely vcan (test virtual CAN) or a USB driver we don't recognise.
+    if [[ -n "$ifaces" ]]; then
+        printf '[OK] CAN interface(s) present without a recognised SPI overlay\n'
+        printf '     or USB driver — likely vcan (testing) or an exotic adapter.\n'
+        return 0
+    fi
+
+    printf '[i]  No CAN configuration detected.\n'
+    printf '     Run "signalk socketcan" interactively for a setup recipe.\n'
 }
 
 # ─── interactive command ───────────────────────────────────────────────
