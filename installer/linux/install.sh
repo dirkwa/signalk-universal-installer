@@ -1254,6 +1254,8 @@ Auth tokens are at:
 The 'signalk' command:
   signalk health         show stack health
   signalk recover        delegate to the SSH-only recovery script
+  signalk socketcan      Pi CAN-HAT detection + setup recipe
+  signalk update         refresh installer scripts + Quadlet templates via doctor
   signalk bug-report     bundle logs + state for an issue report
   signalk uninstall      stop services + remove Quadlets (preserves data)
   signalk help           full usage
