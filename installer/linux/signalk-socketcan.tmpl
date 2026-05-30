@@ -26,7 +26,11 @@ set -euo pipefail
 
 UPDATER_DATA="${HOME}/.signalk-updater"
 HARDWARE_JSON="${UPDATER_DATA}/hardware.json"
-DOC_URL="https://dirkwa.github.io/signalk-universal-installer/docs/socketcan.html"
+# GitHub source-view, not the Pages URL. Pages serves docs/*.md as
+# raw text (no Jekyll), so the previous `socketcan.html` URL 404'd.
+# GitHub's source-tree view renders markdown natively with the same
+# anchor-link UX an operator expects.
+DOC_URL="https://github.com/dirkwa/signalk-universal-installer/blob/master/docs/socketcan.md"
 
 # ─── output helpers ────────────────────────────────────────────────────
 # Mirrors installer/linux/lib/colors.sh exactly: same ANSI escapes,
