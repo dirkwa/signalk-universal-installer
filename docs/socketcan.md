@@ -17,7 +17,9 @@ The interactive flow:
 1. Detects whether you're on a Pi and what config.txt / kernel modules / CAN interfaces are present.
 2. Asks which CAN adapter you have (numbered menu).
 3. Prints a numbered, copy-pasteable recipe — config.txt edits (Pi only) or a systemd unit (SLCAN), and a `systemd-networkd` `.network` file for the bitrate.
-4. Records the chosen adapter in `~/.signalk-updater/hardware.json` under a `socketcanCandidate` field so the bug-report bundle (and, later, the updater UI) can see it.
+4. Records the operator's choice in `~/.signalk-updater/hardware.json` under a `socketcanCandidate` field for downstream consumers (the bug-report bundle and, later, an auto-installer / updater UI). This is the operator's stored *intent*, not a live probe.
+
+`signalk socketcan status` is the inverse: it derives a "Detected configuration" from the live config.txt + loaded kernel modules + interface state every run. The detection never reads `socketcanCandidate`, so it cannot go stale relative to what the kernel is actually doing. Use status to ask "what's running right now?", and the persisted candidate to ask "what did the operator last pick?".
 
 ## Supported adapters
 
@@ -194,7 +196,7 @@ candump can0
 # typical NMEA 2000 messages from the bus.
 ```
 
-Re-running `signalk socketcan status` after this will reflect the applied configuration and the live interface in `~/.signalk-updater/hardware.json`. The exact JSON keys under `socketcanCandidate` are an implementation detail and may change between releases — read the file with `jq .socketcanCandidate ~/.signalk-updater/hardware.json` to see the current shape.
+Re-running `signalk socketcan status` after this should show the matching HAT under "Detected configuration" with no warning — for example, a Waveshare 2-CH with the factory pins (23/25) reports `Waveshare 2-CH CAN HAT — factory solder defaults`, and a Waveshare with the older buggy pins (24/25) gets flagged with an actionable warning. The detection works off live config.txt + lsmod + ip link, so it's always current; it deliberately ignores the persisted `socketcanCandidate` (which records the operator's last interactive pick, not the running state).
 
 ## Wiring SignalK to the can0 interface
 
