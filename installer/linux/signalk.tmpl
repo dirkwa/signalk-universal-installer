@@ -308,8 +308,16 @@ cmd_bug_report() {
         podman info 2>&1 || true
         echo
         echo "=== podman ps -a (signalk-) ==="
+        # CreatedAt and Command round out the summary: CreatedAt dates the
+        # container so "did my image switch actually recreate it?" is
+        # answerable at a glance, and Command shows the effective
+        # entrypoint+args (a wrong override is a common "won't start"
+        # cause). Both also live in each containers/<name>.inspect.json,
+        # but surfacing them here saves opening per-container JSON for the
+        # first triage pass. Command goes last — it is the longest, most
+        # variable field, so it sits at the tail of the tab-delimited row.
         podman ps -a --filter 'name=signalk-' \
-            --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>&1 || true
+            --format '{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}\t{{.Command}}' 2>&1 || true
         echo
         echo "=== podman images (signalk + dirkwa) ==="
         podman images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Created}}' \
