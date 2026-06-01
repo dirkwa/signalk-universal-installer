@@ -511,10 +511,16 @@ detect_configuration() {
     # Waveshare FD). Branch on the count so the dual-channel Waveshare —
     # menu option 2 — gets named specifically rather than lumped in with
     # the generic single-channel case.
-    if has_overlay '^\s*dtoverlay=mcp251xfd'; then
+    #
+    # Anchor the chip token to a following comma or end-of-line so the
+    # INVALID legacy string `dtoverlay=mcp251xfd-spi0-0,...` (the bogus
+    # overlay name earlier helper versions emitted — see the hat_3
+    # comment) does NOT get misread as a real FD config. The valid form
+    # is always `dtoverlay=mcp251xfd,spi<n>-0,...`.
+    if has_overlay '^[[:space:]]*dtoverlay=mcp251xfd([[:space:]]*(,|$))'; then
         local fd_count
         fd_count=$(printf '%s\n' "$cfg_overlays" \
-            | grep -cE '^\s*dtoverlay=mcp251xfd')
+            | grep -cE '^[[:space:]]*dtoverlay=mcp251xfd([[:space:]]*(,|$))')
         if (( fd_count >= 2 )); then
             # Two FD controllers → Waveshare 2-CH CAN FD HAT. Like the
             # dual-MCP2515 case below, read the interrupt pins to confirm
