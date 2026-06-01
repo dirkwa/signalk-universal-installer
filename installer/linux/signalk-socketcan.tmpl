@@ -70,11 +70,12 @@ Usage:
 
 Supported adapters:
   1. Waveshare 2-CH CAN HAT (dual MCP2515 on SPI)          [Pi only]
-  2. PiCAN-M / PiCAN3 (MCP2515 on SPI; marine NMEA 2000)    [Pi only]
-  3. Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT) [Pi only]
-  4. USB CAN — SocketCAN-native (gs_usb, Peak, Kvaser)      [any Linux]
-  5. SLCAN (Lawicel CANUSB serial, CANable slcan firmware)  [any Linux]
-  6. Custom dtoverlay (you supply the line)                 [Pi only]
+  2. Waveshare 2-CH CAN FD HAT (dual MCP2518FD on SPI)     [Pi only]
+  3. PiCAN-M / PiCAN3 (MCP2515 on SPI; marine NMEA 2000)    [Pi only]
+  4. Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT) [Pi only]
+  5. USB CAN — SocketCAN-native (gs_usb, Peak, Kvaser)      [any Linux]
+  6. SLCAN (Lawicel CANUSB serial, CANable slcan firmware)  [any Linux]
+  7. Custom dtoverlay (you supply the line)                 [Pi only]
 
 Recipe persistence uses systemd-networkd's CAN BitRate= for Pi HATs and
 SocketCAN-native USB adapters. The SLCAN recipe ships a systemd .service
@@ -173,7 +174,7 @@ hat_1_id="waveshare-2ch-mcp2515"
 hat_1_name="Waveshare 2-CH CAN HAT (dual MCP2515)"
 # Interrupt pins are the FACTORY-SOLDER defaults documented in the
 # Waveshare 2-CH CAN HAT wiki: INT_0=GPIO23, INT_1=GPIO25. Users with
-# reworked 0-ohm jumpers can override via menu option 6 (custom).
+# reworked 0-ohm jumpers can override via menu option 7 (custom).
 # `dtparam=spi=on` is auto-enabled by mcp2515-can*; do NOT add it.
 # `dtoverlay=spi-bcm2835-overlay` is not a real overlay — it was on
 # Waveshare's wiki at one point and we copy-pasted it; the upstream
@@ -183,21 +184,47 @@ hat_1_overlays=(
     "dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25"
 )
 
+# Waveshare 2-CH CAN *FD* HAT — the MCP2518FD-based sibling of hat_1.
+# Different chip family (MCP251xFD, not MCP2515), different driver
+# (mcp251xfd), and a fundamentally different SPI layout: each of the
+# two FD controllers sits on its OWN SPI bus (spi0.0 and spi1.0), so
+# the second bus must be enabled with `dtoverlay=spi1-3cs` before the
+# can1 overlay can bind. Contrast hat_1's classic board, where both
+# MCP2515s share spi0 via CE0/CE1 and no spi1 overlay is needed.
+#
+# No `oscillator=` parameter: the mcp251xfd device-tree default is the
+# 40 MHz crystal Waveshare fits, confirmed on hardware by the driver's
+# init log ("o:40.00MHz"). Adding oscillator= here would be wrong.
+#
+# Factory interrupt pins observed on a Pi 4 + this HAT: spi0-0 → GPIO25,
+# spi1-0 → GPIO24. `dtparam=spi=on` is listed explicitly because, unlike
+# the mcp2515-can* overlay, the bare `spi1-3cs` overlay does not imply
+# the primary SPI controller is enabled.
+hat_2_id="waveshare-2ch-mcp251xfd"
+hat_2_name="Waveshare 2-CH CAN FD HAT (dual MCP2518FD)"
+hat_2_overlays=(
+    "dtparam=spi=on"
+    "dtoverlay=spi1-3cs"
+    "dtoverlay=mcp251xfd,spi0-0,interrupt=25"
+    "dtoverlay=mcp251xfd,spi1-0,interrupt=24"
+)
+
 # PiCAN-M and PiCAN3 ship the MCP2515 (NOT MCP251xFD), per Copperhill's
 # own driver-installation blog post. Earlier versions of this helper
 # emitted `dtoverlay=mcp251xfd-spi0-0,oscillator=20000000,...` which
 # is wrong for two reasons: (1) wrong chip family, (2) `mcp251xfd-spi0-0`
-# is not a valid overlay name. The CAN-FD variant is a separate
-# product ("PiCAN FD"); if we add that, it gets its own menu entry
-# using `dtoverlay=mcp251xfd,spi0-0,interrupt=25`.
-hat_2_id="picanm-mcp2515"
-hat_2_name="PiCAN-M / PiCAN3 (MCP2515, marine NMEA 2000)"
-hat_2_overlays=(
+# is not a valid overlay name. Copperhill's own CAN-FD product ("PiCAN
+# FD") would be a single-channel mcp251xfd board — close to one channel
+# of hat_2; if requested it gets its own entry rather than overloading
+# this MCP2515 one.
+hat_3_id="picanm-mcp2515"
+hat_3_name="PiCAN-M / PiCAN3 (MCP2515, marine NMEA 2000)"
+hat_3_overlays=(
     "dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25"
 )
 
-hat_3_id="generic-mcp2515"
-hat_3_name="Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT, etc.)"
+hat_4_id="generic-mcp2515"
+hat_4_name="Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT, etc.)"
 # Recipe is built at runtime: we ask the operator for the oscillator
 # frequency (8 or 16 MHz — both are common on cheap clones) before
 # emitting the single-overlay line.
@@ -206,19 +233,19 @@ hat_3_name="Generic single-channel MCP2515 (PiCAN2, RS485-CAN-HAT, etc.)"
 # modalias on USB enumeration, expose canN as a netdev with no
 # userspace daemon. gs_usb / candleLight / CANable-in-candleLight-mode,
 # Peak PCAN-USB (peak_usb), Kvaser Leaf/USBcan (kvaser_usb).
-hat_4_id="usb-can-native"
-hat_4_name="USB CAN adapter — SocketCAN-native (gs_usb / Peak / Kvaser)"
+hat_5_id="usb-can-native"
+hat_5_name="USB CAN adapter — SocketCAN-native (gs_usb / Peak / Kvaser)"
 
 # SLCAN adapters use a serial line discipline; the kernel needs
 # `slcand` (from can-utils) to attach a tty to a can netdev before
 # canN appears. Lawicel CANUSB in serial mode, CANable in slcan
 # firmware, generic FTDI/ACM serial CAN bridges. Recipe emits an
 # explicit slcand invocation plus a systemd unit to make it persist.
-hat_5_id="slcan"
-hat_5_name="SLCAN adapter (Lawicel CANUSB serial mode, CANable slcan firmware)"
+hat_6_id="slcan"
+hat_6_name="SLCAN adapter (Lawicel CANUSB serial mode, CANable slcan firmware)"
 
-hat_6_id="custom"
-hat_6_name="Custom dtoverlay (you supply the line)"
+hat_7_id="custom"
+hat_7_name="Custom dtoverlay (you supply the line)"
 # Operator's lines collected during the prompt; populated at runtime.
 
 # ─── recipe rendering ──────────────────────────────────────────────────
@@ -477,13 +504,43 @@ detect_configuration() {
         printf '%s\n' "$ifaces" | grep -qxE "$1"
     }
 
-    # MCP251xFD overlay → CAN-FD chip (PiCAN FD / Waveshare CAN-FD HAT).
-    # No menu entry yet, but we can still name it so the operator isn't
-    # left thinking they have nothing.
+    # MCP251xFD overlay(s) → CAN-FD chip family. The Waveshare 2-CH CAN
+    # FD HAT puts two MCP2518FDs on separate SPI buses (spi0.0 + spi1.0),
+    # so it shows up as TWO mcp251xfd overlays; a single overlay is a
+    # one-channel board (Copperhill PiCAN FD, or one channel of the
+    # Waveshare FD). Branch on the count so the dual-channel Waveshare —
+    # menu option 2 — gets named specifically rather than lumped in with
+    # the generic single-channel case.
     if has_overlay '^\s*dtoverlay=mcp251xfd'; then
-        printf '[OK] CAN-FD adapter (MCP251xFD on SPI) — PiCAN FD or similar.\n'
-        printf '     Helper does not yet have a menu entry for CAN-FD; the config\n'
-        printf '     is correct if can0 is UP at the right bitrate.\n'
+        local fd_count
+        fd_count=$(printf '%s\n' "$cfg_overlays" \
+            | grep -cE '^\s*dtoverlay=mcp251xfd')
+        if (( fd_count >= 2 )); then
+            # Two FD controllers → Waveshare 2-CH CAN FD HAT. Like the
+            # dual-MCP2515 case below, read the interrupt pins to confirm
+            # the factory wiring (spi0-0=GPIO25, spi1-0=GPIO24 → sorted
+            # 24,25). Other pins mean reworked jumpers or a custom line.
+            local fd_pins
+            fd_pins=$(printf '%s\n' "$cfg_overlays" \
+                | grep -oE 'interrupt=[0-9]+' \
+                | sort -u | paste -sd ',' -)
+            local fd_label="Waveshare 2-CH CAN FD HAT (dual MCP2518FD)"
+            case "$fd_pins" in
+                "interrupt=24,interrupt=25")
+                    printf '[OK] %s — factory solder defaults (spi0-0=25, spi1-0=24).\n' "$fd_label"
+                    ;;
+                *)
+                    printf '[OK] %s — non-default interrupt pins (%s); likely\n' "$fd_label" "${fd_pins:-none}"
+                    printf '     reworked jumpers or a custom overlay. Verify by candump.\n'
+                    ;;
+            esac
+            return 0
+        fi
+        # Single MCP251xFD overlay → one-channel CAN-FD board.
+        printf '[OK] Single-channel CAN-FD adapter (MCP251xFD on SPI).\n'
+        printf '     Matches a Copperhill PiCAN FD or one channel of the\n'
+        printf '     Waveshare 2-CH CAN FD HAT (menu option 2). Config is correct\n'
+        printf '     if can0 is UP at the right bitrate.\n'
         return 0
     fi
 
@@ -550,7 +607,7 @@ detect_configuration() {
             printf '[OK] SLCAN adapter — slcand has attached the tty.\n'
         else
             printf '[!]  SLCAN driver loaded but no can interface present.\n'
-            printf '     slcand must be running to attach a tty (see menu option 5).\n'
+            printf '     slcand must be running to attach a tty (see menu option 6).\n'
         fi
         return 0
     fi
@@ -570,7 +627,7 @@ detect_configuration() {
 # ─── interactive command ───────────────────────────────────────────────
 
 cmd_interactive() {
-    # No early Pi gate — USB-CAN (option 4) and SLCAN (option 5) work
+    # No early Pi gate — USB-CAN (option 5) and SLCAN (option 6) work
     # on any Linux. Pi-only menu options gate themselves below with a
     # clear message that points at the USB-CAN routes.
     section "Detecting"
@@ -623,26 +680,27 @@ cmd_interactive() {
   4. ${hat_4_name}
   5. ${hat_5_name}
   6. ${hat_6_name}
+  7. ${hat_7_name}
   q. Quit without changes
 EOF
     echo
     local choice=""
     # Guard read against EOF so a non-interactive stdin doesn't trip
     # set -e — same pattern the dispatcher uses for its upload prompt.
-    if ! read -r -p "Choice [1-6/q]: " choice; then
+    if ! read -r -p "Choice [1-7/q]: " choice; then
         choice="q"
     fi
     echo
 
-    # Pi-only menu options (1/2/3/6) all need /boot/firmware/config.txt
+    # Pi-only menu options (1/2/3/4/7) all need /boot/firmware/config.txt
     # editable by the operator. On non-Pi hosts those options refuse
-    # with a pointer at the USB-CAN routes; options 4 (SocketCAN-native
-    # USB) and 5 (SLCAN) work on any Linux.
+    # with a pointer at the USB-CAN routes; options 5 (SocketCAN-native
+    # USB) and 6 (SLCAN) work on any Linux.
     require_pi() {
         if ! is_pi; then
             err "Menu option $1 needs a Raspberry Pi (it edits config.txt)."
-            err "On non-Pi Linux use option 4 (USB SocketCAN-native) or"
-            err "option 5 (SLCAN) instead — both work without device-tree."
+            err "On non-Pi Linux use option 5 (USB SocketCAN-native) or"
+            err "option 6 (SLCAN) instead — both work without device-tree."
             return 1
         fi
         return 0
@@ -659,6 +717,10 @@ EOF
             ;;
         3)
             require_pi 3 || return 1
+            handle_recipe "$hat_3_id" "$hat_3_name" "${hat_3_overlays[@]}"
+            ;;
+        4)
+            require_pi 4 || return 1
             local osc=""
             if ! read -r -p "Oscillator frequency? [8000000/16000000, default 16000000]: " osc; then
                 osc=""
@@ -666,20 +728,20 @@ EOF
             osc=${osc:-16000000}
             # The prompt advertises only the two common values; honor that
             # contract. Boards with unusual oscillators (12 MHz, 20 MHz on
-            # some Chinese clones) belong on option 6 (custom dtoverlay)
+            # some Chinese clones) belong on option 7 (custom dtoverlay)
             # where the operator types the whole line themselves.
             if [[ "$osc" != "8000000" && "$osc" != "16000000" ]]; then
                 err "Oscillator must be 8000000 or 16000000 (Hz). Got: $osc"
-                err "For other values, use menu option 6 (Custom dtoverlay)."
+                err "For other values, use menu option 7 (Custom dtoverlay)."
                 return 1
             fi
             local generic_overlay="dtoverlay=mcp2515-can0,oscillator=${osc},interrupt=25"
-            handle_recipe "$hat_3_id" "$hat_3_name" "$generic_overlay"
-            ;;
-        4)
-            handle_recipe "$hat_4_id" "$hat_4_name"
+            handle_recipe "$hat_4_id" "$hat_4_name" "$generic_overlay"
             ;;
         5)
+            handle_recipe "$hat_5_id" "$hat_5_name"
+            ;;
+        6)
             # SLCAN flow: collect the tty path, then dispatch to a
             # specialised handler. `handle_slcan_recipe` is its own
             # function — the recipe shape is different (systemd unit
@@ -726,10 +788,10 @@ EOF
                 err "Real /dev/serial/by-id paths never contain shell metacharacters."
                 return 1
             fi
-            handle_slcan_recipe "$hat_5_id" "$hat_5_name" "$slcan_tty"
+            handle_slcan_recipe "$hat_6_id" "$hat_6_name" "$slcan_tty"
             ;;
-        6)
-            require_pi 6 || return 1
+        7)
+            require_pi 7 || return 1
             local custom=""
             local confirm=""
             echo "Enter your dtoverlay= / dtparam= line(s), one per line. Empty line to finish."
@@ -759,7 +821,7 @@ EOF
                 err "No overlay lines entered; aborting."
                 return 1
             fi
-            handle_recipe "$hat_6_id" "$hat_6_name" "${custom_overlays[@]}"
+            handle_recipe "$hat_7_id" "$hat_7_name" "${custom_overlays[@]}"
             ;;
         q|Q|"")
             info "no changes; bye"
