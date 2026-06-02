@@ -30,16 +30,19 @@ is_pi() {
 
 is_supported_distro() {
     # The only tested targets are trixie-based: Debian 13 and Raspberry Pi OS
-    # (raspbian) 13. Both ship podman 5.4.x, which satisfies the >= 5.3 floor
-    # the engine Quadlets need ([Quadlet] DefaultDependencies=false). Other
-    # distros are not blocked — they fall through to a "untested, continuing"
-    # warning in preflight — but the post-install podman version gate in
-    # install.sh fails loudly on anything that ships podman < 5.3 (e.g. Ubuntu
-    # 24.04 = 4.9.3). Debian 12 (bookworm, podman 4.3.1, no Quadlet) is the one
-    # hard block, handled separately in preflight's check_distro_blocked.
-    case "$DISTRO_ID:$DISTRO_VERSION" in
-        debian:13) return 0 ;;
-        raspbian:13) return 0 ;;
-        *) return 1 ;;
+    # (raspbian), both of which ship podman 5.4.x — satisfying the >= 5.3 floor
+    # the engine Quadlets need ([Quadlet] DefaultDependencies=false). We gate on
+    # the codename rather than VERSION_ID so trixie point releases (13.1, …) and
+    # Pi OS's own versioning both match, consistent with the "trixie+" support
+    # line in the README/docs. Other distros are not blocked — they fall through
+    # to a "untested, continuing" warning in preflight — but the post-install
+    # podman version gate in install.sh fails loudly on anything shipping podman
+    # < 5.3 (e.g. Ubuntu 24.04 = 4.9.3). Debian 12 (bookworm, podman 4.3.1, no
+    # Quadlet) is the one hard block, handled in preflight's check_distro_blocked.
+    case "$DISTRO_ID" in
+        debian | raspbian)
+            [[ "$DISTRO_CODENAME" == "trixie" ]] && return 0
+            ;;
     esac
+    return 1
 }
