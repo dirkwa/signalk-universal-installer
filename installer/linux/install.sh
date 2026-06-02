@@ -791,7 +791,12 @@ section "Installing SignalK plugins"
 SK_PLUGINS=(signalk-container signalk-updater signalk-doctor)
 mkdir -p "$HOME/.signalk"
 
+# Cold install of three plugins + their transitive deps over the network
+# is silent (output goes to $NPM_LOG, --no-progress) and routinely takes a
+# few minutes on a fresh VM. Say so up front and tail-able, so the operator
+# doesn't read the quiet as a hang.
 info "running 'npm install' inside the signalk-server image"
+info "cold install pulls 3 plugins + deps — can take a few minutes"
 # UserNS mapping: the signalk-server image runs as `node` (UID 1000).
 # Bare --userns=keep-id maps the invoking HOST user's UID to the same
 # number inside — but on hosts where the invoking user isn't UID 1000
@@ -808,12 +813,31 @@ info "running 'npm install' inside the signalk-server image"
 # Now we tee npm's output to a temp file and replay it inline when
 # the install fails, while still keeping the success path quiet.
 NPM_LOG=$(mktemp)
-if podman run --rm \
+info "  npm output → $NPM_LOG (tail -f to watch)"
+# Heartbeat: the install is silent, so emit an elapsed-seconds tick every
+# 15s while it runs. Backgrounded, then killed the moment the install
+# returns so it never outlives the step.
+npm_heartbeat() {
+    local s=0
+    while sleep 15; do
+        s=$((s + 15))
+        info "  still installing… (${s}s elapsed)"
+    done
+}
+npm_heartbeat & NPM_HB=$!
+# Watchdog: bound the run so a wedged npm/registry fails with the captured
+# log replayed (below) instead of hanging the installer forever. `timeout`
+# exits 124 on expiry; the failure branch already replays $NPM_LOG.
+NPM_RC=0
+timeout 900 podman run --rm \
     --userns=keep-id:uid=1000,gid=1000 \
     -v "$HOME/.signalk:/home/node/.signalk:Z" \
     --entrypoint sh \
     "$SK_IMAGE" \
-    -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >"$NPM_LOG" 2>&1; then
+    -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >"$NPM_LOG" 2>&1 || NPM_RC=$?
+kill "$NPM_HB" 2>/dev/null || true
+wait "$NPM_HB" 2>/dev/null || true
+if [[ "$NPM_RC" -eq 0 ]]; then
     rm -f "$NPM_LOG"
     for p in "${SK_PLUGINS[@]}"; do
         if [[ -d "$HOME/.signalk/node_modules/$p" ]]; then
@@ -825,7 +849,11 @@ if podman run --rm \
         fi
     done
 else
-    warn "npm install failed; plugins not installed. Install from the SignalK appstore later."
+    if [[ "$NPM_RC" -eq 124 ]]; then
+        warn "npm install timed out after 900s; plugins not installed. Install from the SignalK appstore later."
+    else
+        warn "npm install failed; plugins not installed. Install from the SignalK appstore later."
+    fi
     warn "npm output:"
     sed 's/^/    /' "$NPM_LOG" >&2
     rm -f "$NPM_LOG"
