@@ -848,10 +848,15 @@ npm_heartbeat() {
     done
 }
 npm_heartbeat & NPM_HB=$!
-# Kill the heartbeat on any early exit (Ctrl+C, signal) too, not just the
-# explicit cleanup below — otherwise an interrupt mid-install leaves it
-# ticking until logout.
-trap 'kill "$NPM_HB" 2>/dev/null || true' EXIT INT TERM
+# Stop the heartbeat on any exit (incl. Ctrl+C / signal) so it never outlives
+# the step. On EXIT, cleanup only. On INT/TERM, cleanup then re-raise the
+# signal with the default handler so the interrupt still aborts the
+# installer — a cleanup-only INT/TERM trap would swallow Ctrl+C and let the
+# install run on.
+npm_hb_cleanup() { kill "$NPM_HB" 2>/dev/null || true; wait "$NPM_HB" 2>/dev/null || true; }
+trap npm_hb_cleanup EXIT
+trap 'npm_hb_cleanup; trap - INT; kill -INT $$' INT
+trap 'npm_hb_cleanup; trap - TERM; kill -TERM $$' TERM
 # Watchdog: bound the run so a wedged npm/registry fails with the captured
 # log replayed (below) instead of hanging the installer forever. `timeout`
 # exits 124 on expiry; the failure branch already replays $NPM_LOG.
@@ -862,8 +867,7 @@ timeout 900 podman run --rm \
     --entrypoint sh \
     "$SK_IMAGE" \
     -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >"$NPM_LOG" 2>&1 || NPM_RC=$?
-kill "$NPM_HB" 2>/dev/null || true
-wait "$NPM_HB" 2>/dev/null || true
+npm_hb_cleanup
 trap - EXIT INT TERM
 if [[ "$NPM_RC" -eq 0 ]]; then
     rm -f "$NPM_LOG"
