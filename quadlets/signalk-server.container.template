@@ -7,8 +7,8 @@ Description=SignalK Server
 # such file or directory`. The installer enables podman.socket once;
 # this keeps ordering correct across reboots and manual socket-unit
 # cycles.
-Wants=network-online.target podman.socket signalk-updater-server.service signalk-doctor-server.service
-After=network-online.target podman.socket signalk-updater-server.service signalk-doctor-server.service
+Wants=podman.socket signalk-updater-server.service signalk-doctor-server.service
+After=podman.socket signalk-updater-server.service signalk-doctor-server.service
 # Crashloop guard. Belongs in [Unit] — systemd silently ignores these
 # keys when placed in [Service], which is how they got dropped on the
 # 0.5.x installs (journal logged `Unknown key 'StartLimitIntervalSec'
@@ -16,6 +16,22 @@ After=network-online.target podman.socket signalk-updater-server.service signalk
 # After 5 starts in 5 minutes the unit goes to `failed`.
 StartLimitIntervalSec=300
 StartLimitBurst=5
+
+# Suppress Quadlet's implicit network-readiness dependency. podman 5.x
+# adds a Wants/After on its user-session network-wait shim to EVERY
+# generated user unit unconditionally. That shim loops
+# `until systemctl is-active <net target>; sleep 0.5; done`, and because a
+# user session never activates that target it blocks unit start until its
+# 90s timeout while flooding the journal with `sh[NNNN]: inactive` on any
+# host where the system network hasn't settled yet (fresh VMs especially).
+# DefaultDependencies=false (the [Quadlet]-section key, per
+# podman-systemd.unit(5)) is the documented suppression. NOTE: do NOT name
+# the shim service verbatim anywhere in this file — the generator scans the
+# source text and re-injects the dependency if it sees that string, undoing
+# this. This unit runs Network=host and binds the host's already-up
+# interfaces directly, so the wait buys nothing here.
+[Quadlet]
+DefaultDependencies=false
 
 [Container]
 Image=ghcr.io/dirkwa/signalk-server:dirkwa

@@ -1,6 +1,6 @@
 # Installation
 
-## Linux (Debian 13 / trixie, Ubuntu 24.04+, Raspberry Pi OS trixie+)
+## Linux (Debian 13 / trixie, Raspberry Pi OS trixie+)
 
 > Debian 12 (bookworm) is **not** supported — its Podman is too old for the Quadlet features we use. The installer aborts on bookworm with a recipe to upgrade to trixie.
 
@@ -10,7 +10,7 @@ curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/
 
 The installer:
 
-1. Detects host (OS, arch, distro family) and runs pre-flight: RAM ≥ 2 GB, disk ≥ 5 GB, the signalk-server ports (80 + 443, or 3000 + 3443 if you decline standard ports) and 3003 / 3004 / 3010 free, cgroups v2 with memory + pids delegation to the user slice (autofixed when possible), Podman ≥ 4.4.
+1. Detects host (OS, arch, distro family) and runs pre-flight: RAM ≥ 2 GB, disk ≥ 5 GB, the signalk-server ports (80 + 443, or 3000 + 3443 if you decline standard ports) and 3003 / 3004 free, cgroups v2 with memory + pids delegation to the user slice (autofixed when possible), Podman ≥ 5.3.
 2. Installs Podman + `uidmap` + `slirp4netns` via `apt` if missing.
 3. Enables `loginctl enable-linger $USER` so the stack survives reboots.
 4. Adds you to `dialout`, `gpio`, `netdev` groups for USB serial / GPIO / CAN. Group memberships only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.

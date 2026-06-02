@@ -379,6 +379,29 @@ if ! command -v podman >/dev/null 2>&1; then
 fi
 ok "$(podman --version)"
 
+# Re-gate the podman version AFTER the install. Preflight runs before this
+# block, so on a host that arrived without podman its check_podman only said
+# "will install it" — it never saw the version apt would lay down. Some
+# supported distros ship a too-old podman in their own archive (e.g. Ubuntu
+# 24.04 = 4.9.3), and the [Quadlet] DefaultDependencies=false key the engine
+# Quadlets rely on is silently ignored below 5.3, re-arming the network-wait
+# shim that stalls startup. Fail loudly here rather than proceed to a setup
+# that hangs on every boot with no obvious cause.
+PODMAN_MIN_VERSION="5.3"
+pv=$(podman --version 2>/dev/null | awk '{print $3}')
+pv_major=${pv%%.*}
+pv_minor=$(cut -d. -f2 <<<"$pv")
+req_major=${PODMAN_MIN_VERSION%%.*}
+req_minor=${PODMAN_MIN_VERSION#*.}
+if (( pv_major < req_major )) || { (( pv_major == req_major )) && (( pv_minor < req_minor )); }; then
+    err "Podman $pv is below the required $PODMAN_MIN_VERSION."
+    err "This release's archive podman is too old for rootless Quadlet"
+    err "network-dependency control; the stack will stall on startup."
+    err "Install podman >= $PODMAN_MIN_VERSION (e.g. a newer OS release whose"
+    err "archive ships it) and re-run this installer."
+    exit 1
+fi
+
 # jq is used by install.sh's bootstrap-marker write and by
 # `signalk bug-report`'s JSON handling. The podman-install block above
 # pulls it in on a fresh install; this catches the re-run case where
@@ -791,7 +814,12 @@ section "Installing SignalK plugins"
 SK_PLUGINS=(signalk-container signalk-updater signalk-doctor)
 mkdir -p "$HOME/.signalk"
 
+# Cold install of three plugins + their transitive deps over the network
+# is silent (output goes to $NPM_LOG, --no-progress) and routinely takes a
+# few minutes on a fresh VM. Say so up front and tail-able, so the operator
+# doesn't read the quiet as a hang.
 info "running 'npm install' inside the signalk-server image"
+info "cold install pulls 3 plugins + deps — can take a few minutes"
 # UserNS mapping: the signalk-server image runs as `node` (UID 1000).
 # Bare --userns=keep-id maps the invoking HOST user's UID to the same
 # number inside — but on hosts where the invoking user isn't UID 1000
@@ -808,12 +836,40 @@ info "running 'npm install' inside the signalk-server image"
 # Now we tee npm's output to a temp file and replay it inline when
 # the install fails, while still keeping the success path quiet.
 NPM_LOG=$(mktemp)
-if podman run --rm \
+info "  npm output → $NPM_LOG (tail -f to watch)"
+# Heartbeat: the install is silent, so emit an elapsed-seconds tick every
+# 15s while it runs. Backgrounded, then killed the moment the install
+# returns so it never outlives the step.
+npm_heartbeat() {
+    local s=0
+    while sleep 15; do
+        s=$((s + 15))
+        info "  still installing… (${s}s elapsed)"
+    done
+}
+npm_heartbeat & NPM_HB=$!
+# Stop the heartbeat on any exit (incl. Ctrl+C / signal) so it never outlives
+# the step. On EXIT, cleanup only. On INT/TERM, cleanup then re-raise the
+# signal with the default handler so the interrupt still aborts the
+# installer — a cleanup-only INT/TERM trap would swallow Ctrl+C and let the
+# install run on.
+npm_hb_cleanup() { kill "$NPM_HB" 2>/dev/null || true; wait "$NPM_HB" 2>/dev/null || true; }
+trap npm_hb_cleanup EXIT
+trap 'npm_hb_cleanup; trap - INT; kill -INT $$' INT
+trap 'npm_hb_cleanup; trap - TERM; kill -TERM $$' TERM
+# Watchdog: bound the run so a wedged npm/registry fails with the captured
+# log replayed (below) instead of hanging the installer forever. `timeout`
+# exits 124 on expiry; the failure branch already replays $NPM_LOG.
+NPM_RC=0
+timeout 900 podman run --rm \
     --userns=keep-id:uid=1000,gid=1000 \
     -v "$HOME/.signalk:/home/node/.signalk:Z" \
     --entrypoint sh \
     "$SK_IMAGE" \
-    -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >"$NPM_LOG" 2>&1; then
+    -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >"$NPM_LOG" 2>&1 || NPM_RC=$?
+npm_hb_cleanup
+trap - EXIT INT TERM
+if [[ "$NPM_RC" -eq 0 ]]; then
     rm -f "$NPM_LOG"
     for p in "${SK_PLUGINS[@]}"; do
         if [[ -d "$HOME/.signalk/node_modules/$p" ]]; then
@@ -825,7 +881,11 @@ if podman run --rm \
         fi
     done
 else
-    warn "npm install failed; plugins not installed. Install from the SignalK appstore later."
+    if [[ "$NPM_RC" -eq 124 ]]; then
+        warn "npm install timed out after 900s; plugins not installed. Install from the SignalK appstore later."
+    else
+        warn "npm install failed; plugins not installed. Install from the SignalK appstore later."
+    fi
     warn "npm output:"
     sed 's/^/    /' "$NPM_LOG" >&2
     rm -f "$NPM_LOG"

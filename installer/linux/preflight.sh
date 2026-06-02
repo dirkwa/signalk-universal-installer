@@ -32,7 +32,13 @@ REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
 SK_HTTP_PORT=${SK_HTTP_PORT:-80}
 SK_HTTPS_PORT=${SK_HTTPS_PORT:-443}
 PORTS_TO_CHECK=("$SK_HTTP_PORT" "$SK_HTTPS_PORT" 3000 3003 3004)
-PODMAN_MIN_VERSION="4.4"
+# 5.3: Quadlet gained Type=notify network handling for user units AND the
+# `[Quadlet] DefaultDependencies=false` key we rely on to suppress the
+# user-session network-wait shim (both landed in podman 5.3.0). On older
+# podman the shim blocks unit start for ~90s on fresh boots with no way to
+# disable it. Trixie ships 5.4.x, so this excludes no supported host;
+# bookworm (4.3.1, no Quadlet) is already blocked in check_distro_blocked.
+PODMAN_MIN_VERSION="5.3"
 
 # Which managed container is expected to hold each port. On a re-run a bound
 # port is only "expected" if its owning managed container is actually
@@ -329,7 +335,7 @@ check_podman() {
     cur_major=$(cut -d. -f1 <<<"$v")
     cur_minor=$(cut -d. -f2 <<<"$v")
     if (( cur_major < req_major )) || { (( cur_major == req_major )) && (( cur_minor < req_minor )); }; then
-        fail "Podman $v < required $PODMAN_MIN_VERSION (Quadlet support)"
+        fail "Podman $v < required $PODMAN_MIN_VERSION (Quadlet network-dependency control)"
     else
         ok "Podman $v"
     fi
