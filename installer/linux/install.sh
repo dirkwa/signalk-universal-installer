@@ -379,6 +379,29 @@ if ! command -v podman >/dev/null 2>&1; then
 fi
 ok "$(podman --version)"
 
+# Re-gate the podman version AFTER the install. Preflight runs before this
+# block, so on a host that arrived without podman its check_podman only said
+# "will install it" — it never saw the version apt would lay down. Some
+# supported distros ship a too-old podman in their own archive (e.g. Ubuntu
+# 24.04 = 4.9.3), and the [Quadlet] DefaultDependencies=false key the engine
+# Quadlets rely on is silently ignored below 5.3, re-arming the network-wait
+# shim that stalls startup. Fail loudly here rather than proceed to a setup
+# that hangs on every boot with no obvious cause.
+PODMAN_MIN_VERSION="5.3"
+pv=$(podman --version 2>/dev/null | awk '{print $3}')
+pv_major=${pv%%.*}
+pv_minor=$(cut -d. -f2 <<<"$pv")
+req_major=${PODMAN_MIN_VERSION%%.*}
+req_minor=${PODMAN_MIN_VERSION#*.}
+if (( pv_major < req_major )) || { (( pv_major == req_major )) && (( pv_minor < req_minor )); }; then
+    err "Podman $pv is below the required $PODMAN_MIN_VERSION."
+    err "This release's archive podman is too old for rootless Quadlet"
+    err "network-dependency control; the stack will stall on startup."
+    err "Install podman >= $PODMAN_MIN_VERSION (e.g. a newer OS release whose"
+    err "archive ships it) and re-run this installer."
+    exit 1
+fi
+
 # jq is used by install.sh's bootstrap-marker write and by
 # `signalk bug-report`'s JSON handling. The podman-install block above
 # pulls it in on a fresh install; this catches the re-run case where
@@ -825,6 +848,10 @@ npm_heartbeat() {
     done
 }
 npm_heartbeat & NPM_HB=$!
+# Kill the heartbeat on any early exit (Ctrl+C, signal) too, not just the
+# explicit cleanup below — otherwise an interrupt mid-install leaves it
+# ticking until logout.
+trap 'kill "$NPM_HB" 2>/dev/null || true' EXIT INT TERM
 # Watchdog: bound the run so a wedged npm/registry fails with the captured
 # log replayed (below) instead of hanging the installer forever. `timeout`
 # exits 124 on expiry; the failure branch already replays $NPM_LOG.
@@ -837,6 +864,7 @@ timeout 900 podman run --rm \
     -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >"$NPM_LOG" 2>&1 || NPM_RC=$?
 kill "$NPM_HB" 2>/dev/null || true
 wait "$NPM_HB" 2>/dev/null || true
+trap - EXIT INT TERM
 if [[ "$NPM_RC" -eq 0 ]]; then
     rm -f "$NPM_LOG"
     for p in "${SK_PLUGINS[@]}"; do

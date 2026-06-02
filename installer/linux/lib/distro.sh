@@ -29,13 +29,16 @@ is_pi() {
 }
 
 is_supported_distro() {
+    # The only tested targets are trixie-based: Debian 13 and Raspberry Pi OS
+    # (raspbian) 13. Both ship podman 5.4.x, which satisfies the >= 5.3 floor
+    # the engine Quadlets need ([Quadlet] DefaultDependencies=false). Other
+    # distros are not blocked — they fall through to a "untested, continuing"
+    # warning in preflight — but the post-install podman version gate in
+    # install.sh fails loudly on anything that ships podman < 5.3 (e.g. Ubuntu
+    # 24.04 = 4.9.3). Debian 12 (bookworm, podman 4.3.1, no Quadlet) is the one
+    # hard block, handled separately in preflight's check_distro_blocked.
     case "$DISTRO_ID:$DISTRO_VERSION" in
-        # Debian 12 (bookworm) ships podman 4.3.1, which lacks Quadlet
-        # support (added in 4.4). bookworm-backports does not carry
-        # podman, so there's no clean upgrade path within Debian's own
-        # repos — only trixie or later works.
         debian:13) return 0 ;;
-        ubuntu:24.04|ubuntu:24.10|ubuntu:25.04|ubuntu:25.10|ubuntu:26.04) return 0 ;;
         raspbian:13) return 0 ;;
         *) return 1 ;;
     esac
