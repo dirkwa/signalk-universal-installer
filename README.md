@@ -28,7 +28,7 @@ During bootstrap, the installer runs `npm install` for three companion SignalK p
 ## Quick start
 
 ```bash
-# Linux (Debian 13 / trixie, Raspberry Pi OS trixie+)
+# Linux (Debian 13 / trixie, Raspberry Pi OS trixie+, Ubuntu/Kubuntu 25.04+)
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
 
 # macOS (Apple Silicon and Intel; Homebrew required)
