@@ -4,7 +4,9 @@
 
 > The installer needs Podman ≥ 5.3 (for the `[Quadlet] DefaultDependencies=false` key the engine units rely on). The tested targets all clear that floor from their own archives: Debian 13 / Raspberry Pi OS trixie (Podman 5.4.x) and Ubuntu/Kubuntu 25.04 (5.4.1) / 25.10 (5.4.2) / 26.04 (5.7.0). All Ubuntu flavours (Kubuntu, Xubuntu, …) share `ID=ubuntu`, so they're all covered.
 >
-> Debian 12 (bookworm) is **not** supported — its Podman is too old. The installer aborts on bookworm with a recipe to upgrade to trixie. The EOL Ubuntu 24.x line is likewise too old (24.10 ships Podman 5.0.3, 24.04 ships 4.9.3 — both below 5.3), so the post-install version gate aborts with a recipe to move to a newer release.
+> The distro allowlist (`is_supported_distro`) is only a soft pre-check that decides whether you see an "untested, continuing" warning; the hard backstop is the Podman ≥ 5.3 version gate in `install.sh`, which aborts after `apt` if the archive Podman is too old.
+>
+> Debian 12 (bookworm) is **not** supported — its Podman is too old. Bookworm gets an explicit, step-by-step upgrade-to-trixie recipe and aborts before `apt` runs. The EOL Ubuntu 24.x line is likewise too old (24.10 ships Podman 5.0.3, 24.04 ships 4.9.3 — both below 5.3): it isn't special-cased, so it falls to the post-install version gate, which aborts with a "Podman \<version\> is below the required 5.3 — install Podman ≥ 5.3 (e.g. a newer OS release whose archive ships it)" message rather than a tailored recipe.
 
 ```bash
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
