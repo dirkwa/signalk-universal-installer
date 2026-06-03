@@ -66,6 +66,9 @@ check yes ubuntu   plucky   25.04  "Ubuntu 25.04 (Podman 5.4.1)"
 check yes ubuntu   questing 25.10  "Ubuntu 25.10 (Podman 5.4.2)"
 check yes ubuntu   resolute 26.04  "Ubuntu 26.04 (Podman 5.7.0)"
 check yes ubuntu   ""       27.04  "Future Ubuntu 27.04 (no codename present)"
+# Ubuntu always uses YY.MM, but a dot-less VERSION_ID parses as major==minor
+# (e.g. "25" -> 25*100+25=2525 >= 2504) and is accepted. Documenting that here.
+check yes ubuntu   ""       25     "Ubuntu VERSION_ID without dot (edge case)"
 
 # Flavours share ID=ubuntu; codename is irrelevant to the version gate.
 check yes ubuntu   questing 25.10  "Kubuntu 25.10 (same ID=ubuntu)"
