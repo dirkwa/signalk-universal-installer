@@ -29,19 +29,39 @@ is_pi() {
 }
 
 is_supported_distro() {
-    # The only tested targets are trixie-based: Debian 13 and Raspberry Pi OS
-    # (raspbian), both of which ship podman 5.4.x — satisfying the >= 5.3 floor
-    # the engine Quadlets need ([Quadlet] DefaultDependencies=false). We gate on
-    # the codename rather than VERSION_ID so trixie point releases (13.1, …) and
-    # Pi OS's own versioning both match, consistent with the "trixie+" support
-    # line in the README/docs. Other distros are not blocked — they fall through
-    # to a "untested, continuing" warning in preflight — but the post-install
-    # podman version gate in install.sh fails loudly on anything shipping podman
-    # < 5.3 (e.g. Ubuntu 24.04 = 4.9.3). Debian 12 (bookworm, podman 4.3.1, no
-    # Quadlet) is the one hard block, handled in preflight's check_distro_blocked.
+    # Tested targets, all of which ship podman >= 5.3 — the floor the engine
+    # Quadlets need ([Quadlet] DefaultDependencies=false, added in podman 5.3.0):
+    #
+    #   * Debian 13 / trixie and Raspberry Pi OS (raspbian) trixie — podman 5.4.x.
+    #     Gated on codename, not VERSION_ID, so trixie point releases (13.1, …)
+    #     and Pi OS's own versioning both match.
+    #   * Ubuntu/Kubuntu 25.04 (plucky, podman 5.4.1), 25.10 (questing, 5.4.2)
+    #     and 26.04 (resolute, 5.7.0). Gated on VERSION_ID >= 25.04 so the whole
+    #     25.x line and later qualify; the EOL 24.x line (oracular 24.10 = podman
+    #     5.0.3, noble 24.04 = 4.9.3) is excluded because its archive podman is
+    #     below the 5.3 floor. Ubuntu uses ID=ubuntu across all flavours (Kubuntu,
+    #     Xubuntu, …), so this one branch covers them all.
+    #
+    # Other distros are not blocked here — they fall through to a "untested,
+    # continuing" warning in preflight — but the post-install podman version gate
+    # in install.sh fails loudly on anything shipping podman < 5.3. Debian 12
+    # (bookworm, podman 4.3.1, no Quadlet) is the one hard block, handled in
+    # preflight's check_distro_blocked.
     case "$DISTRO_ID" in
         debian | raspbian)
             [[ "$DISTRO_CODENAME" == "trixie" ]] && return 0
+            ;;
+        ubuntu)
+            # VERSION_ID is "YY.MM" (e.g. 25.04, 26.04). Compare numerically:
+            # major*100 + minor >= 2504. sort -V would mis-rank 26.04 vs 25.10
+            # on the zero-padded minor, so do the arithmetic explicitly. 10# forces
+            # base-10 so a "04" minor isn't read as (invalid) octal.
+            local major minor
+            major="${DISTRO_VERSION%%.*}"
+            minor="${DISTRO_VERSION#*.}"
+            if [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]]; then
+                (( major * 100 + 10#$minor >= 2504 )) && return 0
+            fi
             ;;
     esac
     return 1
