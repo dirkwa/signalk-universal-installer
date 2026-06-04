@@ -14,6 +14,18 @@ detect_os
 
 REQUIRED_RAM_MB=${REQUIRED_RAM_MB:-2048}
 REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
+# Above this much RAM, a tmpfs /tmp isn't worth mentioning — there's
+# headroom for both the RAM-backed /tmp and the container stack. At or
+# below it (the 4 GB / 8 GB Pi4/Pi5 fleet) check_tmp_on_tmpfs prints a
+# purely informational heads-up (no problem has been reported; it's a
+# "you might want to know" note, not a warning). Overridable.
+TMPFS_WARN_MAX_RAM_MB=${TMPFS_WARN_MAX_RAM_MB:-8192}
+# Percentage of RAM the heads-up suggests capping a tmpfs /tmp at (the OS
+# default is 50%). Shrinking the cap keeps /tmp in RAM — no SSD/SD-card
+# write wear, unlike moving it to disk — while bounding how much RAM a
+# runaway /tmp can ever consume. 20% of 8 GB is ~1.6 GB, ample for the
+# installer's tempfiles while leaving the rest for the containers.
+TMPFS_RECOMMEND_PCT=${TMPFS_RECOMMEND_PCT:-20}
 # signalk-server's HTTP port (and HTTPS, once TLS is enabled) is chosen
 # by install.sh and exported as SK_HTTP_PORT / SK_HTTPS_PORT. Default to
 # the standard web ports when run standalone. The HTTPS port is only
@@ -80,6 +92,76 @@ check_disk() {
     else
         ok "Free disk ${gb}GB on ${target}"
     fi
+}
+
+# Filesystem type backing /tmp ("tmpfs", "ext4", …), or empty if it can't
+# be determined. Split out as its own helper so check_tmp_on_tmpfs's
+# branching logic can be unit-tested by stubbing this and _total_ram_mb
+# (see scripts/test/check-tmpfs-warn.sh).
+_tmp_fstype() {
+    if command -v findmnt >/dev/null 2>&1; then
+        # -T resolves to whatever mount /tmp actually falls under (the
+        # /tmp mount itself, or its parent when /tmp isn't a separate
+        # mount). Empty/error => caller treats as not-tmpfs and stays quiet.
+        findmnt -nro FSTYPE -T /tmp 2>/dev/null || true
+    else
+        # Fallback for the (rare) host without util-linux findmnt: an
+        # exact-path match in /proc/mounts only catches /tmp when it IS a
+        # separate mount, which is exactly the tmpfs case we care about.
+        awk '$2 == "/tmp" {print $3; exit}' /proc/mounts 2>/dev/null || true
+    fi
+}
+
+# Total RAM in MB. Own helper for the same testability reason as _tmp_fstype.
+_total_ram_mb() {
+    awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo
+}
+
+# Debian 13 / trixie (and Raspberry Pi OS trixie+) mount /tmp on tmpfs by
+# default — earlier releases kept it on disk. tmpfs is RAM-backed, so on a
+# small-RAM Pi a process that fills /tmp (a big build, a runaway log, a
+# large download) could use memory the container stack wants. No user has
+# actually hit this, so this is an informational heads-up (info, not warn,
+# non-blocking) — not a problem the installer found. Shown only on machines
+# small enough for it to matter (RAM <= TMPFS_WARN_MAX_RAM_MB).
+#
+# The suggested tweak SHRINKS the tmpfs cap (size=20%) rather than moving
+# /tmp back to disk: keeping it in RAM avoids the SSD/SD-card write wear that
+# disk-backed /tmp churn would add, while still bounding the RAM a runaway
+# /tmp can consume. A systemd drop-in overrides just the mount Options,
+# leaving the vendor unit untouched and surviving OS updates.
+check_tmp_on_tmpfs() {
+    local fstype
+    fstype=$(_tmp_fstype)
+
+    if [[ "$fstype" != "tmpfs" ]]; then
+        ok "/tmp is on disk (${fstype:-unknown} fs)"
+        return 0
+    fi
+
+    local ram_mb cap_mb
+    ram_mb=$(_total_ram_mb)
+    # tmpfs /tmp size cap in MB (the OS default is 50% of RAM). Best-effort;
+    # used only to make the warning concrete, never to gate it.
+    cap_mb=$(df -BM --output=size /tmp 2>/dev/null | tail -1 | tr -dc 0-9)
+
+    if (( ram_mb > TMPFS_WARN_MAX_RAM_MB )); then
+        ok "/tmp is on tmpfs (cap ${cap_mb:-?}MB; ${ram_mb}MB RAM — headroom OK)"
+        return 0
+    fi
+
+    # Mirror trixie's vendor tmp.mount Options, swapping only the size= so
+    # the drop-in changes the cap and nothing else.
+    local opts="mode=1777,strictatime,nosuid,nodev,size=${TMPFS_RECOMMEND_PCT}%,nr_inodes=1m"
+    info "/tmp is on tmpfs (RAM-backed): cap ${cap_mb:-?}MB on ${ram_mb}MB RAM."
+    info "  This is the Debian 13 / trixie default, not set by this installer,"
+    info "  and is fine as-is — just a heads-up: if something fills /tmp it"
+    info "  uses RAM the containers could otherwise have. If you'd rather cap"
+    info "  that, shrink the tmpfs to ${TMPFS_RECOMMEND_PCT}% of RAM (stays in RAM, no SSD wear):"
+    info "    sudo mkdir -p /etc/systemd/system/tmp.mount.d"
+    info "    printf '[Mount]\\nOptions=${opts}\\n' \\"
+    info "      | sudo tee /etc/systemd/system/tmp.mount.d/size.conf"
+    info "    sudo systemctl daemon-reload && sudo reboot"
 }
 
 # `bootstrappedAt` in ~/.signalk-doctor/last-good.json is written by
@@ -517,6 +599,7 @@ main() {
     fi
     check_ram
     check_disk
+    check_tmp_on_tmpfs
     check_ports
     check_cgroups_v2
     check_user_slice_delegation

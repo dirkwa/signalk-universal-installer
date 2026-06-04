@@ -50,3 +50,9 @@ jobs:
 
       - name: privileged-port prompt skip
         run: bash scripts/test/check-priv-ports-skip-prompt.sh
+
+      - name: supported-distro matrix
+        run: bash scripts/test/check-supported-distro.sh
+
+      - name: tmpfs /tmp warning decision table
+        run: bash scripts/test/check-tmpfs-warn.sh
