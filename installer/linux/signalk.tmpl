@@ -522,7 +522,7 @@ cmd_bug_report() {
     # and never echoed. Absent on installs from before this was added,
     # or when the operator set SIGNALK_NO_INSTALL_LOG.
     if [[ -f "$HOME/.signalk-updater/install.log" ]]; then
-        cp "$HOME/.signalk-updater/install.log" "$bundle/install.log"
+        cp "$HOME/.signalk-updater/install.log" "$bundle/install.log" 2>/dev/null || true
     fi
 
     # SignalK plugin state — metadata only, no configuration bodies.
