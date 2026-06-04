@@ -136,6 +136,30 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$HERE/lib/ghcr.sh"
 
+# Persist this run's console output to ~/.signalk-updater/install.log so
+# `signalk bug-report` can bundle it. The documented invocation is
+# `curl … | bash` (output goes only to the terminal), so without this a
+# failed install left no on-disk trace — the operator had to re-run by
+# hand to see what broke, and bug-report had nothing to send. We're past
+# the curl|bash self-reexec branch above (which already exited), so this
+# tees the real on-disk run, not the stdin bootstrap. fd1+fd2 are merged
+# through a single appending `tee` that keeps the terminal output intact;
+# the process-substitution sink drains on the script's natural exit.
+# Truncate (not append) at the start of each run so a re-install doesn't
+# accumulate stale failures; cap by truncating only — the file is one
+# install's worth of output, a few KB. SIGNALK_NO_INSTALL_LOG=1 opts out
+# (e.g. for read-only-home CI). The dir is created here because the log
+# starts before step 8 (hardware detect) would otherwise mkdir it.
+INSTALL_LOG="${HOME}/.signalk-updater/install.log"
+case "${SIGNALK_NO_INSTALL_LOG:-}" in
+    1 | true | TRUE | yes | YES) INSTALL_LOG="" ;;
+esac
+if [[ -n "$INSTALL_LOG" ]] && mkdir -p "${HOME}/.signalk-updater" 2>/dev/null \
+    && : >"$INSTALL_LOG" 2>/dev/null; then
+    exec > >(tee -a "$INSTALL_LOG") 2>&1
+    info "Logging this run to $INSTALL_LOG"
+fi
+
 REPO_OWNER=${REPO_OWNER:-dirkwa}
 SK_IMAGE=${SK_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-server:dirkwa}
 

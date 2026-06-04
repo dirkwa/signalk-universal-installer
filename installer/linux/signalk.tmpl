@@ -515,6 +515,16 @@ cmd_bug_report() {
         cp "$HOME/.signalk-updater/hardware.json" "$bundle/hardware.json"
     fi
 
+    # Installer run log — install.sh tees its console output here so a
+    # failed install (esp. a pre-container failure: preflight, podman
+    # setup, image pull, npm) leaves an on-disk trace to ship. The
+    # installer prints no secrets; tokens are generated via podman/exec
+    # and never echoed. Absent on installs from before this was added,
+    # or when the operator set SIGNALK_NO_INSTALL_LOG.
+    if [[ -f "$HOME/.signalk-updater/install.log" ]]; then
+        cp "$HOME/.signalk-updater/install.log" "$bundle/install.log"
+    fi
+
     # SignalK plugin state — metadata only, no configuration bodies.
     # Plugin configs in plugin-config-data/*.json routinely hold
     # secrets (MQTT passwords, cloud-sync API keys, OAuth tokens) and
