@@ -669,14 +669,15 @@ atomic_write() {
 
 # Echo a one-line reason describing how the running signalk-server container
 # differs from what the installer just rendered, or empty when they match.
-# Truth source is the running container's `.Config.Env` + `.ImageName`, not
-# Quadlet text — file diffs are noisy (template tweaks, the operator-owned
-# user-additions block, hardware-detect deltas that have already been picked
-# up by a prior restart). Used to decide whether `signalk-server.service`
-# needs a `systemctl --user restart` to apply the rewritten Quadlet.
+# Truth source is the running container's `.Config.Env` + `.ImageName` +
+# `.Image` (the resolved image ID), not Quadlet text — file diffs are noisy
+# (template tweaks, the operator-owned user-additions block, hardware-detect
+# deltas that have already been picked up by a prior restart). Used to decide
+# whether `signalk-server.service` needs a `systemctl --user restart` to apply
+# the rewritten Quadlet or a freshly pulled image.
 signalk_server_drift_reason() {
     podman container exists signalk-server 2>/dev/null || { echo ""; return 0; }
-    local state run_port run_image
+    local state run_port run_image run_id pulled_id
     state=$(podman inspect signalk-server --format '{{.State.Status}}' 2>/dev/null || echo unknown)
     if [[ "$state" != "running" ]]; then
         echo "container state=$state"
@@ -692,6 +693,19 @@ signalk_server_drift_reason() {
     fi
     if [[ -n "$run_image" && "$run_image" != "$SK_IMAGE" ]]; then
         echo "image: running=$run_image rendered=$SK_IMAGE"
+        return 0
+    fi
+    # Tag matches but the tag may have MOVED: `:dirkwa` (and `:master`,
+    # `:latest`) are rolling tags whose digest changes under a stable name.
+    # The image-pull step above already fetched the current digest into local
+    # storage, so compare the running container's resolved image ID against
+    # what `$SK_IMAGE` now resolves to locally. Without this, a re-run that
+    # pulled a newer `:dirkwa` leaves the old container running because the tag
+    # string is unchanged — the bug this guard exists to prevent.
+    run_id=$(podman inspect signalk-server --format '{{.Image}}' 2>/dev/null)
+    pulled_id=$(podman image inspect "$SK_IMAGE" --format '{{.Id}}' 2>/dev/null || echo "")
+    if [[ -n "$run_id" && -n "$pulled_id" && "$run_id" != "$pulled_id" ]]; then
+        echo "image digest: running=${run_id:0:19} pulled=${pulled_id:0:19}"
         return 0
     fi
     echo ""
@@ -750,13 +764,16 @@ INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
 bash "$HERE/install-socketcan-script.sh"
 
 # 11b. signalk-server drift apply
-# Re-runs of the installer may change PORT or the image tag (operator picks
-# standard ports at the prompt, or bumps the engine channel). The rewritten
-# Quadlet is on disk and daemon-reload above has parsed it, but the running
-# container keeps its old env until the unit is restarted. The peer-restart
-# block below uses `restart` for doctor+updater for exactly this reason;
-# signalk-server needs the same treatment, gated on observable drift so
-# no-change re-runs (token refresh, journald drop-in, recovery-script
+# Re-runs of the installer may change PORT, the image tag (operator picks
+# standard ports at the prompt, or bumps the engine channel), or the image
+# DIGEST behind an unchanged rolling tag (`:dirkwa` moved since last run, and
+# the pull step above fetched it). The rewritten Quadlet is on disk and
+# daemon-reload above has parsed it, but the running container keeps its old
+# env and image until the unit is restarted — `systemctl restart` recreates
+# the container from the Quadlet, so it picks up the just-pulled image. The
+# peer-restart block below uses `restart` for doctor+updater for exactly this
+# reason; signalk-server needs the same treatment, gated on observable drift
+# so no-change re-runs (token refresh, journald drop-in, recovery-script
 # regeneration) leave the running container alone.
 section "signalk-server"
 SK_DRIFT_REASON=$(signalk_server_drift_reason)
