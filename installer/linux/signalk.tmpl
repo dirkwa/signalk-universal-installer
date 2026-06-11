@@ -7,6 +7,9 @@
 #   signalk recover [...]  delegate to ~/.local/bin/signalk-recovery
 #   signalk socketcan [..] Pi CAN-HAT detection + setup recipe
 #   signalk update         refresh installer scripts + Quadlet templates via doctor
+#   signalk resetadmin [user]
+#                          reset (or create) an admin user's password for the
+#                          Admin UI login (default user: admin)
 #   signalk bug-report [--to <dir>]
 #                          bundle logs + state into <dir>/signalk-bug-report-*.tar.gz
 #                          (default: /tmp)
@@ -26,7 +29,7 @@ QUADLET_DIR="${HOME}/.config/containers/systemd"
 UNITS=(signalk-server signalk-updater-server signalk-doctor-server)
 
 usage() {
-    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 cmd_version() {
@@ -165,6 +168,93 @@ cmd_update() {
             ;;
     esac
     rm -f "$body_file"
+}
+
+cmd_resetadmin() {
+    # Regain Admin UI access after a lost password — without the
+    # documented delete-security.json recovery, which discards the JWT
+    # secretKey and thereby invalidates every issued token (including
+    # the doctor's ~/.signalk-doctor/signalk-token). This upserts one
+    # admin user's bcrypt hash in place and leaves everything else —
+    # secretKey, devices, acls, other users — untouched.
+    #
+    # The hash is computed inside the signalk-server container with the
+    # server's own bcryptjs, so it is bit-compatible with what the
+    # server writes itself and nothing needs to be installed on the host.
+    local username="${1:-admin}"
+
+    if ! podman exec signalk-server true 2>/dev/null; then
+        echo "[ERR] signalk-server container is not running (resetadmin uses it to hash the password)." >&2
+        echo "      Start it first:  systemctl --user start signalk-server" >&2
+        exit 1
+    fi
+
+    # Security is switched on by settings.json's security.strategy, not
+    # by security.json existing. If no strategy is configured there is
+    # no login screen to be locked out of — creating an admin here would
+    # silently NOT enable security, so refuse instead.
+    if ! podman exec signalk-server node -e '
+        const settings = JSON.parse(require("fs").readFileSync("/home/node/.signalk/settings.json", "utf8"));
+        process.exit(settings.security && settings.security.strategy ? 0 : 1);
+    ' 2>/dev/null; then
+        echo "[ERR] Security is not enabled on this server — there is no admin login to reset." >&2
+        echo "      Enable security from the Admin UI instead (Security > Users)." >&2
+        exit 1
+    fi
+
+    local pw pw2
+    read -rs -p "New password for '${username}': " pw; echo
+    read -rs -p "Confirm password: " pw2; echo
+    if [[ -z "$pw" ]]; then
+        echo "[ERR] Password must not be empty." >&2
+        exit 1
+    fi
+    if [[ "$pw" != "$pw2" ]]; then
+        echo "[ERR] Passwords do not match." >&2
+        exit 1
+    fi
+
+    # Password travels via stdin (never argv/env, so it can't leak
+    # through `ps`). security.json may legitimately be absent here (the
+    # documented lost-credentials recovery deletes it); recreate it with
+    # a fresh secretKey in that case — without one the server would
+    # generate a new random key on every boot, logging everyone out on
+    # each restart. Write atomically + 0600, matching the server's own
+    # saveSecurityConfig.
+    local result
+    if ! result=$(printf '%s' "$pw" | podman exec -i -w /home/node/signalk signalk-server node -e '
+        const fs = require("fs");
+        const crypto = require("crypto");
+        const bcrypt = require("bcryptjs");
+        const path = "/home/node/.signalk/security.json";
+        const username = process.argv[1];
+        const password = fs.readFileSync(0, "utf8");
+        const config = fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, "utf8")) : {};
+        if (!config.secretKey) config.secretKey = crypto.randomBytes(256).toString("hex");
+        if (!Array.isArray(config.users)) config.users = [];
+        const hash = bcrypt.hashSync(password, bcrypt.genSaltSync(10));
+        const user = config.users.find((u) => u.username === username);
+        if (user) {
+            user.password = hash;
+            user.type = "admin";
+        } else {
+            config.users.push({ username: username, type: "admin", password: hash });
+        }
+        fs.writeFileSync(path + ".tmp", JSON.stringify(config, null, 2), { mode: 0o600 });
+        fs.renameSync(path + ".tmp", path);
+        console.log(user ? "password reset" : "created");
+    ' "$username"); then
+        echo "[ERR] Failed to update ~/.signalk/security.json (see error above)." >&2
+        exit 1
+    fi
+
+    # The running server keeps its security config in memory — restart
+    # so the new credentials take effect (and before any in-memory save
+    # could clobber the file we just wrote).
+    echo "[i] Admin user '${username}' ${result}. Restarting signalk-server..."
+    systemctl --user restart signalk-server
+    echo "[OK] Done — log in at ${SIGNALK_URL%/signalk*}/admin with username '${username}'."
+    echo "     Existing API tokens (doctor, updater) remain valid: the secretKey was preserved."
 }
 
 cmd_uninstall() {
@@ -961,6 +1051,7 @@ case "${1:-help}" in
     recover)    shift; cmd_recover "$@" ;;
     socketcan)  shift; cmd_socketcan "$@" ;;
     update)     cmd_update ;;
+    resetadmin) shift; cmd_resetadmin "$@" ;;
     bug-report) shift; cmd_bug_report "$@" ;;
     uninstall)  cmd_uninstall ;;
     version|--version|-v) cmd_version ;;
