@@ -82,6 +82,17 @@ rm ~/.signalk-updater/operation.lock
 
 The lock lives on a host bind-mount (`~/.signalk-updater/`), so restarting the updater container doesn't clear it on its own — only `rm` (or a re-run of the previously-stuck operation reaching its own `finally`) does. After removing the file, retry the operation that was blocked.
 
+## Scenario: lost admin password (locked out of the Admin UI)
+
+```bash
+signalk resetadmin            # resets (or creates) the user "admin"
+signalk resetadmin alice      # same, for a different username
+```
+
+Prompts for a new password, upserts the user's bcrypt hash in `~/.signalk/security.json` (hashing happens inside the signalk-server container with the server's own bcryptjs), and restarts signalk-server. The JWT `secretKey` is preserved, so existing API tokens — including the doctor's drift-scanner token at `~/.signalk-doctor/signalk-token` — stay valid.
+
+This is preferable to the [upstream documented recovery](https://demo.signalk.org/documentation/Security.html#disabling-security-lost-admin-credentials) (delete `security.json`, restart, re-create the admin from the "Enable Security" screen), which works in this stack too but throws away the `secretKey` and with it every issued token; after that recovery the installer must be re-run to mint a fresh doctor token. Note that deleting `security.json` does **not** disable security — the strategy lives in `settings.json` — it only resets the user list, and the change takes effect after a server restart (`systemctl --user restart signalk-server`), not on a browser reload.
+
 ## Scenario: corrupted state files
 
 The `~/.signalk-doctor/snapshots/` directory is the source of truth for recovery. If the snapshots themselves are gone:
