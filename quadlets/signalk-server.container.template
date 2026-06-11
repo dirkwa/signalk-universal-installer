@@ -57,6 +57,15 @@ UserNS=keep-id:uid=1000,gid=1000
 Volume=%h/.signalk:/home/node/.signalk:Z
 Volume=%t/podman/podman.sock:/var/run/docker.sock
 
+# Read-only view of the host's linger registry so signalk-container's
+# Deployment Doctor can warn when linger gets disabled after install
+# (without it, rootless podman — and every container with a restart
+# policy — stays down after a headless reboot). The directory is
+# guaranteed to exist before this unit ever starts: the installer's
+# enable-linger step creates it, and systemd never removes it. No :Z —
+# never relabel a host system directory.
+Volume=/var/lib/systemd/linger:/var/lib/systemd/linger:ro
+
 Environment=SIGNALK_NODE_CONF_DIR=/home/node/.signalk
 
 # HTTP listen port. Rendered by the installer: 80 when the operator
