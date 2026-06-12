@@ -381,12 +381,18 @@ if [[ "$PRIV_PORTS" = "1" ]]; then
         ok "${PRIV_SYSCTL_KEY} already ${current_floor} (≤ 80)"
     elif [[ "$SUDO" = "MISSING" ]]; then
         warn "Cannot lower ${PRIV_SYSCTL_KEY} without sudo; 80/443 will fail to bind."
-        warn "Set it manually:  echo '${PRIV_SYSCTL_KEY}=80' | sudo tee ${PRIV_SYSCTL_FILE} && sudo sysctl --system"
+        warn "Set it manually as root:  echo '${PRIV_SYSCTL_KEY}=80' > ${PRIV_SYSCTL_FILE} && echo 80 > /proc/sys/net/ipv4/ip_unprivileged_port_start"
     else
         info "Lowering ${PRIV_SYSCTL_KEY} to 80 (host-wide, persistent)"
+        # Runtime apply goes through /proc, not the sysctl binary: a fresh
+        # minimal Trixie may not have procps installed, and a root shell
+        # entered via plain `su` lacks /usr/sbin on PATH — both surfaced as
+        # `sysctl: command not found` here. The /etc/sysctl.d drop-in above
+        # covers persistence across reboots; tee'ing /proc is the same
+        # operation `sysctl -w` performs.
         if printf '# Managed by signalk-universal-installer — lets the rootless,\n# host-netns signalk-server container bind HTTP :80 / HTTPS :443.\n%s=80\n' \
             "$PRIV_SYSCTL_KEY" | $SUDO tee "$PRIV_SYSCTL_FILE" >/dev/null \
-            && $SUDO sysctl -q -w "${PRIV_SYSCTL_KEY}=80"; then
+            && printf '80\n' | $SUDO tee /proc/sys/net/ipv4/ip_unprivileged_port_start >/dev/null; then
             ok "${PRIV_SYSCTL_KEY}=80 (drop-in ${PRIV_SYSCTL_FILE})"
         else
             warn "Failed to apply ${PRIV_SYSCTL_KEY}=80; 80/443 may not bind until fixed."
