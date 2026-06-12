@@ -185,9 +185,15 @@ DOCTOR_URL="http://127.0.0.1:3004"
 SIGNALK_URL=""
 
 # Privilege escalation. The installer needs root for apt + systemd
-# file writes + journald drop-in + cgroup delegation override. We
-# support four setups:
-#   - Running as root → SUDO="" (no prefix needed).
+# file writes + journald drop-in + cgroup delegation override — but it
+# must RUN as the regular user that will own the stack. Everything it
+# sets up is per-user state: Quadlets in ~/.config/containers/systemd,
+# `systemctl --user` units, linger, rootless podman storage, ~/.signalk.
+# Run as root, all of that lands in root's home and user session — a
+# broken install that LOOKS successful. So we support three setups:
+#   - Running as root (su, root login, `curl … | sudo bash`) →
+#     fail-fast with the switch-to-a-user recipe. Escalation for the
+#     few root-needing steps is the installer's job, via sudo.
 #   - Non-root + sudo present + caller authorized → SUDO="sudo"
 #     (interactive prompt on first use, cached for the rest of the
 #     run).
@@ -200,7 +206,20 @@ SIGNALK_URL=""
 #     controlling tty for the password prompt and the failure mode
 #     is confusing.
 if (( EUID == 0 )); then
-    SUDO=""
+    err "Do not run the installer as root (su / root login / sudo bash)."
+    echo >&2
+    err "The SignalK stack is rootless and tied to a regular user's"
+    err "session: Quadlets, systemd --user units, linger, and ~/.signalk"
+    err "all belong to the user who runs this script. As root they would"
+    err "land in root's home and session instead."
+    echo >&2
+    err "Run it as the user who should own SignalK. If that user can't"
+    err "sudo yet, bootstrap once as root, then RECONNECT the session:"
+    err "  1. apt-get update && apt-get install -y sudo"
+    err "  2. usermod -aG sudo <youruser>"
+    err "  3. Log in as <youruser> (fresh SSH session, not su)."
+    err "  4. Re-run the installer one-liner — it sudo's where needed."
+    exit 1
 elif command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"
 else
@@ -381,12 +400,18 @@ if [[ "$PRIV_PORTS" = "1" ]]; then
         ok "${PRIV_SYSCTL_KEY} already ${current_floor} (≤ 80)"
     elif [[ "$SUDO" = "MISSING" ]]; then
         warn "Cannot lower ${PRIV_SYSCTL_KEY} without sudo; 80/443 will fail to bind."
-        warn "Set it manually:  echo '${PRIV_SYSCTL_KEY}=80' | sudo tee ${PRIV_SYSCTL_FILE} && sudo sysctl --system"
+        warn "Set it manually as root:  echo '${PRIV_SYSCTL_KEY}=80' > ${PRIV_SYSCTL_FILE} && echo 80 > /proc/sys/net/ipv4/ip_unprivileged_port_start"
     else
         info "Lowering ${PRIV_SYSCTL_KEY} to 80 (host-wide, persistent)"
+        # Runtime apply goes through /proc, not the sysctl binary: a fresh
+        # minimal Trixie may not have procps installed, and a root shell
+        # entered via plain `su` lacks /usr/sbin on PATH — both surfaced as
+        # `sysctl: command not found` here. The /etc/sysctl.d drop-in above
+        # covers persistence across reboots; tee'ing /proc is the same
+        # operation `sysctl -w` performs.
         if printf '# Managed by signalk-universal-installer — lets the rootless,\n# host-netns signalk-server container bind HTTP :80 / HTTPS :443.\n%s=80\n' \
             "$PRIV_SYSCTL_KEY" | $SUDO tee "$PRIV_SYSCTL_FILE" >/dev/null \
-            && $SUDO sysctl -q -w "${PRIV_SYSCTL_KEY}=80"; then
+            && printf '80\n' | $SUDO tee /proc/sys/net/ipv4/ip_unprivileged_port_start >/dev/null; then
             ok "${PRIV_SYSCTL_KEY}=80 (drop-in ${PRIV_SYSCTL_FILE})"
         else
             warn "Failed to apply ${PRIV_SYSCTL_KEY}=80; 80/443 may not bind until fixed."
