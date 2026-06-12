@@ -216,7 +216,8 @@ if (( EUID == 0 )); then
     err "Run it as the user who should own SignalK. If that user can't"
     err "sudo yet, bootstrap once as root, then RECONNECT the session:"
     err "  1. apt-get update && apt-get install -y sudo"
-    err "  2. usermod -aG sudo <youruser>"
+    err "  2. /usr/sbin/usermod -aG sudo <youruser>"
+    err "     (full path — a plain 'su' root shell lacks /usr/sbin on PATH)"
     err "  3. Log in as <youruser> (fresh SSH session, not su)."
     err "  4. Re-run the installer one-liner — it sudo's where needed."
     exit 1
@@ -236,7 +237,7 @@ if [[ "$SUDO" = "MISSING" ]]; then
     err "Bootstrap sudo as root, then RECONNECT your SSH session:"
     err "  1. Become root (e.g.  su -)"
     err "  2. apt-get update && apt-get install -y sudo"
-    err "  3. usermod -aG sudo $USER"
+    err "  3. /usr/sbin/usermod -aG sudo $USER"
     err "  4. exit  # leave the root shell"
     err "  5. CLOSE the SSH session entirely and reconnect."
     err "     (su / newgrp / exec bash do NOT pick up the new group —"
@@ -269,7 +270,7 @@ elif [[ "$SUDO" = "sudo" ]]; then
         err "Then re-run the installer one-liner."
         echo >&2
         err "If '$USER' really isn't in the sudo group at all, add it as"
-        err "root first:  usermod -aG sudo $USER"
+        err "root first:  /usr/sbin/usermod -aG sudo $USER"
         exit 1
     fi
 fi
@@ -620,7 +621,7 @@ section "Group memberships"
 for g in dialout gpio netdev; do
     if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
         info "Adding $USER to $g (requires sudo)"
-        $SUDO usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
+        $SUDO /usr/sbin/usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
     fi
 done
 ok "groups: dialout, gpio, netdev (ensured if present on host)"
