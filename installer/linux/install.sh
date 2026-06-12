@@ -120,6 +120,9 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         INSTALLER_BASE_URL="$INSTALLER_BASE_URL" \
         SIGNALK_LOCALHOST_ONLY="${SIGNALK_LOCALHOST_ONLY:-}" \
         SIGNALK_LAN_EXPOSE="${SIGNALK_LAN_EXPOSE:-}" \
+        SIGNALK_VESSEL_NAME="${SIGNALK_VESSEL_NAME:-}" \
+        SIGNALK_VESSEL_MMSI="${SIGNALK_VESSEL_MMSI:-}" \
+        SIGNALK_VESSEL_CALLSIGN="${SIGNALK_VESSEL_CALLSIGN:-}" \
         bash "$TMP/installer/linux/install.sh" "$@"
     rc=$?
     cat >/dev/null 2>&1 || true
@@ -349,6 +352,45 @@ SIGNALK_URL="http://127.0.0.1:${SK_HTTP_PORT}/signalk"
 # Export so the child `bash preflight.sh` checks the actual ports.
 export SK_HTTP_PORT SK_HTTPS_PORT
 info "signalk-server ports: HTTP :${SK_HTTP_PORT}, HTTPS :${SK_HTTPS_PORT}"
+
+# Vessel identity (boat name / MMSI / VHF call sign). Collected up front
+# alongside the ports prompt so the operator isn't called back
+# mid-install; applied as a ~/.signalk/baseDeltas.json seed right before
+# signalk-server's first start, which pre-fills the admin UI's Server →
+# Settings page. Env overrides for unattended runs: SIGNALK_VESSEL_NAME /
+# SIGNALK_VESSEL_MMSI / SIGNALK_VESSEL_CALLSIGN. Every field is optional
+# (Enter skips). Skipped entirely when the data dir already carries a
+# vessel identity — baseDeltas.json, or legacy defaults.json which a
+# fresh baseDeltas.json would silently shadow (the server reads
+# baseDeltas.json first and never falls through).
+VESSEL_NAME="${SIGNALK_VESSEL_NAME:-}"
+VESSEL_MMSI="${SIGNALK_VESSEL_MMSI:-}"
+VESSEL_CALLSIGN="${SIGNALK_VESSEL_CALLSIGN:-}"
+if [[ -n "$VESSEL_MMSI" && ! "$VESSEL_MMSI" =~ ^[0-9]{9}$ ]]; then
+    warn "SIGNALK_VESSEL_MMSI '$VESSEL_MMSI' is not 9 digits — ignoring it"
+    VESSEL_MMSI=""
+fi
+VESSEL_SEED=0
+if [[ -f "$HOME/.signalk/baseDeltas.json" || -f "$HOME/.signalk/defaults.json" ]]; then
+    # Existing vessel identity — never clobber, and keep re-runs prompt-free.
+    :
+elif [[ -n "${VESSEL_NAME}${VESSEL_MMSI}${VESSEL_CALLSIGN}" ]]; then
+    VESSEL_SEED=1
+elif [[ -r /dev/tty && -w /dev/tty ]]; then
+    printf '\n%sVessel identity — pre-fills the admin UI (all optional, Enter to skip).%s\n' \
+        "$C_BOLD" "$C_RESET" >/dev/tty
+    printf 'Boat name: ' >/dev/tty
+    read -r VESSEL_NAME </dev/tty || VESSEL_NAME=""
+    while :; do
+        printf 'MMSI (9 digits): ' >/dev/tty
+        read -r VESSEL_MMSI </dev/tty || VESSEL_MMSI=""
+        [[ -z "$VESSEL_MMSI" || "$VESSEL_MMSI" =~ ^[0-9]{9}$ ]] && break
+        printf 'An MMSI is exactly 9 digits — try again, or press Enter to skip.\n' >/dev/tty
+    done
+    printf 'VHF call sign: ' >/dev/tty
+    read -r VESSEL_CALLSIGN </dev/tty || VESSEL_CALLSIGN=""
+    [[ -n "${VESSEL_NAME}${VESSEL_MMSI}${VESSEL_CALLSIGN}" ]] && VESSEL_SEED=1
+fi
 
 # Detect a previous successful install. install.sh's last step (#18)
 # writes `bootstrappedAt` into ~/.signalk-doctor/last-good.json after
@@ -997,6 +1039,47 @@ if [[ "$PRIV_PORTS" = "1" ]] && command -v jq >/dev/null 2>&1; then
     fi
 fi
 
+# Seed the vessel identity gathered up top into ~/.signalk/baseDeltas.json
+# — the same file the admin UI's Server → Settings page writes through
+# PUT /skServer/vessel — so it starts pre-filled on first boot. The
+# shape must match what the server's DeltaEditor produces for top-level
+# paths: ONE values entry with path "" whose value is an object keyed by
+# name/mmsi/communication — per-path entries would replay into the data
+# model but stay invisible to getSelfValue(), leaving the settings page
+# empty. MMSI stays a string (the server rejects numeric mmsi). Without
+# an MMSI we must mint the self UUID ourselves: the server only
+# auto-generates one when baseDeltas.json is absent entirely, and a
+# vessel without mmsi or uuid has no self identity. Guarded at prompt
+# time AND here: never overwrite an existing baseDeltas.json, and never
+# create one next to a legacy defaults.json it would shadow.
+if [[ "$VESSEL_SEED" = "1" ]] && command -v jq >/dev/null 2>&1; then
+    base_deltas="$HOME/.signalk/baseDeltas.json"
+    if [[ -e "$base_deltas" || -e "$HOME/.signalk/defaults.json" ]]; then
+        ok "vessel identity already present (leaving as-is)"
+    else
+        vessel_uuid=""
+        if [[ -z "$VESSEL_MMSI" ]]; then
+            vessel_uuid="urn:mrn:signalk:uuid:$(cat /proc/sys/kernel/random/uuid)"
+        fi
+        tmp=$(mktemp "${base_deltas}.XXXXXX")
+        if jq -n --arg name "$VESSEL_NAME" --arg mmsi "$VESSEL_MMSI" \
+            --arg cs "$VESSEL_CALLSIGN" --arg uuid "$vessel_uuid" '
+            [{context: "vessels.self", updates: [{values: [{path: "", value: (
+                (if $name != "" then {name: $name} else {} end)
+                + (if $mmsi != "" then {mmsi: $mmsi} else {} end)
+                + (if $uuid != "" then {uuid: $uuid} else {} end)
+                + (if $cs != "" then {communication: {callsignVhf: $cs}} else {} end)
+            )}]}]}]' >"$tmp" 2>/dev/null; then
+            mv -f "$tmp" "$base_deltas"
+            vessel_label="${VESSEL_NAME:+name ${VESSEL_NAME}, }${VESSEL_MMSI:+MMSI ${VESSEL_MMSI}, }${VESSEL_CALLSIGN:+call sign ${VESSEL_CALLSIGN}, }"
+            ok "seeded vessel identity (${vessel_label%, }) into baseDeltas.json"
+        else
+            rm -f "$tmp"
+            warn "could not write baseDeltas.json; set vessel data in the admin UI (Server → Settings)"
+        fi
+    fi
+fi
+
 # 14. Bring up signalk-server (prefer updater REST, fall back to systemctl).
 # The updater may have JUST been restarted by the daemon-reload above and
 # need a few seconds to settle dockerode against the podman socket — retry
@@ -1364,11 +1447,17 @@ else
     SUMMARY_HEADLINE="${C_GREEN}${C_BOLD}OK — SignalK is up. Open it in your browser:${C_RESET}"
 fi
 
+VESSEL_SUMMARY=""
+if [[ "$VESSEL_SEED" = "1" && -n "$VESSEL_NAME" ]]; then
+    VESSEL_SUMMARY="
+  Vessel           : ${VESSEL_NAME} (edit under Server → Settings)"
+fi
+
 cat <<EOF
 
 ${SUMMARY_HEADLINE}
 
-  SignalK admin UI : http://${DISPLAY_HOST}:${SK_HTTP_PORT}
+  SignalK admin UI : http://${DISPLAY_HOST}:${SK_HTTP_PORT}${VESSEL_SUMMARY}
   Updater Console  : http://${DISPLAY_HOST}:3003
   Doctor Console   : http://${DISPLAY_HOST}:3004
 
