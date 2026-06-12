@@ -1156,6 +1156,32 @@ case ":$PATH:" in
     *) PATH_NEEDS_RELOAD=1 ;;
 esac
 
+# 16b. System-wide `signalk` symlink for instant availability.
+#
+# The PATH snippet above only takes effect in NEW shells — this script
+# is a child process (usually `curl … | bash`) and can't modify the
+# invoking shell's PATH, so right after the install `signalk` would
+# still be "command not found" until the user re-logs. /usr/local/bin
+# is on PATH in every default shell already, so a symlink there makes
+# the command work immediately. The symlink TARGET stays
+# ~/.local/bin/signalk: that's the file the doctor's
+# /api/installer/refresh rewrites through its ~/.local/bin bind-mount,
+# so refresh keeps working through the link. The readlink guard keeps
+# no-op re-runs sudo-free (same principle as the journald drop-in).
+section "System-wide signalk command"
+SIGNALK_LINK=/usr/local/bin/signalk
+SIGNALK_CLI="$HOME/.local/bin/signalk"
+if [[ "$(readlink "$SIGNALK_LINK" 2>/dev/null)" == "$SIGNALK_CLI" ]]; then
+    ok "$SIGNALK_LINK already links to $SIGNALK_CLI"
+elif [[ -e "$SIGNALK_LINK" && ! -L "$SIGNALK_LINK" ]]; then
+    warn "$SIGNALK_LINK exists and is not a symlink — leaving it alone."
+    warn "'signalk' will resolve via ~/.local/bin in new shells instead."
+elif $SUDO ln -sfn "$SIGNALK_CLI" "$SIGNALK_LINK"; then
+    ok "linked $SIGNALK_LINK -> $SIGNALK_CLI"
+else
+    warn "could not create $SIGNALK_LINK; 'signalk' available in new shells via ~/.local/bin"
+fi
+
 # 17. Journald limits.
 section "Journald retention drop-in"
 JOURNALD_DROPIN=/etc/systemd/journald.conf.d/signalk.conf
@@ -1388,7 +1414,13 @@ The 'signalk' command:
   signalk help           full usage
 EOF
 
-if (( PATH_NEEDS_RELOAD )); then
+# The /usr/local/bin symlink (step 16b) normally makes `signalk` work
+# in the CURRENT shell already — `command -v` re-checks it here rather
+# than trusting the symlink branch outcome, so the hint also stays
+# suppressed when an operator's exotic PATH happens to cover
+# ~/.local/bin some other way. The reload hint survives only for the
+# fallback case (symlink skipped/failed AND ~/.local/bin not on PATH).
+if (( PATH_NEEDS_RELOAD )) && ! command -v signalk >/dev/null 2>&1; then
     SHELL_NAME=$(basename "${SHELL:-bash}")
     # -l forces a login shell which is what an SSH session would
     # already be. The PATH snippet was written to ~/.profile too so
