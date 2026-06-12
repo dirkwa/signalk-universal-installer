@@ -136,6 +136,29 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$HERE/lib/ghcr.sh"
 
+# Refuse root BEFORE the install-log tee below: run as root, the tee
+# would first create /root/.signalk-updater/install.log — a root-owned
+# leftover that `signalk bug-report` (which runs as the regular user)
+# can never bundle. The full rationale for refusing root lives at the
+# privilege-escalation comment further down.
+if (( EUID == 0 )); then
+    err "Do not run the installer as root (su / root login / sudo bash)."
+    echo >&2
+    err "The SignalK stack is rootless and tied to a regular user's"
+    err "session: Quadlets, systemd --user units, linger, and ~/.signalk"
+    err "all belong to the user who runs this script. As root they would"
+    err "land in root's home and session instead."
+    echo >&2
+    err "Run it as the user who should own SignalK. If that user can't"
+    err "sudo yet, bootstrap once as root, then RECONNECT the session:"
+    err "  1. apt-get update && apt-get install -y sudo"
+    err "  2. /usr/sbin/usermod -aG sudo <youruser>"
+    err "     (full path — a plain 'su' root shell lacks /usr/sbin on PATH)"
+    err "  3. Log in as <youruser> (fresh SSH session, not su)."
+    err "  4. Re-run the installer one-liner — it sudo's where needed."
+    exit 1
+fi
+
 # Persist this run's console output to ~/.signalk-updater/install.log so
 # `signalk bug-report` can bundle it. The documented invocation is
 # `curl … | bash` (output goes only to the terminal), so without this a
@@ -192,8 +215,9 @@ SIGNALK_URL=""
 # Run as root, all of that lands in root's home and user session — a
 # broken install that LOOKS successful. So we support three setups:
 #   - Running as root (su, root login, `curl … | sudo bash`) →
-#     fail-fast with the switch-to-a-user recipe. Escalation for the
-#     few root-needing steps is the installer's job, via sudo.
+#     fail-fast with the switch-to-a-user recipe — already handled
+#     above, before the install-log tee. Escalation for the few
+#     root-needing steps is the installer's job, via sudo.
 #   - Non-root + sudo present + caller authorized → SUDO="sudo"
 #     (interactive prompt on first use, cached for the rest of the
 #     run).
@@ -205,23 +229,7 @@ SIGNALK_URL=""
 #     We don't try `su -c` because the curl-piped one-liner has no
 #     controlling tty for the password prompt and the failure mode
 #     is confusing.
-if (( EUID == 0 )); then
-    err "Do not run the installer as root (su / root login / sudo bash)."
-    echo >&2
-    err "The SignalK stack is rootless and tied to a regular user's"
-    err "session: Quadlets, systemd --user units, linger, and ~/.signalk"
-    err "all belong to the user who runs this script. As root they would"
-    err "land in root's home and session instead."
-    echo >&2
-    err "Run it as the user who should own SignalK. If that user can't"
-    err "sudo yet, bootstrap once as root, then RECONNECT the session:"
-    err "  1. apt-get update && apt-get install -y sudo"
-    err "  2. /usr/sbin/usermod -aG sudo <youruser>"
-    err "     (full path — a plain 'su' root shell lacks /usr/sbin on PATH)"
-    err "  3. Log in as <youruser> (fresh SSH session, not su)."
-    err "  4. Re-run the installer one-liner — it sudo's where needed."
-    exit 1
-elif command -v sudo >/dev/null 2>&1; then
+if command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"
 else
     SUDO="MISSING"
