@@ -185,9 +185,15 @@ DOCTOR_URL="http://127.0.0.1:3004"
 SIGNALK_URL=""
 
 # Privilege escalation. The installer needs root for apt + systemd
-# file writes + journald drop-in + cgroup delegation override. We
-# support four setups:
-#   - Running as root → SUDO="" (no prefix needed).
+# file writes + journald drop-in + cgroup delegation override — but it
+# must RUN as the regular user that will own the stack. Everything it
+# sets up is per-user state: Quadlets in ~/.config/containers/systemd,
+# `systemctl --user` units, linger, rootless podman storage, ~/.signalk.
+# Run as root, all of that lands in root's home and user session — a
+# broken install that LOOKS successful. So we support three setups:
+#   - Running as root (su, root login, `curl … | sudo bash`) →
+#     fail-fast with the switch-to-a-user recipe. Escalation for the
+#     few root-needing steps is the installer's job, via sudo.
 #   - Non-root + sudo present + caller authorized → SUDO="sudo"
 #     (interactive prompt on first use, cached for the rest of the
 #     run).
@@ -200,7 +206,20 @@ SIGNALK_URL=""
 #     controlling tty for the password prompt and the failure mode
 #     is confusing.
 if (( EUID == 0 )); then
-    SUDO=""
+    err "Do not run the installer as root (su / root login / sudo bash)."
+    echo >&2
+    err "The SignalK stack is rootless and tied to a regular user's"
+    err "session: Quadlets, systemd --user units, linger, and ~/.signalk"
+    err "all belong to the user who runs this script. As root they would"
+    err "land in root's home and session instead."
+    echo >&2
+    err "Run it as the user who should own SignalK. If that user can't"
+    err "sudo yet, bootstrap once as root, then RECONNECT the session:"
+    err "  1. apt-get update && apt-get install -y sudo"
+    err "  2. usermod -aG sudo <youruser>"
+    err "  3. Log in as <youruser> (fresh SSH session, not su)."
+    err "  4. Re-run the installer one-liner — it sudo's where needed."
+    exit 1
 elif command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"
 else
