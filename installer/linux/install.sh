@@ -273,6 +273,27 @@ elif [[ "$SUDO" = "sudo" ]]; then
         err "root first:  /usr/sbin/usermod -aG sudo $USER"
         exit 1
     fi
+    # The -nv probe above can't catch every non-sudoer: sudo
+    # authenticates BEFORE the sudoers lookup, so with -n a non-sudoer
+    # often just gets "a password is required" (localized) and sails
+    # past the pattern grep. The denial then surfaced mid-run at the
+    # first real $SUDO call, which warned and carried on into a doomed
+    # install. Validate for real, once, interactively — sudo prompts on
+    # /dev/tty (works under curl|bash), caches the timestamp for the
+    # $SUDO steps that follow, and fails here cleanly for non-sudoers
+    # and for unattended runs without NOPASSWD.
+    if ! sudo -v; then
+        err "sudo validation failed for '$USER' — cannot continue."
+        echo >&2
+        err "Either the password was wrong, or '$USER' is not authorized"
+        err "to use sudo. If you just added the user to the sudo group,"
+        err "CLOSE this SSH session entirely and reconnect, then verify"
+        err "with:  groups | grep -qw sudo && echo OK"
+        echo >&2
+        err "To add the user to the sudo group, run as root:"
+        err "  /usr/sbin/usermod -aG sudo $USER"
+        exit 1
+    fi
 fi
 if [[ "${DEPRECATED_LAN_EXPOSE_SEEN:-0}" = "1" ]]; then
     warn "SIGNALK_LAN_EXPOSE is deprecated — use SIGNALK_LOCALHOST_ONLY=true instead."
