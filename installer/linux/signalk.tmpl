@@ -731,17 +731,37 @@ cmd_bug_report() {
     # those values (keeping option keys so connection schema stays
     # visible); leave the rest of settings.json verbatim.
     if [[ -f "$SIGNALK_DIR/settings.json" ]] && command -v jq >/dev/null 2>&1; then
-        # walk(...) recursively visits every node; we target objects
-        # that look like a provider with .options and replace each
-        # value under .options with "<redacted>" while preserving keys.
-        jq '(.pipedProviders // []) |= map(
-                if (.options | type) == "object"
-                then .options |= with_entries(.value = "<redacted>")
-                else .
-                end
-            )' \
-            "$SIGNALK_DIR/settings.json" >"$bundle/signalk-settings.json" 2>&1 \
-            || echo "# failed to parse $SIGNALK_DIR/settings.json" >"$bundle/signalk-settings.json"
+        # For each pipedProviders entry that has an .options object,
+        # replace every option value with "<redacted>" (keeping the keys
+        # so the connection schema stays visible). The outer guard is
+        # load-bearing: `(.pipedProviders // []) |= map(...)` THROWS
+        # "Invalid path expression with result []" whenever pipedProviders
+        # is absent (jq can't assign back through the // default), which
+        # used to make a perfectly valid settings.json look like it
+        # "failed to parse". Gating on the array type makes the redaction
+        # a no-op when there are no providers, instead of an error.
+        if jq 'if (.pipedProviders | type) == "array"
+                then .pipedProviders |= map(
+                    if (.options | type) == "object"
+                    then .options |= with_entries(.value = "<redacted>")
+                    else . end)
+                else . end' \
+            "$SIGNALK_DIR/settings.json" >"$bundle/signalk-settings.json" 2>/dev/null; then
+            : # redacted copy written
+        elif jq -e . "$SIGNALK_DIR/settings.json" >/dev/null 2>&1; then
+            # Valid JSON, but the redaction filter still failed (an
+            # unexpected pipedProviders shape). Never copy verbatim — that
+            # could leak connection passwords. Drop pipedProviders wholesale
+            # and note it, so the rest of settings.json is still useful.
+            if ! jq 'del(.pipedProviders)' "$SIGNALK_DIR/settings.json" \
+                >"$bundle/signalk-settings.json" 2>/dev/null; then
+                echo "# settings.json present but could not be safely redacted; omitted" \
+                    >"$bundle/signalk-settings.json"
+            fi
+        else
+            echo "# settings.json is not valid JSON (server reads it once at startup, so it may still be running fine)" \
+                >"$bundle/signalk-settings.json"
+        fi
     fi
 
     # Container storage state — surfaces ZFS/idmap hazards.
