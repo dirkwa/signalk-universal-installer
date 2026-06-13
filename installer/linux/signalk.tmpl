@@ -199,6 +199,7 @@ cmd_resetadmin() {
     # enabled" while login still worked. /skServer/loginStatus is
     # unauthenticated and returns authenticationRequired:true under the
     # token strategy, false under the dummy (no-security) strategy.
+    local sk_login_url login_status
     sk_login_url="${SIGNALK_URL%/signalk*}/skServer/loginStatus"
     login_status=$(curl -fsS --max-time 5 "$sk_login_url" 2>/dev/null || true)
     if [ -n "$login_status" ]; then
@@ -211,6 +212,7 @@ cmd_resetadmin() {
     else
         # Server unreachable — fall back to the on-disk strategy, but
         # tell a parse failure apart from a genuinely absent strategy.
+        local sk_settings_state
         sk_settings_state=$(podman exec signalk-server node -e '
             const fs = require("fs");
             const p = "/home/node/.signalk/settings.json";
