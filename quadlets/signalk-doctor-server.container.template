@@ -65,6 +65,15 @@ Volume=%h/.local/bin:/host-bin:rw,Z
 # pseudo-filesystems — no :Z relabel.
 Volume=/sys/fs/cgroup:/host/cgroup:ro
 Volume=/proc/cmdline:/host/proc/cmdline:ro
+# Read-only host block-device tree + mount table so the doctor's
+# storage-type probe can identify the root device (mmcblk = SD card vs
+# nvme/sd = SSD) and its rotational flag. The doctor's own /proc shows the
+# CONTAINER mount table, so the host's /proc/mounts must be bind-mounted
+# explicitly. Used to attribute slow health/probe responses to microSD I/O
+# and recommend an SSD. Both pseudo-filesystems — no :Z relabel. Absent on
+# older installs: the probe reports 'unknown' rather than failing.
+Volume=/sys/block:/host/block:ro
+Volume=/proc/mounts:/host/proc/mounts:ro
 
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/host/dbus
 Environment=QUADLET_DIR=/quadlets
