@@ -366,6 +366,13 @@ info "signalk-server ports: HTTP :${SK_HTTP_PORT}, HTTPS :${SK_HTTPS_PORT}"
 VESSEL_NAME="${SIGNALK_VESSEL_NAME:-}"
 VESSEL_MMSI="${SIGNALK_VESSEL_MMSI:-}"
 VESSEL_CALLSIGN="${SIGNALK_VESSEL_CALLSIGN:-}"
+# Env-driven-ness is decided on the RAW values, before MMSI validation
+# can clear one: an env-driven run whose only value is an invalid MMSI
+# must not fall through to the interactive prompts. A non-empty test
+# (not ${var+x} presence) because the curl|bash re-exec above always
+# forwards all three vars, set-but-empty, on every run.
+VESSEL_ENV_SET=0
+[[ -n "${VESSEL_NAME}${VESSEL_MMSI}${VESSEL_CALLSIGN}" ]] && VESSEL_ENV_SET=1
 if [[ -n "$VESSEL_MMSI" && ! "$VESSEL_MMSI" =~ ^[0-9]{9}$ ]]; then
     warn "SIGNALK_VESSEL_MMSI '$VESSEL_MMSI' is not 9 digits — ignoring it"
     VESSEL_MMSI=""
@@ -374,8 +381,8 @@ VESSEL_SEED=0
 if [[ -f "$HOME/.signalk/baseDeltas.json" || -f "$HOME/.signalk/defaults.json" ]]; then
     # Existing vessel identity — never clobber, and keep re-runs prompt-free.
     :
-elif [[ -n "${VESSEL_NAME}${VESSEL_MMSI}${VESSEL_CALLSIGN}" ]]; then
-    VESSEL_SEED=1
+elif [[ "$VESSEL_ENV_SET" = "1" ]]; then
+    [[ -n "${VESSEL_NAME}${VESSEL_MMSI}${VESSEL_CALLSIGN}" ]] && VESSEL_SEED=1
 elif [[ -r /dev/tty && -w /dev/tty ]]; then
     printf '\n%sVessel identity — pre-fills the admin UI (all optional, Enter to skip).%s\n' \
         "$C_BOLD" "$C_RESET" >/dev/tty
