@@ -123,7 +123,13 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         SIGNALK_VESSEL_NAME="${SIGNALK_VESSEL_NAME:-}" \
         SIGNALK_VESSEL_MMSI="${SIGNALK_VESSEL_MMSI:-}" \
         SIGNALK_VESSEL_CALLSIGN="${SIGNALK_VESSEL_CALLSIGN:-}" \
+        SIGNALK_ADMIN_USER="${SIGNALK_ADMIN_USER:-}" \
         bash "$TMP/installer/linux/install.sh" "$@"
+    # SIGNALK_ADMIN_PASSWORD is intentionally NOT on the `env` argv line
+    # above (that would expose it in `ps` of the env process). It reaches
+    # the child by inheritance instead: `env VAR=val bash` adds to the
+    # inherited environment rather than replacing it, so an exported
+    # password passes straight through, off every command line.
     rc=$?
     cat >/dev/null 2>&1 || true
     exit "$rc"
@@ -426,6 +432,82 @@ elif [[ -r /dev/tty && -w /dev/tty ]]; then
     printf 'VHF call sign: ' >/dev/tty
     read -r VESSEL_CALLSIGN </dev/tty || VESSEL_CALLSIGN=""
     [[ -n "${VESSEL_NAME}${VESSEL_MMSI}${VESSEL_CALLSIGN}" ]] && VESSEL_SEED=1
+fi
+
+# Admin credentials. Collected here, alongside the vessel prompts, and
+# seeded into ~/.signalk/security.json (+ settings.json's
+# security.strategy) right before signalk-server's first start, so the
+# server never boots unsecured on the LAN — closing the window where the
+# admin UI would otherwise show its "create an account" screen to anyone
+# who reaches it first.
+#
+# Interactive: prompt for a username (default "admin") and a password
+# typed twice; mandatory, re-asks on empty/mismatch. The password is
+# read with `read -rs` and never echoed; it travels to the hashing step
+# via a pipe (never argv/env), so it can't leak through `ps` or
+# install.log.
+#
+# Unattended (no TTY): SIGNALK_ADMIN_USER / SIGNALK_ADMIN_PASSWORD. The
+# password env var is forwarded through the curl|bash re-exec by
+# inheritance (exported, NOT placed on the `env` argv line) so it stays
+# off every command line. With no TTY and no password env var the
+# install proceeds UNSECURED with a loud warning — preserving today's
+# behavior for existing automation rather than hard-failing.
+#
+# Skipped entirely when ~/.signalk/security.json already has a users[]
+# array (security already configured): re-runs stay prompt-free and the
+# existing credentials are never touched.
+ADMIN_USER=""
+ADMIN_PASSWORD=""
+ADMIN_SEED=0
+ADMIN_UNSECURED=0
+if command -v jq >/dev/null 2>&1 \
+    && [[ -f "$HOME/.signalk/security.json" ]] \
+    && [[ "$(jq -r 'has("users")' "$HOME/.signalk/security.json" 2>/dev/null)" = "true" ]]; then
+    # Security already configured — leave it alone, ask nothing.
+    :
+elif [[ -n "${SIGNALK_ADMIN_USER:-}" || -n "${SIGNALK_ADMIN_PASSWORD:-}" ]]; then
+    ADMIN_USER="${SIGNALK_ADMIN_USER:-admin}"
+    ADMIN_PASSWORD="${SIGNALK_ADMIN_PASSWORD:-}"
+    if [[ -z "$ADMIN_PASSWORD" ]]; then
+        warn "SIGNALK_ADMIN_USER set without SIGNALK_ADMIN_PASSWORD — cannot create admin; server will start UNSECURED"
+        ADMIN_UNSECURED=1
+    else
+        ADMIN_SEED=1
+    fi
+elif [[ -r /dev/tty && -w /dev/tty ]]; then
+    printf '\n%sAdmin login — secures the server before it goes on the network.%s\n' \
+        "$C_BOLD" "$C_RESET" >/dev/tty
+    printf 'Admin username [admin]: ' >/dev/tty
+    read -r ADMIN_USER </dev/tty || ADMIN_USER=""
+    # Trim and default. signalk-server's own register/login don't trim
+    # consistently across versions (see the username-whitespace lockout),
+    # so we trim here to keep the stored username and the login the
+    # operator types byte-identical.
+    ADMIN_USER="${ADMIN_USER#"${ADMIN_USER%%[![:space:]]*}"}"
+    ADMIN_USER="${ADMIN_USER%"${ADMIN_USER##*[![:space:]]}"}"
+    [[ -z "$ADMIN_USER" ]] && ADMIN_USER="admin"
+    while :; do
+        printf 'Admin password: ' >/dev/tty
+        read -rs ADMIN_PASSWORD </dev/tty || ADMIN_PASSWORD=""
+        printf '\n' >/dev/tty
+        printf 'Confirm password: ' >/dev/tty
+        read -rs _admin_pw2 </dev/tty || _admin_pw2=""
+        printf '\n' >/dev/tty
+        if [[ -z "$ADMIN_PASSWORD" ]]; then
+            printf 'Password must not be empty.\n' >/dev/tty
+        elif [[ "$ADMIN_PASSWORD" != "$_admin_pw2" ]]; then
+            printf 'Passwords do not match — try again.\n' >/dev/tty
+        else
+            break
+        fi
+    done
+    unset _admin_pw2
+    ADMIN_SEED=1
+else
+    warn "No TTY and no SIGNALK_ADMIN_USER/SIGNALK_ADMIN_PASSWORD — server will start UNSECURED"
+    warn "secure it from the admin UI, or re-run with SIGNALK_ADMIN_USER and SIGNALK_ADMIN_PASSWORD set"
+    ADMIN_UNSECURED=1
 fi
 
 # Detect a previous successful install. install.sh's last step (#18)
@@ -1116,6 +1198,76 @@ if [[ "$VESSEL_SEED" = "1" ]] && command -v jq >/dev/null 2>&1; then
     fi
 fi
 
+# Seed admin credentials into ~/.signalk/security.json (+ settings.json's
+# security.strategy) BEFORE the first start, so signalk-server comes up
+# already secured — no window where the LAN sees the "create an account"
+# screen. The bcrypt hash is computed inside the signalk-server image
+# with the server's own bcryptjs, so it's bit-compatible with what the
+# server writes itself and nothing needs installing on the host. The
+# password is piped on stdin (never argv/env) and the node script mints
+# a stable secretKey — without one the server generates a fresh random
+# key every boot, logging everyone (and the doctor token) out on each
+# restart. settings.json's security.strategy is what actually switches
+# auth on; security.json alone does nothing. Both writes are guarded:
+# never overwrite an existing security.json users[] array, never clobber
+# an existing security.strategy.
+if [[ "$ADMIN_SEED" = "1" ]]; then
+    section "Admin login"
+    sk_sec_host="$HOME/.signalk/security.json"
+    if [[ -f "$sk_sec_host" ]] && command -v jq >/dev/null 2>&1 \
+        && [[ "$(jq -r 'has("users")' "$sk_sec_host" 2>/dev/null)" = "true" ]]; then
+        ok "security.json already has users (leaving credentials as-is)"
+    elif sec_result=$(printf '%s' "$ADMIN_PASSWORD" | podman run --rm -i \
+        --userns=keep-id:uid=1000,gid=1000 \
+        -v "$HOME/.signalk:/home/node/.signalk:Z" \
+        --workdir /home/node/signalk \
+        --entrypoint node \
+        "$SK_IMAGE" \
+        -e '
+            const fs = require("fs");
+            const crypto = require("crypto");
+            const bcrypt = require("bcryptjs");
+            const path = "/home/node/.signalk/security.json";
+            const username = process.argv[1];
+            const password = fs.readFileSync(0, "utf8");
+            const config = fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, "utf8")) : {};
+            if (Array.isArray(config.users) && config.users.length) {
+                console.log("exists");
+                process.exit(0);
+            }
+            if (!config.secretKey) config.secretKey = crypto.randomBytes(256).toString("hex");
+            if (typeof config.allow_readonly !== "boolean") config.allow_readonly = false;
+            config.users = [{ username, type: "admin", password: bcrypt.hashSync(password, bcrypt.genSaltSync(10)) }];
+            fs.writeFileSync(path + ".tmp", JSON.stringify(config, null, 2), { mode: 0o600 });
+            fs.renameSync(path + ".tmp", path);
+            console.log("created");
+        ' "$ADMIN_USER" 2>/dev/null); then
+        # Switch auth on. settings.json may not exist yet; jq seeds it.
+        sk_settings="$HOME/.signalk/settings.json"
+        [[ -f "$sk_settings" ]] || echo '{}' >"$sk_settings"
+        if command -v jq >/dev/null 2>&1 \
+            && [[ "$(jq -r 'has("security")' "$sk_settings" 2>/dev/null)" != "true" ]]; then
+            tmp=$(mktemp "${sk_settings}.XXXXXX")
+            if jq '.security = {strategy: "./tokensecurity"}' "$sk_settings" >"$tmp" 2>/dev/null; then
+                mv -f "$tmp" "$sk_settings"
+            else
+                rm -f "$tmp"
+                warn "could not enable security in settings.json; set it in the admin UI"
+            fi
+        fi
+        if [[ "$sec_result" = "exists" ]]; then
+            ok "security.json already had users (left as-is)"
+        else
+            ok "created admin user '$ADMIN_USER' — server starts secured"
+        fi
+    else
+        warn "could not seed admin credentials; server will start UNSECURED — set up security in the admin UI"
+        ADMIN_UNSECURED=1
+    fi
+fi
+# Don't keep the plaintext password around any longer than necessary.
+unset ADMIN_PASSWORD
+
 # 14. Bring up signalk-server (prefer updater REST, fall back to systemctl).
 # The updater may have JUST been restarted by the daemon-reload above and
 # need a few seconds to settle dockerode against the podman socket — retry
@@ -1177,23 +1329,29 @@ DOCTOR_TOKEN_PATH="$HOME/.signalk-doctor/signalk-token"
 SK_TOKEN_BIN=/home/node/signalk/node_modules/signalk-server/bin/signalk-generate-token
 SK_SECURITY_PATH=/home/node/.signalk/security.json
 section "Doctor admin token"
+# The token's `id` claim must match an admin in security.json's users[].
+# Prefer the user we just seeded; on re-runs (or operator-set security)
+# read the first admin straight from the host-side file — it's
+# host-readable, no podman needed. Fall back to "admin".
+sk_admin_user="$ADMIN_USER"
+if [[ -z "$sk_admin_user" ]] && command -v jq >/dev/null 2>&1; then
+    sk_admin_user=$(jq -r '[.users[]? | select(.type == "admin")][0].username // empty' \
+        "$HOME/.signalk/security.json" 2>/dev/null)
+fi
+[[ -z "$sk_admin_user" ]] && sk_admin_user="admin"
 if [[ -s "$DOCTOR_TOKEN_PATH" ]]; then
     ok "doctor token already present at $DOCTOR_TOKEN_PATH (skipping)"
 elif ! podman exec signalk-server test -s "$SK_SECURITY_PATH" 2>/dev/null; then
-    warn "signalk-server has no security.json yet — enable security in the admin UI then re-run the installer"
+    warn "signalk-server has no security.json yet — re-run with SIGNALK_ADMIN_USER/SIGNALK_ADMIN_PASSWORD, or set up security in the admin UI then re-run"
     warn "without this, the doctor's drift scan stays offline ('Last successful scan: never')"
 elif ! podman exec signalk-server grep -q '"users"' "$SK_SECURITY_PATH" 2>/dev/null; then
     warn "signalk-server security.json exists but has no users — finish security setup in the admin UI, then re-run"
 else
-    # The token generator writes to stdout. Use `-u admin` because
-    # signalk-server's auth middleware only honors tokens whose `id`
-    # claim matches a user in security.json's users[] — there's no CLI
-    # to add a dedicated "doctor" user without hand-editing the JSON,
-    # and the diagnostics endpoint we're after is admin-gated anyway.
-    # -e 5y is long enough that we don't need to babysit rotation. The
-    # doctor invalidates its own cache on 401/403, so rotating later is
-    # "regenerate, overwrite this file" — no doctor restart needed.
-    if token=$(podman exec signalk-server "$SK_TOKEN_BIN" -u admin -e 5y -s "$SK_SECURITY_PATH" 2>/dev/null); then
+    # The token generator writes to stdout. -e 5y is long enough that we
+    # don't need to babysit rotation. The doctor invalidates its own
+    # cache on 401/403, so rotating later is "regenerate, overwrite this
+    # file" — no doctor restart needed.
+    if token=$(podman exec signalk-server "$SK_TOKEN_BIN" -u "$sk_admin_user" -e 5y -s "$SK_SECURITY_PATH" 2>/dev/null); then
         if [[ -n "$token" ]]; then
             mkdir -p "$(dirname "$DOCTOR_TOKEN_PATH")"
             old_umask=$(umask)
@@ -1207,7 +1365,7 @@ else
         fi
     else
         warn "signalk-generate-token failed; doctor drift will stay offline"
-        warn "you can retry with:  podman exec signalk-server $SK_TOKEN_BIN -u admin -e 5y -s $SK_SECURITY_PATH"
+        warn "you can retry with:  podman exec signalk-server $SK_TOKEN_BIN -u $sk_admin_user -e 5y -s $SK_SECURITY_PATH"
     fi
 fi
 
@@ -1515,11 +1673,20 @@ if [[ "$VESSEL_SEED" = "1" && -n "$VESSEL_NAME" ]]; then
   Vessel           : ${VESSEL_NAME} (edit under Server → Settings)"
 fi
 
+LOGIN_SUMMARY=""
+if [[ "$ADMIN_SEED" = "1" && "$ADMIN_UNSECURED" != "1" ]]; then
+    LOGIN_SUMMARY="
+  Admin login      : ${sk_admin_user} (the password you set; recover with 'signalk resetadmin')"
+elif [[ "$ADMIN_UNSECURED" = "1" ]]; then
+    LOGIN_SUMMARY="
+  Admin login      : NONE — server is UNSECURED; create an admin in the UI now"
+fi
+
 cat <<EOF
 
 ${SUMMARY_HEADLINE}
 
-  SignalK admin UI : http://${DISPLAY_HOST}:${SK_HTTP_PORT}${VESSEL_SUMMARY}
+  SignalK admin UI : http://${DISPLAY_HOST}:${SK_HTTP_PORT}${VESSEL_SUMMARY}${LOGIN_SUMMARY}
   Updater Console  : http://${DISPLAY_HOST}:3003
   Doctor Console   : http://${DISPLAY_HOST}:3004
 
