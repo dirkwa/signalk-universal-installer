@@ -189,17 +189,71 @@ cmd_resetadmin() {
         exit 1
     fi
 
-    # Security is switched on by settings.json's security.strategy, not
-    # by security.json existing. If no strategy is configured there is
-    # no login screen to be locked out of — creating an admin here would
-    # silently NOT enable security, so refuse instead.
-    if ! podman exec signalk-server node -e '
-        const settings = JSON.parse(require("fs").readFileSync("/home/node/.signalk/settings.json", "utf8"));
-        process.exit(settings.security && settings.security.strategy ? 0 : 1);
-    ' 2>/dev/null; then
-        echo "[ERR] Security is not enabled on this server — there is no admin login to reset." >&2
-        echo "      Enable security from the Admin UI instead (Security > Users)." >&2
-        exit 1
+    # Is security actually on? Ask the RUNNING server, not the on-disk
+    # settings.json. The server parses settings.json once at startup and
+    # then serves from memory, so a file that no longer strict-parses as
+    # JSON (a stray comment, trailing comma, BOM, half-written edit) can
+    # sit on disk while the server runs perfectly secured. The old gate
+    # re-read + JSON.parse'd that file here and treated a parse failure
+    # the same as "no strategy configured" — printing "security is not
+    # enabled" while login still worked. /skServer/loginStatus is
+    # unauthenticated and returns authenticationRequired:true under the
+    # token strategy, false under the dummy (no-security) strategy.
+    # NOTE: no `curl -f`. With -f a reachable server that answers 4xx/5xx
+    # (the loginStatus rate-limiter's 429, a transient 503 during
+    # startup) exits non-zero and would look identical to "unreachable",
+    # wrongly dropping to the disk path. Instead capture the body and the
+    # HTTP status separately: only a genuine connect/timeout failure
+    # (empty status, or 000) is "unreachable"; a reachable server whose
+    # body matches neither true nor false is ambiguous and we fail
+    # closed rather than guess.
+    local sk_login_url login_resp login_http login_body
+    sk_login_url="${SIGNALK_URL%/signalk*}/skServer/loginStatus"
+    login_resp=$(curl -sS --max-time 5 -w '\n%{http_code}' "$sk_login_url" 2>/dev/null || true)
+    login_http=${login_resp##*$'\n'}
+    login_body=${login_resp%$'\n'*}
+    if [ -n "$login_http" ] && [ "$login_http" != "000" ]; then
+        # Server answered — trust it over the file.
+        if printf '%s' "$login_body" | grep -Eq '"authenticationRequired"[[:space:]]*:[[:space:]]*false'; then
+            echo "[ERR] Security is not enabled on this server — there is no admin login to reset." >&2
+            echo "      Enable security from the Admin UI instead (Security > Users)." >&2
+            exit 1
+        elif ! printf '%s' "$login_body" | grep -Eq '"authenticationRequired"[[:space:]]*:[[:space:]]*true'; then
+            echo "[ERR] Unexpected response from $sk_login_url (HTTP $login_http) — cannot confirm security state." >&2
+            echo "      Retry in a moment; if it persists, check the server logs." >&2
+            exit 1
+        fi
+    else
+        # Server unreachable — fall back to the on-disk strategy, but
+        # tell a parse failure apart from a genuinely absent strategy.
+        local sk_settings_state
+        sk_settings_state=$(podman exec signalk-server node -e '
+            const fs = require("fs");
+            const p = "/home/node/.signalk/settings.json";
+            let raw;
+            try { raw = fs.readFileSync(p, "utf8"); } catch (e) { console.log("missing"); process.exit(0); }
+            try { const s = JSON.parse(raw); console.log(s.security && s.security.strategy ? "enabled" : "disabled"); }
+            catch (e) { console.log("unparseable"); }
+        ' 2>/dev/null || echo "execfail")
+        case "$sk_settings_state" in
+            enabled) : ;; # security configured on disk — proceed
+            disabled | missing)
+                echo "[ERR] Security is not enabled on this server — there is no admin login to reset." >&2
+                echo "      Enable security from the Admin UI instead (Security > Users)." >&2
+                exit 1
+                ;;
+            unparseable)
+                echo "[ERR] ~/.signalk/settings.json is not valid JSON — cannot determine security state." >&2
+                echo "      The running server may still be fine (it parses settings once at startup)." >&2
+                echo "      Fix the file, then retry. To see the error:" >&2
+                echo "        podman exec signalk-server node -e 'JSON.parse(require(\"fs\").readFileSync(\"/home/node/.signalk/settings.json\",\"utf8\"))'" >&2
+                exit 1
+                ;;
+            *)
+                echo "[ERR] Could not determine security state (server unreachable and settings.json unreadable)." >&2
+                exit 1
+                ;;
+        esac
     fi
 
     local pw pw2
