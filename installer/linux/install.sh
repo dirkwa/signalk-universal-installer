@@ -1707,6 +1707,7 @@ The 'signalk' command:
   signalk recover        delegate to the SSH-only recovery script
   signalk socketcan      Pi CAN-HAT detection + setup recipe
   signalk update         refresh installer scripts + Quadlet templates via doctor
+  signalk resetadmin     reset (or create) the Admin UI login password
   signalk bug-report     bundle logs + state for an issue report
   signalk uninstall      stop services + remove Quadlets (preserves data)
   signalk help           full usage
