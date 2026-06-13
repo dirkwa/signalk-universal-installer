@@ -43,6 +43,50 @@ echo
 echo "=== Container snapshot ==="
 podman ps -a --filter 'name=signalk-' --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>/dev/null || true
 
+# Root storage type. Twin of the doctor container's storage-type probe (CC-3),
+# but reads the host's real /proc + /sys directly so it works with zero
+# containers running. microSD I/O stalls are the usual cause of slow health
+# responses; flag it and point at the SSD fix.
+echo
+echo "=== Host root storage ==="
+root_storage() {
+    local dev base rot
+    dev=$(awk '$2=="/"{print $1; exit}' /proc/mounts 2>/dev/null)
+    if [[ -z "$dev" || "$dev" != /dev/* ]]; then
+        echo "  could not determine root device"
+        return
+    fi
+    base=${dev#/dev/}
+    case "$base" in
+        # Partitioned mmcblk/nvme: strip the pN suffix, keep the device index
+        # (mmcblk0p2 -> mmcblk0, nvme0n1p2 -> nvme0n1). A bare mmcblk0/nvme0n1
+        # (root on the whole device) matches neither arm and is left intact.
+        mmcblk*p[0-9]* | nvme*n[0-9]*p[0-9]*) base=${base%p[0-9]*} ;;
+        # Traditional disks only — strip trailing partition digits. Scoped so
+        # it can't over-strip a bare nvme/mmc device number.
+        sd*[0-9] | hd*[0-9] | vd*[0-9] | xvd*[0-9]) base=${base%%[0-9]*} ;;
+    esac
+    rot=$(cat "/sys/block/$base/queue/rotational" 2>/dev/null || echo "?")
+    case "$base" in
+        mmcblk*)
+            echo "  [WARN] root on SD card ($base) — microSD I/O stalls cause slow"
+            echo "         health/probe responses; a USB3/NVMe SSD removes them"
+            ;;
+        nvme*)
+            echo "  [OK]   root on $base (NVMe SSD)" ;;
+        *)
+            if [[ "$rot" == "0" ]]; then
+                echo "  [OK]   root on $base (SSD/flash)"
+            elif [[ "$rot" == "1" ]]; then
+                echo "  [OK]   root on $base (spinning disk)"
+            else
+                echo "  [OK]   root on $base"
+            fi
+            ;;
+    esac
+}
+root_storage
+
 echo
 echo "For deeper diagnostics:"
 echo "  curl -fsS $DOCTOR_URL/api/probes | jq ."

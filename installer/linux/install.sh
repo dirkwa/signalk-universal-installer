@@ -1581,13 +1581,19 @@ if [[ "$VERIFY_MODE" = "1" ]]; then
         fi
     done
 
-    # Three URLs answering
-    if curl -fsS -o /dev/null -m 5 "$UPDATER_URL/api/health" 2>/dev/null; then
+    # Three URLs answering. Retry briefly (20s) rather than a single 5s
+    # one-shot: on a busy first boot (cold plugin install, image pulls,
+    # questdb/grafana starting) the engine containers — the doctor especially,
+    # on a low-end Pi/SD-card host — can take a few seconds to answer their own
+    # /api/health, enough to trip a bare 5s curl even though the service is
+    # fine. The step-13 gate already waits 180s; this shorter post-settle
+    # budget keeps a genuinely-down service reporting unreachable promptly.
+    if wait_for_http "$UPDATER_URL/api/health" 20; then
         verify_check "updater health (:3003)" "ok"
     else
         verify_check "updater health (:3003)" "unreachable"
     fi
-    if curl -fsS -o /dev/null -m 5 "$DOCTOR_URL/api/health" 2>/dev/null; then
+    if wait_for_http "$DOCTOR_URL/api/health" 20; then
         verify_check "doctor health (:3004)" "ok"
     else
         verify_check "doctor health (:3004)" "unreachable"

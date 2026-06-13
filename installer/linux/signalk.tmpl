@@ -36,7 +36,29 @@ cmd_version() {
     echo "signalk $SK_VERSION"
 }
 
+# Probe a URL up to 3 times (5s each, ~2s apart) and report the last
+# response time on stdout. Echoes "ok <seconds>" on a 2xx/3xx, or "fail".
+# Retrying matters on a busy/SD-card host where a healthy engine can take a
+# few seconds to answer — a single 5s one-shot mislabels that as down.
+health_probe() {
+    local url=$1 t
+    local attempt
+    for attempt in 1 2 3; do
+        [[ $attempt -gt 1 ]] && sleep 2
+        if t=$(curl -fsS -o /dev/null -m 5 -w '%{time_total}' "$url" 2>/dev/null); then
+            echo "ok $t"
+            return 0
+        fi
+    done
+    echo "fail"
+    return 1
+}
+
 cmd_health() {
+    # Reachable but slower than this (seconds) reads as I/O contention, not a
+    # clean bill of health — usually a microSD root (see 'signalk recover
+    # doctor' → the Host root storage probe). An SSD removes it.
+    local slow_secs=1.5
     echo "=== SignalK Stack Health ==="
     for entry in \
         "signalk-server  $SIGNALK_URL" \
@@ -44,10 +66,13 @@ cmd_health() {
         "doctor (:3004)  $DOCTOR_URL/api/health"; do
         name=${entry% *}
         url=${entry##* }
-        if curl -fsS -o /dev/null -m 5 "$url"; then
-            printf '  [OK]   %-20s %s\n' "$name" "$url"
-        else
+        read -r status secs < <(health_probe "$url")
+        if [[ "$status" != "ok" ]]; then
             printf '  [FAIL] %-20s %s\n' "$name" "$url"
+        elif awk -v s="$secs" -v lim="$slow_secs" 'BEGIN{exit !(s>lim)}'; then
+            printf '  [SLOW] %-20s %s  (%ss — likely disk I/O; an SSD helps)\n' "$name" "$url" "$secs"
+        else
+            printf '  [OK]   %-20s %s\n' "$name" "$url"
         fi
     done
 
