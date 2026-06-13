@@ -199,14 +199,28 @@ cmd_resetadmin() {
     # enabled" while login still worked. /skServer/loginStatus is
     # unauthenticated and returns authenticationRequired:true under the
     # token strategy, false under the dummy (no-security) strategy.
-    local sk_login_url login_status
+    # NOTE: no `curl -f`. With -f a reachable server that answers 4xx/5xx
+    # (the loginStatus rate-limiter's 429, a transient 503 during
+    # startup) exits non-zero and would look identical to "unreachable",
+    # wrongly dropping to the disk path. Instead capture the body and the
+    # HTTP status separately: only a genuine connect/timeout failure
+    # (empty status, or 000) is "unreachable"; a reachable server whose
+    # body matches neither true nor false is ambiguous and we fail
+    # closed rather than guess.
+    local sk_login_url login_resp login_http login_body
     sk_login_url="${SIGNALK_URL%/signalk*}/skServer/loginStatus"
-    login_status=$(curl -fsS --max-time 5 "$sk_login_url" 2>/dev/null || true)
-    if [ -n "$login_status" ]; then
+    login_resp=$(curl -sS --max-time 5 -w '\n%{http_code}' "$sk_login_url" 2>/dev/null || true)
+    login_http=${login_resp##*$'\n'}
+    login_body=${login_resp%$'\n'*}
+    if [ -n "$login_http" ] && [ "$login_http" != "000" ]; then
         # Server answered — trust it over the file.
-        if printf '%s' "$login_status" | grep -q '"authenticationRequired":[[:space:]]*false'; then
+        if printf '%s' "$login_body" | grep -Eq '"authenticationRequired"[[:space:]]*:[[:space:]]*false'; then
             echo "[ERR] Security is not enabled on this server — there is no admin login to reset." >&2
             echo "      Enable security from the Admin UI instead (Security > Users)." >&2
+            exit 1
+        elif ! printf '%s' "$login_body" | grep -Eq '"authenticationRequired"[[:space:]]*:[[:space:]]*true'; then
+            echo "[ERR] Unexpected response from $sk_login_url (HTTP $login_http) — cannot confirm security state." >&2
+            echo "      Retry in a moment; if it persists, check the server logs." >&2
             exit 1
         fi
     else
