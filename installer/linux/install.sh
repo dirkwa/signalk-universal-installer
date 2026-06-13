@@ -897,6 +897,56 @@ signalk_server_drift_reason() {
     echo ""
 }
 
+# Capture a failed unit's status + recent journal to stderr, indented. Shared
+# by the signalk-server drift-apply restart and restart_peer_unit so the most
+# important restart (the server) gets the same diagnostics the peers already do.
+capture_unit_failure() {
+    local unit=$1
+    {
+        echo "--- systemctl --user status \"$unit\" ---"
+        systemctl --user --no-pager --full status "$unit" 2>&1 || true
+        echo
+        echo "--- journalctl --user -n 50 -u \"$unit\" ---"
+        journalctl --user --no-pager -n 50 -u "$unit" 2>&1 || true
+    } | sed 's/^/    /' >&2
+}
+
+# A `systemctl start` that times out (Result: timeout, container KILLed) with no
+# crashloop in the journal is, on SD-card hosts especially, almost always
+# podman blocking on a DAMAGED or INCOMPLETE overlay layer — an image whose
+# extraction was interrupted (a Ctrl-C'd run, a power blip) leaves a layer
+# `podman run` can't mount, so conmon never signals ready and systemd kills it
+# at TimeoutStartSec. `podman system check --quick` reports this without
+# mutating anything; if it finds trouble we print the exact (operator-run,
+# non-destructive-first) repair recipe. We do NOT auto-repair: rewriting the
+# rootless store unprompted mid-install is riskier than telling the operator
+# what to run. Best-effort and never fatal — a podman without `system check`
+# (very old) just yields no extra output.
+#
+# Predicate return: 0 = damage found (and recipe printed), 1 = store clean.
+# Call sites need `|| true` because under `set -e` the bare 1 would abort the
+# installer; the value is exposed so a future caller can branch on it.
+warn_if_storage_damaged() {
+    command -v podman >/dev/null 2>&1 || return 0
+    local report
+    report=$(podman system check --quick 2>&1) || true
+    # `--quick` prints "Damaged layer ..." / "incomplete layer" when the store
+    # is inconsistent, and nothing (exit 0) when it's clean.
+    if printf '%s' "$report" | grep -qiE 'damaged layer|incomplete layer|layer content modified'; then
+        warn "podman's image store has damaged/incomplete layers — this is the usual"
+        warn "cause of a server start that times out without crash-looping (an"
+        warn "interrupted image pull on slow SD-card storage). Recover with:"
+        warn "    systemctl --user stop signalk-server signalk-updater-server signalk-doctor-server"
+        warn "    podman system check --repair && podman system prune -f"
+        warn "    podman pull ${SK_IMAGE:-ghcr.io/dirkwa/signalk-server:dirkwa}"
+        warn "    systemctl --user start signalk-doctor-server signalk-updater-server signalk-server"
+        warn "  If it still fails, the heavier reset (preserves ~/.signalk data, which"
+        warn "  is bind-mounted): podman system reset -f  then re-run this installer."
+        return 0
+    fi
+    return 1
+}
+
 snapshot_existing signalk-server.container
 snapshot_existing signalk-updater-server.container
 snapshot_existing signalk-doctor-server.container
@@ -973,7 +1023,12 @@ else
     if systemctl --user restart signalk-server.service; then
         ok "signalk-server restarted"
     else
-        warn "systemctl --user restart signalk-server.service failed"
+        warn "systemctl --user restart signalk-server.service failed — capturing diagnostics:"
+        capture_unit_failure signalk-server.service
+        # A timeout here is most often a damaged overlay layer, not a slow
+        # start; surface the repair recipe when the store is inconsistent.
+        warn_if_storage_damaged || true
+        warn "continuing — the 'signalk' CLI is already installed for recovery (signalk bug-report, signalk uninstall)"
     fi
 fi
 
@@ -1002,13 +1057,8 @@ restart_peer_unit() {
         return 0
     fi
     warn "$unit failed to restart — capturing diagnostics:"
-    {
-        echo "--- systemctl --user status $unit ---"
-        systemctl --user --no-pager --full status "$unit" 2>&1 || true
-        echo
-        echo "--- journalctl --user -n 50 -u $unit ---"
-        journalctl --user --no-pager -n 50 -u "$unit" 2>&1 || true
-    } | sed 's/^/    /' >&2
+    capture_unit_failure "$unit"
+    warn_if_storage_damaged || true
     warn "continuing — health checks below will retry, and 'signalk bug-report' captures full state"
     return 1
 }
