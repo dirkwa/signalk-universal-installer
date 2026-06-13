@@ -65,15 +65,16 @@ Volume=%h/.local/bin:/host-bin:rw,Z
 # pseudo-filesystems — no :Z relabel.
 Volume=/sys/fs/cgroup:/host/cgroup:ro
 Volume=/proc/cmdline:/host/proc/cmdline:ro
-# Read-only host block-device tree + mount table so the doctor's
-# storage-type probe can identify the root device (mmcblk = SD card vs
-# nvme/sd = SSD) and its rotational flag. The doctor's own /proc shows the
-# CONTAINER mount table, so the host's /proc/mounts must be bind-mounted
-# explicitly. Used to attribute slow health/probe responses to microSD I/O
-# and recommend an SSD. Both pseudo-filesystems — no :Z relabel. Absent on
-# older installs: the probe reports 'unknown' rather than failing.
-Volume=/sys/block:/host/block:ro
-Volume=/proc/mounts:/host/proc/mounts:ro
+# Read-only host /sys so the doctor's storage-type probe can identify the
+# root device (mmcblk = SD card vs nvme/sd = SSD) and its rotational flag,
+# to attribute slow health/probe responses to microSD I/O and recommend an
+# SSD. The whole /sys is needed, not just /sys/block: a block device is a
+# symlink into /sys/devices, and the probe resolves it via
+# /sys/dev/block/<maj:min> keyed off stat(/data) — /proc/mounts is a symlink
+# that can't be bind-mounted into this userns (reads back EINVAL), so we
+# avoid the mount table entirely. Pseudo-filesystem — no :Z relabel. Absent
+# on older installs: the probe reports 'unknown' rather than failing.
+Volume=/sys:/host/sys:ro
 
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/host/dbus
 Environment=QUADLET_DIR=/quadlets
