@@ -21,9 +21,29 @@ set -euo pipefail
 
 SK_VERSION="__SK_VERSION__"
 
+# Resolve signalk-server's HTTP port at RUN time from the rendered Quadlet
+# (Environment=PORT=, written by the installer/doctor; 80 or 3000), rather
+# than baking it in at install time. The doctor's installer-refresh rewrites
+# this script byte-for-byte from GitHub Pages, where only __SK_VERSION__ is
+# substituted — a baked __SK_HTTP_PORT__ placeholder would survive verbatim
+# and break every URL built from it (the reason `signalk health` and
+# `resetadmin` failed with "Port number was not a decimal number"). Reading
+# the port live keeps the script self-correcting and tracks a later port
+# change for free. Same lookup as scripts/doctor.sh::sk_http_port.
+sk_http_port() {
+    local q="${HOME}/.config/containers/systemd/signalk-server.container"
+    local p
+    # `|| true`: a missing Quadlet makes sed exit 2, which pipefail propagates.
+    # Today both call sites wrap this in $(...) (where set -e is suspended), so
+    # the ${p:-80} fallback applies; the guard keeps it correct even if called
+    # bare as a statement.
+    p=$(sed -n 's/^Environment=PORT=\([0-9][0-9]*\).*/\1/p' "$q" 2>/dev/null | head -1 || true)
+    printf '%s' "${p:-80}"
+}
+
 UPDATER_URL=${UPDATER_URL:-http://127.0.0.1:3003}
 DOCTOR_URL=${DOCTOR_URL:-http://127.0.0.1:3004}
-SIGNALK_URL=${SIGNALK_URL:-http://127.0.0.1:__SK_HTTP_PORT__/signalk}
+SIGNALK_URL=${SIGNALK_URL:-http://127.0.0.1:$(sk_http_port)/signalk}
 DOCTOR_DATA="${DOCTOR_DATA:-${HOME}/.signalk-doctor}"
 QUADLET_DIR="${HOME}/.config/containers/systemd"
 UNITS=(signalk-server signalk-updater-server signalk-doctor-server)
@@ -241,7 +261,11 @@ cmd_resetadmin() {
         # Server answered — trust it over the file.
         if printf '%s' "$login_body" | grep -Eq '"authenticationRequired"[[:space:]]*:[[:space:]]*false'; then
             echo "[ERR] Security is not enabled on this server — there is no admin login to reset." >&2
-            echo "      Enable security from the Admin UI instead (Security > Users)." >&2
+            echo "      On an unsecured server the Admin UI shows a 'create account' screen" >&2
+            echo "      (not a Security > Users page). To enable security and create the first" >&2
+            echo "      admin without a fresh reinstall, re-run the installer with credentials:" >&2
+            echo "        SIGNALK_ADMIN_USER=admin SIGNALK_ADMIN_PASSWORD=yourpass \\" >&2
+            echo "          curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash" >&2
             exit 1
         elif ! printf '%s' "$login_body" | grep -Eq '"authenticationRequired"[[:space:]]*:[[:space:]]*true'; then
             echo "[ERR] Unexpected response from $sk_login_url (HTTP $login_http) — cannot confirm security state." >&2
@@ -263,8 +287,14 @@ cmd_resetadmin() {
         case "$sk_settings_state" in
             enabled) : ;; # security configured on disk — proceed
             disabled | missing)
-                echo "[ERR] Security is not enabled on this server — there is no admin login to reset." >&2
-                echo "      Enable security from the Admin UI instead (Security > Users)." >&2
+                echo "[ERR] settings.json has no security strategy and the server was unreachable," >&2
+                echo "      so security looks disabled — but the RUNNING server may still be secured" >&2
+                echo "      (it reads settings.json once at startup; disk can lag). First make sure" >&2
+                echo "      signalk-server is up and retry — a reachable secured server lets this" >&2
+                echo "      command proceed. If security really is off, enable it + create the first" >&2
+                echo "      admin without a fresh reinstall by re-running the installer with creds:" >&2
+                echo "        SIGNALK_ADMIN_USER=admin SIGNALK_ADMIN_PASSWORD=yourpass \\" >&2
+                echo "          curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash" >&2
                 exit 1
                 ;;
             unparseable)

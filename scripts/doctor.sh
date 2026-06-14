@@ -13,7 +13,9 @@ set -euo pipefail
 sk_http_port() {
     local q="${HOME}/.config/containers/systemd/signalk-server.container"
     local p
-    p=$(sed -n 's/^Environment=PORT=\([0-9][0-9]*\).*/\1/p' "$q" 2>/dev/null | head -1)
+    # `|| true`: a missing Quadlet makes sed exit 2 (pipefail propagates it);
+    # keep the ${p:-80} fallback reachable regardless of call site.
+    p=$(sed -n 's/^Environment=PORT=\([0-9][0-9]*\).*/\1/p' "$q" 2>/dev/null | head -1 || true)
     printf '%s' "${p:-80}"
 }
 
