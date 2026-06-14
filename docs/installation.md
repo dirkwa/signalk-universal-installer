@@ -108,6 +108,8 @@ CAN, Bluetooth, and GPIO are **not supported** on macOS Podman Machine.
 
 ## Windows (WSL2)
 
+**Requires Windows 11** (or Server 2022). The stack runs in a WSL2 Debian distro and needs systemd, whose opt-in (`/etc/wsl.conf` `[boot] systemd=true`) is Windows 11 only. Windows 10 is not supported.
+
 Open PowerShell **as administrator**:
 
 ```powershell
@@ -116,11 +118,21 @@ iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows
 
 The Windows installer:
 
-1. Checks for Administrator + Windows 10 build 19041+ / Windows 11.
-2. Runs `wsl --install -d Debian` if WSL is missing.
-3. Hands off to the Linux installer inside WSL.
+1. Checks for Administrator and Windows 11.
+2. Ensures Store WSL ≥ 2.6.0 (`wsl --update` if older), then runs `wsl --install -d Debian` if the distro is missing.
+3. **Enables systemd inside the distro** (writes `/etc/wsl.conf` `[boot] systemd=true` plus `mount --make-rshared /` for rootless podman), provisions a default sudo user non-interactively, and verifies systemd is PID 1 and the user session bus + linger are up.
+4. Hands off to the Linux installer inside WSL.
 
-Result: the same container stack as Linux, accessible from Windows via WSL's automatic localhost port forwarding.
+A fresh `wsl --install` usually needs **one reboot** (to enable the VirtualMachinePlatform Windows feature). The installer detects this, prints a "reboot, then re-run" message, and exits cleanly; it is idempotent, so re-running after the reboot resumes where it left off.
+
+Result: the same container stack as Linux, accessible from Windows via WSL's automatic localhost port forwarding — open `http://localhost:3000` / `:3003` / `:3004`.
+
+### Windows troubleshooting
+
+- **"systemd did not come up as PID 1"** — run `wsl --shutdown` from PowerShell and re-run the installer. Confirm `wsl --version` reports ≥ 2.6.0 and that this is Windows 11.
+- **"user session isn't fully up" / `/run/user/<uid>` owned by root** — a known WSL bug where the per-user systemd manager doesn't start cleanly. `wsl --shutdown` and re-run usually clears it. The installer runs `loginctl enable-linger` and checks for the user bus before handing off, so it fails here rather than mid-install.
+- **WSL won't start after the reboot** — confirm hardware virtualization (VT-x / AMD-V) is enabled in BIOS/UEFI.
+- **Existing Debian distro on bookworm** — the installer aborts (bookworm's podman 4.3.1 has no Quadlet). Upgrade the distro to trixie, or `wsl --unregister Debian` and re-run for a fresh trixie image.
 
 ### Windows USB serial
 
