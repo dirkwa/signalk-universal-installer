@@ -33,7 +33,11 @@ SK_VERSION="__SK_VERSION__"
 sk_http_port() {
     local q="${HOME}/.config/containers/systemd/signalk-server.container"
     local p
-    p=$(sed -n 's/^Environment=PORT=\([0-9][0-9]*\).*/\1/p' "$q" 2>/dev/null | head -1)
+    # `|| true`: a missing Quadlet makes sed exit 2, which pipefail propagates.
+    # Today both call sites wrap this in $(...) (where set -e is suspended), so
+    # the ${p:-80} fallback applies; the guard keeps it correct even if called
+    # bare as a statement.
+    p=$(sed -n 's/^Environment=PORT=\([0-9][0-9]*\).*/\1/p' "$q" 2>/dev/null | head -1 || true)
     printf '%s' "${p:-80}"
 }
 
