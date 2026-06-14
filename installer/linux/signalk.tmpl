@@ -257,7 +257,11 @@ cmd_resetadmin() {
         # Server answered — trust it over the file.
         if printf '%s' "$login_body" | grep -Eq '"authenticationRequired"[[:space:]]*:[[:space:]]*false'; then
             echo "[ERR] Security is not enabled on this server — there is no admin login to reset." >&2
-            echo "      Enable security from the Admin UI instead (Security > Users)." >&2
+            echo "      On an unsecured server the Admin UI shows a 'create account' screen" >&2
+            echo "      (not a Security > Users page). To enable security and create the first" >&2
+            echo "      admin without a fresh reinstall, re-run the installer with credentials:" >&2
+            echo "        SIGNALK_ADMIN_USER=admin SIGNALK_ADMIN_PASSWORD=yourpass \\" >&2
+            echo "          curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash" >&2
             exit 1
         elif ! printf '%s' "$login_body" | grep -Eq '"authenticationRequired"[[:space:]]*:[[:space:]]*true'; then
             echo "[ERR] Unexpected response from $sk_login_url (HTTP $login_http) — cannot confirm security state." >&2
@@ -279,8 +283,14 @@ cmd_resetadmin() {
         case "$sk_settings_state" in
             enabled) : ;; # security configured on disk — proceed
             disabled | missing)
-                echo "[ERR] Security is not enabled on this server — there is no admin login to reset." >&2
-                echo "      Enable security from the Admin UI instead (Security > Users)." >&2
+                echo "[ERR] settings.json has no security strategy and the server was unreachable," >&2
+                echo "      so security looks disabled — but the RUNNING server may still be secured" >&2
+                echo "      (it reads settings.json once at startup; disk can lag). First make sure" >&2
+                echo "      signalk-server is up and retry — a reachable secured server lets this" >&2
+                echo "      command proceed. If security really is off, enable it + create the first" >&2
+                echo "      admin without a fresh reinstall by re-running the installer with creds:" >&2
+                echo "        SIGNALK_ADMIN_USER=admin SIGNALK_ADMIN_PASSWORD=yourpass \\" >&2
+                echo "          curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash" >&2
                 exit 1
                 ;;
             unparseable)
