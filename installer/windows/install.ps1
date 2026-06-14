@@ -294,7 +294,8 @@ bash /tmp/sk-install.sh
 $env:INSTALLER_VERSION = $InstallerVersion
 $env:INSTALLER_BASE_URL = $InstallerBaseUrl
 $env:WSLENV = 'INSTALLER_VERSION/u:INSTALLER_BASE_URL/u'
-& wsl -d $WslDistro -- bash -lc $handoff
+$handoffArgs = @('-d', $WslDistro, '--', 'bash', '-lc', $handoff)
+& wsl @handoffArgs
 
 if ($LASTEXITCODE -ne 0) {
     Die "Linux installer exited with code $LASTEXITCODE inside WSL."
