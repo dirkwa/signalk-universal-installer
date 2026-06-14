@@ -25,16 +25,15 @@ fi
 # something useful. Caller (install.sh) exports INSTALLER_VERSION.
 SK_VERSION="${INSTALLER_VERSION:-unknown}"
 
-# Bake in the HTTP port the installer chose for signalk-server so
-# `signalk health` probes the right port without the operator having to
-# export SIGNALK_URL. Caller (install.sh) exports SK_HTTP_PORT; default
-# to the standard web port when run standalone.
-SK_HTTP_PORT="${SK_HTTP_PORT:-80}"
+# The signalk-server HTTP port is no longer baked in here: the script reads
+# it at run time from the rendered Quadlet (see signalk.tmpl::sk_http_port),
+# so the doctor's installer-refresh — which rewrites this script byte-for-byte
+# from GitHub Pages, substituting only __SK_VERSION__ — can't leave a stale
+# __SK_HTTP_PORT__ placeholder behind.
 
 # Use a non-conflicting sed delimiter (|) because INSTALLER_VERSION
 # may contain '/' (e.g. branch refs in dev installs).
 sed -e "s|__SK_VERSION__|${SK_VERSION}|g" \
-    -e "s|__SK_HTTP_PORT__|${SK_HTTP_PORT}|g" \
     "$TEMPLATE" >"$TARGET"
 chmod 0755 "$TARGET"
 ok "Installed $TARGET"

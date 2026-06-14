@@ -21,9 +21,25 @@ set -euo pipefail
 
 SK_VERSION="__SK_VERSION__"
 
+# Resolve signalk-server's HTTP port at RUN time from the rendered Quadlet
+# (Environment=PORT=, written by the installer/doctor; 80 or 3000), rather
+# than baking it in at install time. The doctor's installer-refresh rewrites
+# this script byte-for-byte from GitHub Pages, where only __SK_VERSION__ is
+# substituted — a baked __SK_HTTP_PORT__ placeholder would survive verbatim
+# and break every URL built from it (the reason `signalk health` and
+# `resetadmin` failed with "Port number was not a decimal number"). Reading
+# the port live keeps the script self-correcting and tracks a later port
+# change for free. Same lookup as scripts/doctor.sh::sk_http_port.
+sk_http_port() {
+    local q="${HOME}/.config/containers/systemd/signalk-server.container"
+    local p
+    p=$(sed -n 's/^Environment=PORT=\([0-9][0-9]*\).*/\1/p' "$q" 2>/dev/null | head -1)
+    printf '%s' "${p:-80}"
+}
+
 UPDATER_URL=${UPDATER_URL:-http://127.0.0.1:3003}
 DOCTOR_URL=${DOCTOR_URL:-http://127.0.0.1:3004}
-SIGNALK_URL=${SIGNALK_URL:-http://127.0.0.1:__SK_HTTP_PORT__/signalk}
+SIGNALK_URL=${SIGNALK_URL:-http://127.0.0.1:$(sk_http_port)/signalk}
 DOCTOR_DATA="${DOCTOR_DATA:-${HOME}/.signalk-doctor}"
 QUADLET_DIR="${HOME}/.config/containers/systemd"
 UNITS=(signalk-server signalk-updater-server signalk-doctor-server)
