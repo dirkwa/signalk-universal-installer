@@ -28,6 +28,7 @@ param(
     [string]$MachineName = 'signalk',
     [int]$MachineMemoryMB = 0,   # 0 = auto-size from host RAM (see below)
     [int]$MachineCpus = 2,
+    [switch]$NoPause,            # skip the "press Enter to close" pause at the end
     [string]$InstallerVersion,
     [string]$InstallerBaseUrl = 'https://dirkwa.github.io/signalk-universal-installer'
 )
@@ -48,7 +49,26 @@ function Info($msg)    { Write-Host "[i] $msg" -ForegroundColor Cyan }
 function Ok($msg)      { Write-Host "[OK] $msg" -ForegroundColor Green }
 function Warn($msg)    { Write-Warning $msg }
 function Section($msg) { Write-Host ""; Write-Host "== $msg ==" -ForegroundColor White }
-function Die($msg)     { Write-Error $msg; exit 1 }
+
+# Hold the window open before the script exits, so the user can read the result
+# - `iex` runs us in their session, and `exit` would otherwise close the window
+# instantly. Only pause when there's an interactive user AND a console to read a
+# key from; skip it under -NoPause, when stdin is redirected/piped, or in a
+# non-interactive host (CI, scheduled task) where it would hang forever.
+function Wait-BeforeExit {
+    if ($NoPause) { return }
+    if (-not [Environment]::UserInteractive) { return }
+    if ([Console]::IsInputRedirected) { return }
+    try {
+        Write-Host ""
+        Write-Host "Press any key to close..." -ForegroundColor DarkGray
+        [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    } catch {
+        # No usable console (e.g. ISE / redirected host) - don't block.
+    }
+}
+
+function Die($msg)     { Write-Error $msg; Wait-BeforeExit; exit 1 }
 
 # Run a native command best-effort: swallow stdout+stderr and NEVER throw, even
 # under $ErrorActionPreference='Stop' (where a native command writing to stderr
@@ -117,6 +137,7 @@ function Stop-ForReboot {
     Write-Host ""
     Write-Host "  (If WSL still fails after the reboot, confirm hardware virtualization"
     Write-Host "   - VT-x / AMD-V - is enabled in your BIOS/UEFI.)"
+    Wait-BeforeExit
     exit 0
 }
 
@@ -377,3 +398,5 @@ To open a shell in the machine for diagnostics:
 USB serial passthrough requires usbipd-win on the Windows side; see
 docs/installation.md (section "Windows USB").
 "@ | Write-Host
+
+Wait-BeforeExit
