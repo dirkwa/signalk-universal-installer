@@ -1,7 +1,7 @@
-# SignalK Universal Installer (v2) — Windows (WSL2 + Podman Machine) bootstrap.
+# SignalK Universal Installer (v2) - Windows (WSL2 + Podman Machine) bootstrap.
 #
 # We install the WSL2 platform (no user-facing distro), install the Podman CLI,
-# and let `podman machine` create and own its own Linux VM — then run the
+# and let `podman machine` create and own its own Linux VM - then run the
 # regular Linux installer INSIDE that VM via `podman machine ssh`. This mirrors
 # the macOS installer exactly. The container stack never runs on Windows
 # directly; it runs in the Podman Machine VM.
@@ -22,7 +22,7 @@
 #
 # Limitations:
 #   - Native Windows (no WSL) is not supported (deferred per design doc).
-#   - USB serial passthrough requires usbipd-win — link in docs/installation.md.
+#   - USB serial passthrough requires usbipd-win - link in docs/installation.md.
 
 param(
     [string]$MachineName = 'signalk',
@@ -37,7 +37,7 @@ if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { 
 $ErrorActionPreference = 'Stop'
 
 # NOTE on output encoding: wsl.exe emits UTF-16LE, so a captured `& wsl ...`
-# comes back with a NUL between every character — Get-VersionFrom strips those
+# comes back with a NUL between every character - Get-VersionFrom strips those
 # NULs to parse the version. We deliberately do NOT set
 # [Console]::OutputEncoding globally: that would make PowerShell decode every
 # child process as UTF-16, which mangles the UTF-8 streaming output of
@@ -62,7 +62,7 @@ function Invoke-BestEffort {
         return $LASTEXITCODE
     } catch {
         # native stderr surfaced as an error record under Stop, or the exe
-        # wasn't found — either way report failure (don't trust a stale
+        # wasn't found - either way report failure (don't trust a stale
         # $LASTEXITCODE from an earlier command).
         return 1
     }
@@ -75,7 +75,7 @@ $WslFeatures = @('VirtualMachinePlatform', 'Microsoft-Windows-Subsystem-Linux')
 #
 # The reliable signal is NOT Get-WindowsOptionalFeature's State: enabling a
 # feature is a Component Based Servicing (CBS) transaction that flips State to
-# 'Enabled' as soon as it's staged — BEFORE the reboot that actually activates
+# 'Enabled' as soon as it's staged - BEFORE the reboot that actually activates
 # the VM platform. So State='Enabled' + `wsl --version` working can both be true
 # on a fresh box while a reboot is still pending; podman then races ahead and
 # fails with HCS_E_SERVICE_NOT_AVAILABLE. The authoritative, locale-independent
@@ -106,17 +106,17 @@ function Test-WslReady {
 # failure. The installer is idempotent, so re-running after the reboot resumes
 # from here.
 function Stop-ForReboot {
-    Section "Reboot required (this is normal — not an error)"
+    Section "Reboot required (this is normal - not an error)"
     Ok "WSL2 has been enabled. Windows needs one reboot to activate it."
     Write-Host ""
     Write-Host "  Next steps:"
     Write-Host "    1. Reboot Windows."
     Write-Host "    2. Open PowerShell as Administrator again."
-    Write-Host "    3. Re-run the same command — it picks up where it left off:"
+    Write-Host "    3. Re-run the same command - it picks up where it left off:"
     Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
     Write-Host ""
     Write-Host "  (If WSL still fails after the reboot, confirm hardware virtualization"
-    Write-Host "   — VT-x / AMD-V — is enabled in your BIOS/UEFI.)"
+    Write-Host "   - VT-x / AMD-V - is enabled in your BIOS/UEFI.)"
     exit 0
 }
 
@@ -135,7 +135,7 @@ function Get-HostHypervisor {
 }
 
 # Print actionable guidance when WSL2/podman-machine can't create a VM because
-# virtualization isn't available — the dominant cause on a guest VM is nested
+# virtualization isn't available - the dominant cause on a guest VM is nested
 # virtualization not being exposed by the host.
 function Show-VirtualizationHelp {
     $hv = Get-HostHypervisor
@@ -176,7 +176,7 @@ function Get-VersionFrom([string[]]$raw) {
 # capturing podman's output to grep it would break its live download progress
 # bar. Instead we stream podman's real error to the console (the user sees the
 # exact code, e.g. HCS_E_HYPERV_NOT_INSTALLED) and always print this guidance on
-# failure — it's advice, not a destructive action, and on a guest VM a
+# failure - it's advice, not a destructive action, and on a guest VM a
 # virtualization problem is by far the most common cause.
 
 Section "SignalK Universal Installer v$InstallerVersion (Windows / Podman Machine)"
@@ -203,7 +203,7 @@ Ok "Windows 11 build $build"
 # authoritative RestartNeeded bit), then decide reboot from CBS signals, then
 # only hand off to podman once WSL is functionally ready. This avoids the trap
 # where Get-WindowsOptionalFeature reports State='Enabled' and `wsl --version`
-# works on a fresh box, yet a reboot is still pending — in which case podman's
+# works on a fresh box, yet a reboot is still pending - in which case podman's
 # bundled provider runs its own `wsl --install` and fails creating the VM with
 # HCS_E_SERVICE_NOT_AVAILABLE.
 Section "WSL2 platform"
@@ -223,28 +223,28 @@ try {
 #    keep it current. --no-distribution: platform only, no user-facing distro.
 #    Best-effort: these hit the Microsoft Store backend, which can return 403
 #    (region prompt / network / not-ready-until-reboot, microsoft/WSL #40285).
-#    A failure here must NOT abort the installer — the DISM enable above already
+#    A failure here must NOT abort the installer - the DISM enable above already
 #    did the reboot-requiring work, and on the post-reboot re-run this succeeds.
 Info "Installing/updating the WSL2 platform (no distribution)"
 Invoke-BestEffort wsl @('--install', '--no-distribution') | Out-Null
 Invoke-BestEffort wsl @('--update') | Out-Null
 
 # 3) If a reboot is pending (from the feature enable or the CBS flag), stop here
-#    — BEFORE podman — and tell the user it's expected. Re-run resumes after.
+#    - BEFORE podman - and tell the user it's expected. Re-run resumes after.
 #    This fires on a fresh box right after the DISM enable, so the flaky
 #    Store-backed wsl calls above are irrelevant: we reboot, then re-run.
 if (Test-RebootPending -RestartNeeded $restartNeeded) { Stop-ForReboot }
 
 # 4) Functional gate: WSL must actually be usable before we hand to podman.
 #    We reach here only when NO reboot is pending (step 3 already handled that),
-#    so if WSL still isn't answering it's a genuine problem — don't loop the user
+#    so if WSL still isn't answering it's a genuine problem - don't loop the user
 #    through another reboot. Give an actionable diagnosis instead.
 if (-not (Test-WslReady)) {
     Section "WSL isn't responding"
     Warn "The WSL platform is enabled and no reboot is pending, but 'wsl --status' is failing."
     Write-Host ""
     Write-Host "  This usually means the WSL app/kernel couldn't be fetched from the"
-    Write-Host "  Microsoft Store (a 403 from 'wsl --install'/'wsl --update' — common on"
+    Write-Host "  Microsoft Store (a 403 from 'wsl --install'/'wsl --update' - common on"
     Write-Host "  restricted networks, VPNs, or where the Store is blocked/region-gated)."
     Write-Host ""
     Write-Host "  Try, then re-run this installer:"
@@ -253,7 +253,7 @@ if (-not (Test-WslReady)) {
     Write-Host "    wsl --status                        # should succeed before continuing"
     Write-Host ""
     Write-Host "  If you're behind a proxy/VPN or a restricted network, that's the likely"
-    Write-Host "  cause — see https://aka.ms/wslinstall and microsoft/WSL issue #40285."
+    Write-Host "  cause - see https://aka.ms/wslinstall and microsoft/WSL issue #40285."
     Die "WSL is not usable yet; resolve the above and re-run."
 }
 $wslVer = Get-VersionFrom (& wsl --version 2>$null)
@@ -279,7 +279,7 @@ if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
 $podmanVer = Get-VersionFrom (& podman --version 2>$null)
 Ok "podman $(if ($podmanVer) { $podmanVer } else { 'installed' })"
 
-# 4. Podman Machine — podman creates and owns its own Linux VM (Fedora), the
+# 4. Podman Machine - podman creates and owns its own Linux VM (Fedora), the
 # same way the macOS installer does. No user-facing distro, no OOBE.
 Section "Podman Machine"
 
@@ -294,7 +294,7 @@ if ($MachineMemoryMB -le 0) {
         Die "Not enough RAM: this host has ${totalMB} MB. The SignalK stack needs a VM with >= 2048 MB plus ~1024 MB headroom for Windows (>= ~3072 MB total). Add RAM (if a VM, raise its memory) and re-run."
     }
 }
-# Enforce the floor for explicit overrides too — a too-low -MachineMemoryMB
+# Enforce the floor for explicit overrides too - a too-low -MachineMemoryMB
 # would otherwise fail later at init or trip the stack's preflight.
 if ($MachineMemoryMB -lt 2048) {
     Die "-MachineMemoryMB must be >= 2048 (got $MachineMemoryMB); the SignalK stack needs at least 2048 MB inside the VM."
