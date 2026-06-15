@@ -384,6 +384,15 @@ cmd_uninstall() {
         fi
     done
 
+    # Remove the legacy podman API service override. Older installers wrote
+    # it (--time=0 keep-alive) carrying --log-level=info, which fans out
+    # dpkg-query on every API burst and storms the load. The current stack
+    # uses socket activation and doesn't need it; clearing it on uninstall
+    # means an uninstall+reinstall ends up clean (the current installer
+    # doesn't recreate it).
+    rm -f "$HOME/.config/systemd/user/podman.service.d/override.conf" 2>/dev/null || true
+    rmdir "$HOME/.config/systemd/user/podman.service.d" 2>/dev/null || true
+
     systemctl --user daemon-reload || true
 
     echo
