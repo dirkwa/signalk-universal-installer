@@ -106,9 +106,9 @@ podman machine init --cpus 2 --memory 4096 --disk-size 30 --usb signalk
 
 CAN, Bluetooth, and GPIO are **not supported** on macOS Podman Machine.
 
-## Windows (WSL2)
+## Windows (Podman Machine)
 
-**Requires Windows 11** (or Server 2022). The stack runs in a WSL2 Debian distro and needs systemd, whose opt-in (`/etc/wsl.conf` `[boot] systemd=true`) is Windows 11 only. Windows 10 is not supported.
+**Requires Windows 11** (or Server 2022) with WSL2 and hardware virtualization. The stack runs inside a Podman Machine VM — the same model as macOS — not a user-managed Linux distro.
 
 Open PowerShell **as administrator**:
 
@@ -119,33 +119,34 @@ iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows
 The Windows installer:
 
 1. Checks for Administrator and Windows 11.
-2. Ensures Store WSL ≥ 2.6.0 (`wsl --update` if older), then runs `wsl --install -d Debian` if the distro is missing.
-3. **Enables systemd inside the distro** (writes `/etc/wsl.conf` `[boot] systemd=true` plus `mount --make-rshared /` for rootless podman), provisions a default sudo user non-interactively, and verifies systemd is PID 1 and the user session bus + linger are up.
-4. Hands off to the Linux installer inside WSL.
+2. Installs the WSL2 platform with `wsl --install --no-distribution` (no user-facing distro, no OOBE prompt).
+3. Installs the Podman CLI via `winget install RedHat.Podman`.
+4. Runs `podman machine init` / `podman machine start`, which creates and owns its own Linux VM (already has systemd + rootless podman set up).
+5. Hands off to the Linux installer inside the machine via `podman machine ssh`.
 
 A fresh `wsl --install` usually needs **one reboot** (to enable the VirtualMachinePlatform Windows feature). The installer detects this, prints a "reboot, then re-run" message, and exits cleanly; it is idempotent, so re-running after the reboot resumes where it left off.
 
-Result: the same container stack as Linux, accessible from Windows via WSL's automatic localhost port forwarding — open `http://localhost:3000` / `:3003` / `:3004`.
+Result: the same container stack as Linux, reachable from Windows via Podman Machine's localhost port forwarding — open `http://localhost` (the admin UI; `:3000` if you decline standard ports), `http://localhost:3003` (Updater), `http://localhost:3004` (Doctor).
 
 ### Windows troubleshooting
 
-- **"systemd did not come up as PID 1"** — run `wsl --shutdown` from PowerShell and re-run the installer. Confirm `wsl --version` reports ≥ 2.6.0 and that this is Windows 11.
-- **"user session isn't fully up" / `/run/user/<uid>` owned by root** — a known WSL bug where the per-user systemd manager doesn't start cleanly. `wsl --shutdown` and re-run usually clears it. The installer runs `loginctl enable-linger` and checks for the user bus before handing off, so it fails here rather than mid-install.
-- **WSL won't start after the reboot** — confirm hardware virtualization (VT-x / AMD-V) is enabled in BIOS/UEFI.
-- **Existing Debian distro on bookworm** — the installer aborts (bookworm's podman 4.3.1 has no Quadlet). Upgrade the distro to trixie, or `wsl --unregister Debian` and re-run for a fresh trixie image.
+- **`podman machine init`/`start` fails / "virtualization not enabled" / `HCS_E_HYPERV_NOT_INSTALLED`** — the Windows hypervisor can't create the VM. If this is a guest VM, enable **nested virtualization** on the host (the VM must be powered off): Hyper-V `Set-VMProcessor -VMName <VM> -ExposeVirtualizationExtensions $true`; VMware "Virtualize Intel VT-x/EPT or AMD-V/RVI"; Proxmox/KVM CPU type `host` + nested KVM. On bare metal, enable VT-x/AMD-V in BIOS/UEFI. Confirm with `(Get-CimInstance Win32_ComputerSystem).HypervisorPresent` (want `True`). See <https://aka.ms/enablevirtualization>.
+- **WSL won't start after the reboot** — confirm hardware virtualization is enabled in BIOS/UEFI.
+- **"Podman isn't on PATH"** — open a new Administrator PowerShell after the winget install and re-run.
+- Reset the machine if needed: `podman machine stop signalk; podman machine rm signalk` then re-run (your SignalK data lives outside the machine in `~/.signalk*`).
 
 ### Windows USB serial
 
-WSL2 doesn't expose USB devices to the Linux side by default. Use [usbipd-win](https://github.com/dorssel/usbipd-win) to attach a USB-serial device to WSL:
+Podman Machine's VM doesn't expose USB devices by default. Use [usbipd-win](https://github.com/dorssel/usbipd-win) to attach a USB-serial device to the WSL2 backend the machine runs on:
 
 ```powershell
 winget install --id dorssel.usbipd-win
 usbipd list                             # find the BUSID of your gateway
 usbipd bind --busid <BUSID>
-usbipd attach --wsl --busid <BUSID>     # while WSL is running
+usbipd attach --wsl --busid <BUSID>     # while the machine is running
 ```
 
-Then in WSL, the device shows up as `/dev/ttyUSB0` etc. Re-run the bash installer inside WSL to re-detect hardware and rewrite the signalk-server Quadlet's `AddDevice=` lines. (The Updater Console has no Hardware tab — see [docs/hardware.md](hardware.md) for the supported re-detection paths.)
+The device then shows up as `/dev/ttyUSB0` etc. inside the machine. Re-run the installer to re-detect hardware and rewrite the signalk-server Quadlet's `AddDevice=` lines. (The Updater Console has no Hardware tab — see [docs/hardware.md](hardware.md) for the supported re-detection paths.)
 
 ## Recovery
 
