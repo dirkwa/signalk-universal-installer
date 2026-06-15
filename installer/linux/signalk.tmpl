@@ -627,9 +627,31 @@ cmd_bug_report() {
     # (Subject:/Defined-By: blocks). Truncate aggressively; logs are
     # noisy but the explanation lines are essential for "why didn't
     # this unit start when it should have."
+    #
+    # On rootless-podman hosts `journalctl --user -u <quadlet-unit>` is usually
+    # EMPTY ("No journal files were found") — conmon logs the container's
+    # stdout/stderr under the CONTAINER identifier, not the systemd user unit.
+    # The container's own output (the actual signalk-server startup, the thing
+    # that matters when a start times out) is captured separately into
+    # containers/<name>.log via `$CTR_CMD logs`. When the journal slice comes
+    # back empty, append those container logs here too so journal-<unit>.log is
+    # never a dead end, and point at the authoritative file.
+    local out
     for u in "${UNITS[@]}"; do
+        out="$bundle/journal-${u}.log"
         journalctl --user -xeu "${u}.service" --since '24 hours ago' --no-pager \
-            >"$bundle/journal-${u}.log" 2>&1 || true
+            >"$out" 2>&1 || true
+        if ! grep -q . "$out" 2>/dev/null || grep -q 'No journal files were found' "$out" 2>/dev/null; then
+            {
+                echo "(no systemd user-journal entries — rootless podman logs the"
+                echo " container under its own identifier; see containers/${u}.log)"
+                if [ -n "$CTR_CMD" ]; then
+                    echo
+                    echo "=== $CTR_CMD logs --tail 200 ${u} ==="
+                    "$CTR_CMD" logs --tail 200 "$u" 2>&1 || true
+                fi
+            } >>"$out"
+        fi
     done
 
     # Quadlet sources (config, not secrets).
