@@ -77,13 +77,13 @@ podman machine ssh "$MACHINE_NAME" -- bash -lc "
 # 5. Forward the ports out of the machine
 section "Port forwarding"
 info "Podman Machine forwards rootless container ports to the host automatically."
-info "Visit http://localhost:3000 / :3003 / :3004 from macOS."
+info "Visit the SignalK admin UI / Updater (:3003) / Doctor (:3004) from macOS."
 
 cat <<EOF
 
 OK — SignalK is up inside Podman Machine '$MACHINE_NAME'.
 
-  SignalK admin UI : http://localhost:3000
+  SignalK admin UI : http://localhost  (or :3000 if you declined standard ports)
   Updater Console  : http://localhost:3003
   Doctor Console   : http://localhost:3004
 
