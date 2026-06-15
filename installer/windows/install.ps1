@@ -206,14 +206,40 @@ function Get-HostHypervisor {
     }
 }
 
+# True when this machine can host a WSL2/Hyper-V VM. Two ways to qualify:
+#   - a hypervisor is already running (HypervisorPresent), OR
+#   - the CPU is virtualization-capable AND the VM Monitor / SLAT / firmware
+#     flags are all set (i.e. enabled in BIOS/UEFI, no hypervisor up yet).
+# We only HARD-FAIL the installer on a confident negative (neither holds), so a
+# VBS-induced HypervisorPresent=True false-positive can't wrongly block a box;
+# the post-init Show-VirtualizationHelp backstops the rest.
+function Test-VirtualizationCapable {
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+    if ($cs -and $cs.HypervisorPresent) { return $true }
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue
+    if ($cpu -and $cpu.VirtualizationFirmwareEnabled `
+            -and $cpu.SecondLevelAddressTranslationExtensions `
+            -and $cpu.VMMonitorModeExtensions) {
+        return $true
+    }
+    return $false
+}
+
 # Print actionable guidance when WSL2/podman-machine can't create a VM because
 # virtualization isn't available - the dominant cause on a guest VM is nested
-# virtualization not being exposed by the host.
+# virtualization not being exposed by the host. $AfterFailure tailors the lead
+# line (pre-flight stop vs. post-podman-error).
 function Show-VirtualizationHelp {
+    param([switch]$AfterFailure)
     $hv = Get-HostHypervisor
     Write-Host ""
-    Write-Host "  If the error above mentions virtualization / HCS_E_HYPERV_NOT_INSTALLED /"
-    Write-Host "  0x80370102, the Windows hypervisor can't create the VM. Fixes:"
+    if ($AfterFailure) {
+        Write-Host "  If the error above mentions virtualization / HCS_E_HYPERV_NOT_INSTALLED /"
+        Write-Host "  0x80370102, the Windows hypervisor can't create the VM. Fixes:"
+    } else {
+        Write-Host "  Virtualization isn't available on this machine, so WSL2 can't create the"
+        Write-Host "  Linux VM the stack runs in. Enable it, then re-run this installer:"
+    }
     Write-Host ""
     if ($hv) { Write-Host "  Detected host hypervisor: $hv (this looks like a guest VM)." }
     Write-Host "  If this is a VIRTUAL MACHINE, enable nested virtualization on the HOST"
@@ -365,6 +391,16 @@ Ok "podman $(if ($podmanVer) { $podmanVer } else { 'installed' })"
 # same way the macOS installer does. No user-facing distro, no OOBE.
 Section "Podman Machine"
 
+# Pre-flight: WSL2 needs hardware virtualization to create the VM. Check it up
+# front and stop with clear guidance, rather than letting `podman machine init`
+# pull the image and then fail with a cryptic HCS_E_HYPERV_NOT_INSTALLED. We
+# only block on a confident negative (no hypervisor AND no capable+enabled CPU).
+if (-not (Test-VirtualizationCapable)) {
+    Section "Virtualization not available"
+    Show-VirtualizationHelp
+    Die "Virtualization is not available on this machine; enable it (see above) and re-run."
+}
+
 # Size the VM's memory to fit the host. podman rejects a machine larger than
 # total system RAM, and the stack's preflight needs >= 2048 MB inside the VM.
 # Target 4096 MB but never more than (host RAM - 1024 headroom for Windows),
@@ -402,7 +438,7 @@ if (-not $hasMachine) {
         Remove-PodmanMachine -Name $MachineName
         # If podman enabled a WSL feature mid-init, that needs a reboot first.
         if (Test-RebootPending) { Stop-ForReboot }
-        Show-VirtualizationHelp
+        Show-VirtualizationHelp -AfterFailure
         Die "podman machine init failed (exit $rc). See the podman output above."
     }
 }
@@ -417,7 +453,7 @@ if (-not $isRunning) {
     $rc = Invoke-Streaming podman @('machine', 'start', $MachineName)
     if ($rc -ne 0) {
         if (Test-RebootPending) { Stop-ForReboot }
-        Show-VirtualizationHelp
+        Show-VirtualizationHelp -AfterFailure
         Die "podman machine start failed (exit $rc). See the podman output above."
     }
 }
