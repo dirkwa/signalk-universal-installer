@@ -76,7 +76,11 @@ check yes ubuntu   questing 25.10  "Kubuntu 25.10 (same ID=ubuntu)"
 # Unknown / malformed versions must not slip through.
 check no  ubuntu   ""       ""     "Ubuntu with empty VERSION_ID"
 check no  ubuntu   weird    "rolling" "Ubuntu with non-numeric VERSION_ID"
-check no  fedora   ""       40     "Fedora 40 (unsupported distro)"
+# Fedora is supported: it's what `podman machine` runs (macOS/Windows path),
+# ships podman 5.x. Both the CoreOS variant (the podman-machine image) and
+# Workstation/Server qualify; the version is irrelevant to the gate.
+check yes fedora   ""       40     "Fedora 40 (podman machine / desktop)"
+check yes fedora   ""       "41"   "Fedora CoreOS (podman-machine image)"
 check no  arch     ""       ""     "Arch (no version)"
 
 if (( fail )); then

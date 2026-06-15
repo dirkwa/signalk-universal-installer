@@ -244,6 +244,50 @@ else
     SUDO="MISSING"
 fi
 
+# Install OS packages portably across the distros this stack runs on. Debian/
+# Ubuntu (the Pi/desktop targets) use apt; Fedora (what `podman machine`'s VM
+# is, used by the macOS and Windows installers) uses dnf. Fedora CoreOS is
+# image-based: it has no dnf at runtime and an immutable /usr, so packages can
+# only be layered via `rpm-ostree install` + a reboot — hostile to a one-shot
+# installer. We therefore never try to install on CoreOS; the only packages
+# this installer needs (podman, slirp4netns, uidmap, fuse-overlayfs) are all
+# pre-baked on the podman-machine image, and jq is no longer host-installed.
+#
+# Args are Debian package names; we translate the few that differ on Fedora.
+# Returns non-zero (without aborting the caller) when it genuinely couldn't
+# install, so callers can decide whether the package was optional.
+pkg_install() {
+    local debs=("$@") pm="" pkgs=() p
+    if command -v apt-get >/dev/null 2>&1; then
+        pm="apt"
+    elif command -v dnf >/dev/null 2>&1; then
+        pm="dnf"
+    elif command -v rpm-ostree >/dev/null 2>&1; then
+        # Fedora CoreOS / Silverblue: can't layer packages without a reboot.
+        warn "Cannot install (${debs[*]}) on an rpm-ostree system at runtime."
+        warn "These are normally pre-installed on the podman-machine image."
+        return 1
+    else
+        warn "No supported package manager (apt-get/dnf) found; cannot install (${debs[*]})."
+        return 1
+    fi
+
+    if [[ "$pm" == "apt" ]]; then
+        $SUDO apt-get update
+        $SUDO apt-get install -y "${debs[@]}"
+        return $?
+    fi
+
+    # dnf: map the Debian names that differ on Fedora.
+    for p in "${debs[@]}"; do
+        case "$p" in
+            uidmap) pkgs+=("shadow-utils") ;;
+            *)      pkgs+=("$p") ;;
+        esac
+    done
+    $SUDO dnf install -y "${pkgs[@]}"
+}
+
 # 1. Detect host
 detect_os
 section "SignalK Universal Installer v${INSTALLER_VERSION#v}"
@@ -583,9 +627,11 @@ fi
 # 3. Install podman if absent
 section "Podman"
 if ! command -v podman >/dev/null 2>&1; then
-    info "Installing podman + uidmap + slirp4netns + jq (requires sudo)"
-    $SUDO apt-get update
-    $SUDO apt-get install -y podman uidmap slirp4netns jq
+    info "Installing podman + uidmap + slirp4netns (requires sudo)"
+    if ! pkg_install podman uidmap slirp4netns; then
+        err "Could not install podman. Install it manually and re-run."
+        exit 1
+    fi
 fi
 ok "$(podman --version)"
 
@@ -612,15 +658,22 @@ if (( pv_major < req_major )) || { (( pv_major == req_major )) && (( pv_minor < 
     exit 1
 fi
 
-# jq is used by install.sh's bootstrap-marker write and by
-# `signalk bug-report`'s JSON handling. The podman-install block above
-# pulls it in on a fresh install; this catches the re-run case where
-# podman was already present from an earlier (jq-less) install.
+# jq smooths a few optional steps (sslport / vessel-identity / security seeding,
+# admin-user lookup, the last-good snapshot) and `signalk bug-report`'s JSON
+# handling — every consumer guards on `command -v jq` and degrades without it,
+# so jq is a nice-to-have, not a hard dependency. Best-effort install it where a
+# package manager can (apt/dnf); on rpm-ostree images (Fedora CoreOS / the
+# podman-machine VM) jq isn't pre-baked and can't be layered at runtime, so we
+# continue without it rather than abort.
 if ! command -v jq >/dev/null 2>&1; then
-    info "Installing jq (requires sudo)"
-    $SUDO apt-get install -y jq
+    info "Installing jq (optional; requires sudo)"
+    pkg_install jq || warn "jq unavailable — optional JSON steps will be skipped."
 fi
-ok "$(jq --version)"
+if command -v jq >/dev/null 2>&1; then
+    ok "$(jq --version)"
+else
+    info "jq not present; continuing (optional steps degrade gracefully)."
+fi
 
 # 3b. ZFS rootless-storage autofix.
 #
@@ -642,7 +695,7 @@ if [[ "$STORAGE_FS" == "zfs" ]]; then
     info "Rootless storage on ZFS — switching to fuse-overlayfs"
     if ! command -v fuse-overlayfs >/dev/null 2>&1; then
         info "Installing fuse-overlayfs (requires sudo)"
-        $SUDO apt-get install -y fuse-overlayfs
+        pkg_install fuse-overlayfs || warn "Could not install fuse-overlayfs; ZFS storage may be slow."
     fi
     STORAGE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/containers/storage.conf"
     mkdir -p "$(dirname "$STORAGE_CONF")"
@@ -1540,13 +1593,22 @@ TMP_LG=$(mktemp)
 # documented empty shape. Then set updatedAt + bootstrappedAt and
 # ensure `quadlets` exists. Atomic write via mv so a torn write can't
 # leave a half-written file.
-if [[ -s "$LAST_GOOD" ]] && jq -e . "$LAST_GOOD" >/dev/null 2>&1; then
-    jq --arg now "$NOW" \
-       '. + {updatedAt: $now, bootstrappedAt: $now} | .quadlets = (.quadlets // {})' \
-       "$LAST_GOOD" >"$TMP_LG"
+#
+# jq is preferred (it preserves any existing fields on a re-run). Without jq
+# (e.g. the podman-machine Fedora VM where jq isn't pre-baked) we write the
+# minimal documented shape with printf; this only loses a prior `quadlets`
+# map, which the doctor reconstructs from the live /quadlets mount anyway.
+if command -v jq >/dev/null 2>&1; then
+    if [[ -s "$LAST_GOOD" ]] && jq -e . "$LAST_GOOD" >/dev/null 2>&1; then
+        jq --arg now "$NOW" \
+           '. + {updatedAt: $now, bootstrappedAt: $now} | .quadlets = (.quadlets // {})' \
+           "$LAST_GOOD" >"$TMP_LG"
+    else
+        jq -n --arg now "$NOW" \
+           '{updatedAt: $now, bootstrappedAt: $now, quadlets: {}}' >"$TMP_LG"
+    fi
 else
-    jq -n --arg now "$NOW" \
-       '{updatedAt: $now, bootstrappedAt: $now, quadlets: {}}' >"$TMP_LG"
+    printf '{"updatedAt":"%s","bootstrappedAt":"%s","quadlets":{}}\n' "$NOW" "$NOW" >"$TMP_LG"
 fi
 mv -f "$TMP_LG" "$LAST_GOOD"
 
