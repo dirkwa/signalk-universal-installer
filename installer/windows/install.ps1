@@ -38,7 +38,7 @@ $ErrorActionPreference = 'Stop'
 # capture (`$x = & wsl ...`) comes back with a NUL between every character, so
 # parsing silently fails. Set the console to Unicode for this one-shot process;
 # we also strip stray NULs at parse sites (older PowerShell ignores this).
-try { [Console]::OutputEncoding = [System.Text.Encoding]::Unicode } catch { }
+try { [Console]::OutputEncoding = [System.Text.Encoding]::Unicode } catch { <# Non-fatal; NUL stripping at parse sites handles the fallback #> }
 
 function Info($msg)    { Write-Host "[i] $msg" -ForegroundColor Cyan }
 function Ok($msg)      { Write-Host "[OK] $msg" -ForegroundColor Green }

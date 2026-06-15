@@ -34,7 +34,7 @@ curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/
 # macOS (Apple Silicon and Intel; Homebrew required)
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/macos/install.sh | bash
 
-# Windows 11 (PowerShell as administrator, WSL2 will be installed if absent)
+# Windows 11 (PowerShell as administrator; enables WSL2, then Podman Machine runs the stack)
 iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows/install.ps1 | iex
 ```
 
