@@ -57,6 +57,33 @@ function Invoke-WslBash {
     return ($out | Out-String).Trim()
 }
 
+# True when a Windows feature WSL2 needs (VirtualMachinePlatform, and the WSL
+# optional component on older builds) was just enabled but the box hasn't
+# rebooted yet. `wsl --install` / `wsl --update` enable these and report that
+# changes take effect only after a restart — until then `wsl --version` and any
+# `wsl` command can't run, so we must detect this and stop BEFORE probing WSL.
+function Test-RebootPending {
+    foreach ($f in @('VirtualMachinePlatform', 'Microsoft-Windows-Subsystem-Linux')) {
+        $feat = Get-WindowsOptionalFeature -Online -FeatureName $f -ErrorAction SilentlyContinue
+        if ($feat -and $feat.State -eq 'EnablePending') { return $true }
+    }
+    return $false
+}
+
+# Print the reboot-then-re-run guidance and exit cleanly. The installer is
+# idempotent, so re-running after the reboot resumes from here.
+function Stop-ForReboot {
+    Section "Reboot required"
+    Warn "A Windows reboot is needed to finish enabling WSL2 (a required Windows feature is pending)."
+    Write-Host ""
+    Write-Host "  Reboot Windows, then re-run this installer:"
+    Write-Host "    iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
+    Write-Host ""
+    Write-Host "  If WSL still fails to start after the reboot, confirm hardware"
+    Write-Host "  virtualization (VT-x / AMD-V) is enabled in your BIOS/UEFI."
+    exit 0
+}
+
 Section "SignalK Universal Installer v$InstallerVersion (Windows/WSL2)"
 
 # 1. Admin + Windows 11 check
@@ -94,11 +121,21 @@ function Get-WslVersion {
     } catch { return $null }
 }
 
+# If a prior run (or `wsl --update` below) enabled VirtualMachinePlatform but
+# we haven't rebooted, `wsl --version` can't run yet — so check for a pending
+# reboot first and stop, rather than misreading it as "WSL too old".
+if (Test-RebootPending) { Stop-ForReboot }
+
 $minWsl = [version]'2.6.0'
 $wslVer = Get-WslVersion
 if (-not $wslVer -or $wslVer -lt $minWsl) {
     Info "Updating WSL (need >= $minWsl; found $(if ($wslVer) { $wslVer } else { 'inbox/older' }))"
     & wsl --update
+    # `wsl --update` can enable VirtualMachinePlatform, which needs a reboot
+    # before WSL can report a version. Re-check for a pending reboot here so we
+    # send the user to reboot instead of dying on the now-unavailable
+    # `wsl --version`.
+    if (Test-RebootPending) { Stop-ForReboot }
     $wslVer = Get-WslVersion
     if (-not $wslVer -or $wslVer -lt $minWsl) {
         Die "WSL >= $minWsl is required but is still $(if ($wslVer) { $wslVer } else { 'not detected' }) after 'wsl --update'. Install WSL from the Microsoft Store, then re-run."
@@ -133,18 +170,7 @@ if (-not $hasDistro) {
 # `wsl --install` enables the VirtualMachinePlatform Windows feature; that
 # needs a reboot before WSL2 can run. There's no dedicated WSL exit code, so
 # gate on the feature's pending state.
-$vmp = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue
-if ($vmp -and $vmp.State -eq 'EnablePending') {
-    Section "Reboot required"
-    Warn "A Windows reboot is needed to finish enabling WSL2 (VirtualMachinePlatform is pending)."
-    Write-Host ""
-    Write-Host "  Reboot Windows, then re-run this installer:"
-    Write-Host "    iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
-    Write-Host ""
-    Write-Host "  If WSL still fails to start after the reboot, confirm hardware"
-    Write-Host "  virtualization (VT-x / AMD-V) is enabled in your BIOS/UEFI."
-    exit 0
-}
+if (Test-RebootPending) { Stop-ForReboot }
 
 # 5. Assert the distro is Debian trixie (or newer). An existing WSL Debian is
 # never auto-upgraded, so a long-lived box could be on bookworm — which ships
