@@ -50,6 +50,24 @@ function Warn($msg)    { Write-Warning $msg }
 function Section($msg) { Write-Host ""; Write-Host "== $msg ==" -ForegroundColor White }
 function Die($msg)     { Write-Error $msg; exit 1 }
 
+# Run a native command best-effort: swallow stdout+stderr and NEVER throw, even
+# under $ErrorActionPreference='Stop' (where a native command writing to stderr
+# can surface as a terminating NativeCommandError). Returns the exit code. Use
+# for flaky Store-backed calls like `wsl --install`/`wsl --update`, whose 403
+# from the msstore backend must not abort the installer.
+function Invoke-BestEffort {
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments)
+    try {
+        & $Exe @Arguments *>$null
+        return $LASTEXITCODE
+    } catch {
+        # native stderr surfaced as an error record under Stop, or the exe
+        # wasn't found — either way report failure (don't trust a stale
+        # $LASTEXITCODE from an earlier command).
+        return 1
+    }
+}
+
 # The two Windows optional features WSL2 (and podman machine) require.
 $WslFeatures = @('VirtualMachinePlatform', 'Microsoft-Windows-Subsystem-Linux')
 
@@ -203,20 +221,40 @@ try {
 
 # 2) Install the Store WSL app + kernel (user-mode MSIX; needs no reboot) and
 #    keep it current. --no-distribution: platform only, no user-facing distro.
+#    Best-effort: these hit the Microsoft Store backend, which can return 403
+#    (region prompt / network / not-ready-until-reboot, microsoft/WSL #40285).
+#    A failure here must NOT abort the installer — the DISM enable above already
+#    did the reboot-requiring work, and on the post-reboot re-run this succeeds.
 Info "Installing/updating the WSL2 platform (no distribution)"
-& wsl --install --no-distribution 2>$null | Out-Null
-& wsl --update 2>$null | Out-Null
+Invoke-BestEffort wsl @('--install', '--no-distribution') | Out-Null
+Invoke-BestEffort wsl @('--update') | Out-Null
 
 # 3) If a reboot is pending (from the feature enable or the CBS flag), stop here
 #    — BEFORE podman — and tell the user it's expected. Re-run resumes after.
+#    This fires on a fresh box right after the DISM enable, so the flaky
+#    Store-backed wsl calls above are irrelevant: we reboot, then re-run.
 if (Test-RebootPending -RestartNeeded $restartNeeded) { Stop-ForReboot }
 
 # 4) Functional gate: WSL must actually be usable before we hand to podman.
+#    We reach here only when NO reboot is pending (step 3 already handled that),
+#    so if WSL still isn't answering it's a genuine problem — don't loop the user
+#    through another reboot. Give an actionable diagnosis instead.
 if (-not (Test-WslReady)) {
-    # Not reboot-pending by our signals, but WSL still isn't answering. A reboot
-    # is the safe, common remedy; send the user there rather than into a podman
-    # failure.
-    Stop-ForReboot
+    Section "WSL isn't responding"
+    Warn "The WSL platform is enabled and no reboot is pending, but 'wsl --status' is failing."
+    Write-Host ""
+    Write-Host "  This usually means the WSL app/kernel couldn't be fetched from the"
+    Write-Host "  Microsoft Store (a 403 from 'wsl --install'/'wsl --update' — common on"
+    Write-Host "  restricted networks, VPNs, or where the Store is blocked/region-gated)."
+    Write-Host ""
+    Write-Host "  Try, then re-run this installer:"
+    Write-Host "    wsl --install --no-distribution     # accept any Store agreement prompt"
+    Write-Host "    wsl --update"
+    Write-Host "    wsl --status                        # should succeed before continuing"
+    Write-Host ""
+    Write-Host "  If you're behind a proxy/VPN or a restricted network, that's the likely"
+    Write-Host "  cause — see https://aka.ms/wslinstall and microsoft/WSL issue #40285."
+    Die "WSL is not usable yet; resolve the above and re-run."
 }
 $wslVer = Get-VersionFrom (& wsl --version 2>$null)
 if ($wslVer) { Ok "WSL $wslVer" } else { Ok "WSL ready" }
