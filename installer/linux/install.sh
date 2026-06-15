@@ -950,14 +950,27 @@ signalk_server_drift_reason() {
     echo ""
 }
 
-# Capture a failed unit's status + recent journal to stderr, indented. Shared
-# by the signalk-server drift-apply restart and restart_peer_unit so the most
+# Capture a failed unit's status + recent logs to stderr, indented. Shared by
+# the signalk-server drift-apply restart and restart_peer_unit so the most
 # important restart (the server) gets the same diagnostics the peers already do.
+#
+# `podman logs` is the authoritative source, not `journalctl --user -u`: rootless
+# podman/conmon writes the container's stdout/stderr to the journal under the
+# CONTAINER identifier, which `journalctl --user -u <quadlet-unit>` does NOT
+# surface — on a typical Pi it returns "No journal files were found" even with a
+# persistent journal, so the actual signalk-server startup output (the thing we
+# need when a start times out) was invisible. The unit name maps 1:1 to the
+# container name (the Quadlet sets ContainerName=<unit-without-.service>). Keep
+# the journal line too — harmless, and occasionally carries systemd-side detail.
 capture_unit_failure() {
     local unit=$1
+    local ctr="${unit%.service}"
     {
         echo "--- systemctl --user status \"$unit\" ---"
         systemctl --user --no-pager --full status "$unit" 2>&1 || true
+        echo
+        echo "--- podman logs --tail 50 \"$ctr\" ---"
+        podman logs --tail 50 "$ctr" 2>&1 || true
         echo
         echo "--- journalctl --user -n 50 -u \"$unit\" ---"
         journalctl --user --no-pager -n 50 -u "$unit" 2>&1 || true
@@ -1123,12 +1136,12 @@ section "Health checks"
 if wait_for_http "${DOCTOR_URL}/api/health" 180; then
     ok "doctor responding on ${DOCTOR_URL}"
 else
-    warn "doctor did not respond within 180s; check 'journalctl --user -u signalk-doctor-server.service'"
+    warn "doctor did not respond within 180s; check 'podman logs signalk-doctor-server'"
 fi
 if wait_for_http "${UPDATER_URL}/api/health" 180; then
     ok "updater responding on ${UPDATER_URL}"
 else
-    warn "updater did not respond within 180s; check 'journalctl --user -u signalk-updater-server.service'"
+    warn "updater did not respond within 180s; check 'podman logs signalk-updater-server'"
 fi
 
 # 13.5 Install (or update) the bundled SignalK plugins into ~/.signalk/.
@@ -1695,7 +1708,7 @@ if [[ "$VERIFY_MODE" = "1" ]]; then
         if [[ "$active" = "active" ]]; then
             verify_check "${u}.service" "ok"
         else
-            verify_check "${u}.service" "state=${active:-unknown}; check 'journalctl --user -u ${u}.service'"
+            verify_check "${u}.service" "state=${active:-unknown}; check 'podman logs ${u}'"
         fi
     done
 
@@ -1751,7 +1764,7 @@ if [[ "$VERIFY_MODE" = "1" ]]; then
                 "unreachable; ${verify_drift} — run 'systemctl --user restart signalk-server.service'"
         else
             verify_check "signalk-server (:${SK_HTTP_PORT})" \
-                "unreachable; check 'journalctl --user -u signalk-server.service'"
+                "unreachable; check 'podman logs signalk-server'"
         fi
     fi
 
