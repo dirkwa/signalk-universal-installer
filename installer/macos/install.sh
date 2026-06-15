@@ -44,9 +44,29 @@ ok "podman $(podman --version | awk '{print $3}')"
 
 # 3. Podman Machine
 MACHINE_NAME="${PODMAN_MACHINE_NAME:-signalk}"
+
+# Size the VM's memory to fit the host. podman rejects a machine larger than
+# total system RAM, and the stack's preflight needs >= 2048 MB inside the VM.
+# Target 4096 MB but never more than (host RAM - 1024 headroom for the host OS),
+# floored at 2048. Override with PODMAN_MACHINE_MEMORY_MB.
+MACHINE_MEMORY_MB="${PODMAN_MACHINE_MEMORY_MB:-}"
+if [[ -z "$MACHINE_MEMORY_MB" ]]; then
+    total_mb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 ))
+    avail=$(( total_mb - 1024 ))
+    if (( avail < 4096 )); then MACHINE_MEMORY_MB=$avail; else MACHINE_MEMORY_MB=4096; fi
+    if (( MACHINE_MEMORY_MB < 2048 )); then
+        die "Not enough RAM: this Mac has ${total_mb} MB. The SignalK stack needs a VM with >= 2048 MB plus ~1024 MB headroom (>= ~3072 MB total)."
+    fi
+fi
+# Validate the resolved value (covers a PODMAN_MACHINE_MEMORY_MB override too):
+# must be a plain integer >= 2048, else podman init or the stack preflight fails.
+if ! [[ "$MACHINE_MEMORY_MB" =~ ^[0-9]+$ ]] || (( MACHINE_MEMORY_MB < 2048 )); then
+    die "PODMAN_MACHINE_MEMORY_MB must be an integer >= 2048 (got '${MACHINE_MEMORY_MB}'); the SignalK stack needs at least 2048 MB inside the VM."
+fi
+
 if ! podman machine list --format '{{.Name}}' | grep -qx "$MACHINE_NAME"; then
-    info "Creating Podman machine '$MACHINE_NAME' (this takes a few minutes)"
-    podman machine init --cpus 2 --memory 4096 --disk-size 30 "$MACHINE_NAME"
+    info "Creating Podman machine '$MACHINE_NAME' (${MACHINE_MEMORY_MB} MB; this takes a few minutes)"
+    podman machine init --cpus 2 --memory "$MACHINE_MEMORY_MB" --disk-size 30 "$MACHINE_NAME"
 fi
 
 if ! podman machine list --format '{{.Name}} {{.Running}}' | grep -q "^${MACHINE_NAME}[[:space:]]*true"; then
