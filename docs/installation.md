@@ -124,7 +124,7 @@ The Windows installer:
 4. Runs `podman machine init` / `podman machine start`, which creates and owns its own Linux VM (already has systemd + rootless podman set up).
 5. Hands off to the Linux installer inside the machine via `podman machine ssh`.
 
-A fresh `wsl --install` usually needs **one reboot** (to enable the VirtualMachinePlatform Windows feature). The installer detects this, prints a "reboot, then re-run" message, and exits cleanly; it is idempotent, so re-running after the reboot resumes where it left off.
+**Expect one reboot on a fresh machine — this is normal, not an error.** Enabling WSL2 turns on a Windows feature (VirtualMachinePlatform) that only activates after a restart. The installer enables WSL2 up front, then tells you to reboot and re-run; it is idempotent, so re-running after the reboot picks up where it left off and continues to Podman. (Doing this up front avoids a confusing mid-install failure where Podman would otherwise enable the feature itself and fail to create the VM before the reboot.)
 
 Result: the same container stack as Linux, reachable from Windows via Podman Machine's localhost port forwarding — open `http://localhost` (the admin UI; `:3000` if you decline standard ports), `http://localhost:3003` (Updater), `http://localhost:3004` (Doctor).
 
