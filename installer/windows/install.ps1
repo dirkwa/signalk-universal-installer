@@ -56,13 +56,16 @@ function Die($msg)     { Write-Error $msg; exit 1 }
 # for flaky Store-backed calls like `wsl --install`/`wsl --update`, whose 403
 # from the msstore backend must not abort the installer.
 function Invoke-BestEffort {
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Args)
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments)
     try {
-        & $Exe @Args *>$null
+        & $Exe @Arguments *>$null
+        return $LASTEXITCODE
     } catch {
-        # native stderr surfaced as an error record under Stop — ignore it
+        # native stderr surfaced as an error record under Stop, or the exe
+        # wasn't found — either way report failure (don't trust a stale
+        # $LASTEXITCODE from an earlier command).
+        return 1
     }
-    return $LASTEXITCODE
 }
 
 # The two Windows optional features WSL2 (and podman machine) require.
