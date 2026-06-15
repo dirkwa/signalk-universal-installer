@@ -36,11 +36,13 @@ if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { 
 
 $ErrorActionPreference = 'Stop'
 
-# wsl.exe / some CLIs write console output as UTF-16LE. Without this, a piped
-# capture (`$x = & wsl ...`) comes back with a NUL between every character, so
-# parsing silently fails. Set the console to Unicode for this one-shot process;
-# we also strip stray NULs at parse sites (older PowerShell ignores this).
-try { [Console]::OutputEncoding = [System.Text.Encoding]::Unicode } catch { <# Non-fatal; NUL stripping at parse sites handles the fallback #> }
+# NOTE on output encoding: wsl.exe emits UTF-16LE, so a captured `& wsl ...`
+# comes back with a NUL between every character — Get-VersionFrom strips those
+# NULs to parse the version. We deliberately do NOT set
+# [Console]::OutputEncoding globally: that would make PowerShell decode every
+# child process as UTF-16, which mangles the UTF-8 streaming output of
+# `podman` (and its progress bars) into garbage. So we only capture+clean wsl's
+# output, and let podman write straight to the console.
 
 function Info($msg)    { Write-Host "[i] $msg" -ForegroundColor Cyan }
 function Ok($msg)      { Write-Host "[OK] $msg" -ForegroundColor Green }
@@ -116,6 +118,15 @@ function Get-VersionFrom([string[]]$raw) {
     $m = [regex]::Match($text, '(\d+)\.(\d+)\.(\d+)')
     if ($m.Success) { return [version]("{0}.{1}.{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value) }
     return $null
+}
+
+# True when the Windows hypervisor is actually loaded. When `podman machine`
+# fails, this distinguishes a virtualization problem (no hypervisor) from any
+# other cause (memory/disk/config) — without capturing podman's streamed output
+# (which would suppress its progress bar and, on UTF-8 output, risk mangling).
+function Test-HypervisorPresent {
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+    return [bool]($cs -and $cs.HypervisorPresent)
 }
 
 Section "SignalK Universal Installer v$InstallerVersion (Windows / Podman Machine)"
@@ -203,13 +214,14 @@ $machines = (& podman machine list --format '{{.Name}}' 2>$null) -replace "`0", 
 $hasMachine = $machines -and ($machines -split "\r?\n" | Where-Object { $_.Trim().TrimEnd('*') -eq $MachineName })
 if (-not $hasMachine) {
     Info "Creating Podman machine '$MachineName' (this downloads the VM image; takes a few minutes)"
-    $out = & podman machine init --cpus $MachineCpus --memory $MachineMemoryMB --disk-size 30 $MachineName 2>&1
-    $out | Write-Host
+    # Stream podman's output straight to the console so its download progress
+    # bar shows and UTF-8 text isn't mangled (do NOT capture it).
+    & podman machine init --cpus $MachineCpus --memory $MachineMemoryMB --disk-size 30 $MachineName
     if ($LASTEXITCODE -ne 0) {
-        # Only steer to the virtualization fix when the failure is actually a
-        # hypervisor problem — not a memory/disk/other config error.
-        if ($out -match 'HCS_|hypervisor|virtualiz') { Show-VirtualizationHelp }
-        Die "podman machine init failed (exit $LASTEXITCODE)."
+        # Steer to the virtualization fix only when the hypervisor truly isn't
+        # available — not on a memory/disk/other config error.
+        if (-not (Test-HypervisorPresent)) { Show-VirtualizationHelp }
+        Die "podman machine init failed (exit $LASTEXITCODE). See the podman output above."
     }
 }
 
@@ -220,11 +232,10 @@ $isRunning = $running -split "\r?\n" | Where-Object {
 }
 if (-not $isRunning) {
     Info "Starting Podman machine '$MachineName'"
-    $out = & podman machine start $MachineName 2>&1
-    $out | Write-Host
+    & podman machine start $MachineName
     if ($LASTEXITCODE -ne 0) {
-        if ($out -match 'HCS_|hypervisor|virtualiz') { Show-VirtualizationHelp }
-        Die "podman machine start failed (exit $LASTEXITCODE)."
+        if (-not (Test-HypervisorPresent)) { Show-VirtualizationHelp }
+        Die "podman machine start failed (exit $LASTEXITCODE). See the podman output above."
     }
 }
 & podman system connection default $MachineName 2>$null | Out-Null
