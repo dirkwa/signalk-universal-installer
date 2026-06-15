@@ -115,19 +115,23 @@ function Get-HostHypervisor {
 function Show-VirtualizationHelp {
     $hv = Get-HostHypervisor
     Write-Host ""
-    Warn "Could not start a Linux VM — the Windows hypervisor isn't available (virtualization not enabled)."
+    Write-Host "  If the error above mentions virtualization / HCS_E_HYPERV_NOT_INSTALLED /"
+    Write-Host "  0x80370102, the Windows hypervisor can't create the VM. Fixes:"
     Write-Host ""
     if ($hv) { Write-Host "  Detected host hypervisor: $hv (this looks like a guest VM)." }
     Write-Host "  If this is a VIRTUAL MACHINE, enable nested virtualization on the HOST"
-    Write-Host "  (the VM must be powered OFF when you change it):"
+    Write-Host "  with the VM FULLY POWERED OFF (a reboot from inside the guest is not enough):"
     Write-Host ""
-    Write-Host "    Hyper-V host : Set-VMProcessor -VMName <VM> -ExposeVirtualizationExtensions `$true"
+    Write-Host "    Hyper-V host : Stop-VM <VM>; Set-VMProcessor -VMName <VM> -ExposeVirtualizationExtensions `$true"
+    Write-Host "                   Set-VMMemory -VMName <VM> -DynamicMemoryEnabled `$false; Start-VM <VM>"
     Write-Host "    VMware       : VM Settings > Processors > 'Virtualize Intel VT-x/EPT or AMD-V/RVI'"
     Write-Host "    VirtualBox   : not supported for WSL2 (Hyper-V can't nest in VirtualBox)"
     Write-Host "    Proxmox/KVM  : VM CPU type 'host' + nested KVM enabled on the host"
     Write-Host ""
     Write-Host "  On BARE METAL, enable VT-x / AMD-V (SVM) in the BIOS/UEFI."
     Write-Host "  Confirm inside Windows (want True): (Get-CimInstance Win32_ComputerSystem).HypervisorPresent"
+    Write-Host "  On Windows 11 25H2 (build 26200+), if HypervisorPresent is True but it still"
+    Write-Host "  fails, try: bcdedit /set hypervisorlaunchtype Auto  (then reboot)."
     Write-Host "  More: https://aka.ms/enablevirtualization"
 }
 
@@ -140,14 +144,15 @@ function Get-VersionFrom([string[]]$raw) {
     return $null
 }
 
-# True when the Windows hypervisor is actually loaded. When `podman machine`
-# fails, this distinguishes a virtualization problem (no hypervisor) from any
-# other cause (memory/disk/config) — without capturing podman's streamed output
-# (which would suppress its progress bar and, on UTF-8 output, risk mangling).
-function Test-HypervisorPresent {
-    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
-    return [bool]($cs -and $cs.HypervisorPresent)
-}
+# Guidance shown when `podman machine` init/start fails. We do NOT try to
+# auto-classify the failure: Win32_ComputerSystem.HypervisorPresent can read
+# True (e.g. Windows' own VBS hypervisor) while nested virtualization for
+# creating a child VM still isn't available, so it gives false negatives. And
+# capturing podman's output to grep it would break its live download progress
+# bar. Instead we stream podman's real error to the console (the user sees the
+# exact code, e.g. HCS_E_HYPERV_NOT_INSTALLED) and always print this guidance on
+# failure — it's advice, not a destructive action, and on a guest VM a
+# virtualization problem is by far the most common cause.
 
 Section "SignalK Universal Installer v$InstallerVersion (Windows / Podman Machine)"
 
@@ -245,9 +250,11 @@ if (-not $hasMachine) {
     # bar shows and UTF-8 text isn't mangled (do NOT capture it).
     & podman machine init --cpus $MachineCpus --memory $MachineMemoryMB --disk-size 30 $MachineName
     if ($LASTEXITCODE -ne 0) {
-        # Steer to the virtualization fix only when the hypervisor truly isn't
-        # available — not on a memory/disk/other config error.
-        if (-not (Test-HypervisorPresent)) { Show-VirtualizationHelp }
+        # Clean up the half-created machine so a re-run starts fresh.
+        & podman machine rm --force $MachineName 2>$null | Out-Null
+        # If podman enabled a WSL feature mid-init, that needs a reboot first.
+        if (Test-RebootPending) { Stop-ForReboot }
+        Show-VirtualizationHelp
         Die "podman machine init failed (exit $LASTEXITCODE). See the podman output above."
     }
 }
@@ -261,7 +268,8 @@ if (-not $isRunning) {
     Info "Starting Podman machine '$MachineName'"
     & podman machine start $MachineName
     if ($LASTEXITCODE -ne 0) {
-        if (-not (Test-HypervisorPresent)) { Show-VirtualizationHelp }
+        if (Test-RebootPending) { Stop-ForReboot }
+        Show-VirtualizationHelp
         Die "podman machine start failed (exit $LASTEXITCODE). See the podman output above."
     }
 }
