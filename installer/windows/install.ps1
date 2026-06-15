@@ -65,6 +65,7 @@ function Wait-BeforeExit {
         [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
     } catch {
         # No usable console (e.g. ISE / redirected host) - don't block.
+        $null = $_
     }
 }
 
