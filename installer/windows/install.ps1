@@ -50,28 +50,48 @@ function Warn($msg)    { Write-Warning $msg }
 function Section($msg) { Write-Host ""; Write-Host "== $msg ==" -ForegroundColor White }
 function Die($msg)     { Write-Error $msg; exit 1 }
 
-# True when a Windows feature WSL2 needs (VirtualMachinePlatform / the WSL
-# optional component) was just enabled but the box hasn't rebooted yet — until
-# then WSL2 can't run. Detect this and stop with clear guidance.
+# The two Windows optional features WSL2 (and podman machine) require.
+$WslFeatures = @('VirtualMachinePlatform', 'Microsoft-Windows-Subsystem-Linux')
+
+# True when one of the WSL features was just enabled but the box hasn't rebooted
+# yet — until then WSL2 can't run. Detect this and stop with clear guidance.
 function Test-RebootPending {
-    foreach ($f in @('VirtualMachinePlatform', 'Microsoft-Windows-Subsystem-Linux')) {
+    foreach ($f in $WslFeatures) {
         $feat = Get-WindowsOptionalFeature -Online -FeatureName $f -ErrorAction SilentlyContinue
         if ($feat -and $feat.State -eq 'EnablePending') { return $true }
     }
     return $false
 }
 
-# Print reboot-then-re-run guidance and exit cleanly. The installer is
-# idempotent, so re-running after the reboot resumes from here.
+# True only when BOTH WSL features are fully Enabled. `wsl --version` working is
+# NOT sufficient — the features can report not-fully-enabled while wsl.exe still
+# runs, which is exactly when podman machine's bundled provider re-runs
+# `wsl --install` mid-init and trips the reboot race (HCS_E_SERVICE_NOT_AVAILABLE).
+# We check the feature state directly so we can enable + reboot up front instead.
+function Test-WslFeaturesEnabled {
+    foreach ($f in $WslFeatures) {
+        $feat = Get-WindowsOptionalFeature -Online -FeatureName $f -ErrorAction SilentlyContinue
+        if (-not $feat -or $feat.State -ne 'Enabled') { return $false }
+    }
+    return $true
+}
+
+# Print reboot-then-re-run guidance and exit cleanly. This is a NORMAL part of
+# enabling WSL2 (Windows requires a reboot to activate the feature), not a
+# failure. The installer is idempotent, so re-running after the reboot resumes
+# from here.
 function Stop-ForReboot {
-    Section "Reboot required"
-    Warn "A Windows reboot is needed to finish enabling WSL2 (a required Windows feature is pending)."
+    Section "Reboot required (this is normal — not an error)"
+    Ok "WSL2 has been enabled. Windows needs one reboot to activate it."
     Write-Host ""
-    Write-Host "  Reboot Windows, then re-run this installer:"
-    Write-Host "    iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
+    Write-Host "  Next steps:"
+    Write-Host "    1. Reboot Windows."
+    Write-Host "    2. Open PowerShell as Administrator again."
+    Write-Host "    3. Re-run the same command — it picks up where it left off:"
+    Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
     Write-Host ""
-    Write-Host "  If WSL still fails to start after the reboot, confirm hardware"
-    Write-Host "  virtualization (VT-x / AMD-V) is enabled in your BIOS/UEFI."
+    Write-Host "  (If WSL still fails after the reboot, confirm hardware virtualization"
+    Write-Host "   — VT-x / AMD-V — is enabled in your BIOS/UEFI.)"
     exit 0
 }
 
@@ -148,25 +168,32 @@ Ok "Windows 11 build $build"
 
 # 2. WSL2 platform (no distribution). podman machine provides its own VM, so we
 # only need the WSL2 platform installed, not a user-facing distro.
+#
+# We gate on the FEATURE STATE, not on `wsl --version`: podman machine's bundled
+# WSL provider re-runs `wsl --install` itself if the features aren't fully
+# enabled, which enables a feature mid-init and then fails the VM creation with
+# a reboot-pending error that looks like a crash. By enabling the features here
+# and telling the user up front that one reboot is expected, podman finds WSL
+# ready and never trips that race.
 Section "WSL2 platform"
-try {
+if (Test-WslFeaturesEnabled) {
     $wslVer = Get-VersionFrom (& wsl --version 2>$null)
-} catch { $wslVer = $null }
-if (-not $wslVer) {
+    if ($wslVer) { Ok "WSL $wslVer" } else { Ok "WSL features enabled" }
+    # Keep WSL current (helps the systemd/user-bus story); a no-op if already latest.
+    & wsl --update 2>$null | Out-Null
+    if (Test-RebootPending) { Stop-ForReboot }
+} else {
+    Warn "WSL2 isn't fully enabled yet. Enabling it now — this needs ONE Windows reboot."
+    Info "After the reboot, re-run the same command and it continues automatically."
     Info "Installing the WSL2 platform (no distribution)"
     & wsl --install --no-distribution
-    # `wsl --install` enables VirtualMachinePlatform, which needs a reboot.
-    if (Test-RebootPending) { Stop-ForReboot }
-    try { $wslVer = Get-VersionFrom (& wsl --version 2>$null) } catch { $wslVer = $null }
-    if (-not $wslVer) {
-        Info "Updating WSL"
-        & wsl --update
-        if (Test-RebootPending) { Stop-ForReboot }
-        try { $wslVer = Get-VersionFrom (& wsl --version 2>$null) } catch { $wslVer = $null }
-    }
+    # `wsl --install` enables VirtualMachinePlatform + the WSL component, which
+    # take effect only after a reboot. Expect one here — this is normal setup,
+    # not an error.
+    if (Test-RebootPending -or -not (Test-WslFeaturesEnabled)) { Stop-ForReboot }
+    $wslVer = Get-VersionFrom (& wsl --version 2>$null)
+    if ($wslVer) { Ok "WSL $wslVer" } else { Ok "WSL features enabled" }
 }
-if (Test-RebootPending) { Stop-ForReboot }
-if ($wslVer) { Ok "WSL $wslVer" } else { Warn "WSL version not detected; continuing (podman machine will report if WSL2 is unusable)." }
 
 # 3. Podman CLI (via winget)
 Section "Podman"
