@@ -1562,11 +1562,21 @@ else
     warn "could not create $SIGNALK_LINK; 'signalk' available in new shells via ~/.local/bin"
 fi
 
-# 17. Journald limits.
+# 17. Journald: persistent storage + size cap.
 section "Journald retention drop-in"
 JOURNALD_DROPIN=/etc/systemd/journald.conf.d/signalk.conf
+# Storage=persistent (not just the size cap): without it, a Pi whose journald
+# defaults to volatile — or `auto` with no /var/log/journal — keeps the journal
+# in RAM only, so `systemctl --user` unit logs are never written. That's the
+# blind spot behind "No journal files were found" when a container start fails:
+# neither `signalk bug-report` nor the operator can see what signalk-server
+# actually did. Persistent + capped (the cap MUST stay — an uncapped journal on
+# an SD card fills the card) makes those failures diagnosable. journald writes
+# to /var/log/journal under persistent storage; create it explicitly so the
+# first restart has somewhere to write even before systemd-tmpfiles runs.
 JOURNALD_DESIRED='# Installed by signalk-universal-installer
 [Journal]
+Storage=persistent
 SystemMaxUse=500M
 MaxRetentionSec=14day'
 # Plain `cat` (no $SUDO) so the no-op re-run never prompts for a password.
@@ -1575,13 +1585,24 @@ MaxRetentionSec=14day'
 # our own /etc/sysctl.d drop-in. A 0600 file (how `$SUDO tee` left it before)
 # would make this read fail for the unprivileged user and re-apply every run.
 if [[ "$(cat "$JOURNALD_DROPIN" 2>/dev/null)" == "$JOURNALD_DESIRED" ]]; then
-    ok "journald limits already applied (skipping)"
+    ok "journald persistent + capped already applied (skipping)"
 else
-    info "Capping journald to 500M / 14 days (requires sudo)"
+    info "Enabling persistent journal, capped to 500M / 14 days (requires sudo)"
     $SUDO install -d -m 0755 /etc/systemd/journald.conf.d
+    # 2755, group systemd-journal — matches what journald/systemd-tmpfiles
+    # create for /var/log/journal, so journal-group members can read logs
+    # without waiting for journald to fix ownership. Pass -g only when the
+    # group exists (it does on any systemd host, but `install -g <missing>`
+    # errors and set -e would abort); journald's restart below sets the group
+    # regardless. Harmless if the dir already exists.
+    if getent group systemd-journal >/dev/null 2>&1; then
+        $SUDO install -d -m 2755 -g systemd-journal /var/log/journal
+    else
+        $SUDO install -d -m 2755 /var/log/journal
+    fi
     printf '%s\n' "$JOURNALD_DESIRED" | $SUDO install -m 0644 /dev/stdin "$JOURNALD_DROPIN"
     $SUDO systemctl restart systemd-journald
-    ok "journald limits applied"
+    ok "journald persistent + capped applied"
 fi
 
 # 18. Mark bootstrap-complete
