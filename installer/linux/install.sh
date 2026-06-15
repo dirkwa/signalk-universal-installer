@@ -771,6 +771,43 @@ if ! systemctl --user is-enabled --quiet podman.socket 2>/dev/null; then
 fi
 ok "podman.socket active"
 
+# 4b-bis. Heal the legacy podman API log level.
+#
+# Older installer versions wrote ~/.config/systemd/user/podman.service.d/
+# override.conf with `ExecStart=... $LOGGING system service --time=0`, where
+# the stock unit sets LOGGING="--log-level=info". At info level the podman
+# API service runs `dpkg-query --search` on every helper binary (netavark,
+# slirp4netns, crun, pasta, conmon) on each operation. When a client bursts
+# API calls — e.g. opening the Updater console panel — that fans out into
+# hundreds of concurrent dpkg-query processes and a runaway load storm on
+# slow boxes (observed: load 188 on a Pi-class host; root-caused 2026-06-16
+# by toggling the level: info → 32 dpkg-query, warn → 0).
+#
+# The current installer no longer writes this override (socket activation
+# keeps the API alive; the InfluxDB/Grafana orphan case --time=0 fixed
+# doesn't apply to the 3-engine stack). But deployed boats still carry the
+# legacy file. Pin its log level to warn (podman's real default) while
+# leaving --time=0 / KillMode untouched, so a box that still relies on the
+# keep-alive keeps it. Idempotent: only edits when an info-level (or
+# unset-level) override is present.
+PODMAN_SVC_OVERRIDE="$HOME/.config/systemd/user/podman.service.d/override.conf"
+if [[ -f "$PODMAN_SVC_OVERRIDE" ]] && ! grep -q -- '--log-level=warn' "$PODMAN_SVC_OVERRIDE"; then
+    info "Quieting legacy podman API log level (was info → dpkg-query storm)"
+    # Drop any existing LOGGING line, then append the warn override so the
+    # ${LOGGING} reference in ExecStart resolves to warn instead of the
+    # stock unit's info. Best-effort: a write failure (read-only fs, disk
+    # full) must degrade to a warning, not abort the whole install under
+    # set -e — same posture as the other optional steps in this script.
+    if sed -i '/^Environment=LOGGING=/d' "$PODMAN_SVC_OVERRIDE" \
+        && printf 'Environment=LOGGING="--log-level=warn"\n' >> "$PODMAN_SVC_OVERRIDE"; then
+        systemctl --user daemon-reload || true
+        systemctl --user restart podman.socket 2>/dev/null || true
+        ok "podman API log level pinned to warn"
+    else
+        warn "Could not update $PODMAN_SVC_OVERRIDE; legacy info log level persists (may cause load spikes)"
+    fi
+fi
+
 # 4c. Cgroup delegation for the user slice.
 #
 # The kernel may have memory + pids enabled at the root cgroup, but
