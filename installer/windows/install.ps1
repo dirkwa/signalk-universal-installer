@@ -192,6 +192,11 @@ if ($MachineMemoryMB -le 0) {
         Die "Not enough RAM: this host has ${totalMB} MB. The SignalK stack needs a VM with >= 2048 MB plus ~1024 MB headroom for Windows (>= ~3072 MB total). Add RAM (if a VM, raise its memory) and re-run."
     }
 }
+# Enforce the floor for explicit overrides too — a too-low -MachineMemoryMB
+# would otherwise fail later at init or trip the stack's preflight.
+if ($MachineMemoryMB -lt 2048) {
+    Die "-MachineMemoryMB must be >= 2048 (got $MachineMemoryMB); the SignalK stack needs at least 2048 MB inside the VM."
+}
 Info "VM size: ${MachineCpus} CPUs / ${MachineMemoryMB} MB / 30 GB disk"
 
 $machines = (& podman machine list --format '{{.Name}}' 2>$null) -replace "`0", ''
