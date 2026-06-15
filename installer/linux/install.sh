@@ -977,6 +977,39 @@ capture_unit_failure() {
     } | sed 's/^/    /' >&2
 }
 
+# A `systemctl --user restart` of a Type=notify (sdnotify=conmon) unit BLOCKS
+# until conmon signals ready or TimeoutStartSec elapses, then returns non-zero
+# on timeout. But non-zero != "down": on an SD-card host the `podman run
+# --replace` create can exceed the timeout, systemd KILLs it, and Restart=always
+# silently retries — a later attempt succeeds in seconds. By then the restart
+# command has already returned failure. This polls the unit (and an optional
+# HTTP health URL) for a grace window so that transient, self-recovering case
+# isn't reported as a failure.
+#
+# Returns 0 as soon as the unit is `active` (and the health URL, if given,
+# answers). Short-circuits to 1 the moment the unit reaches `failed`
+# (start-limit-hit or a genuine crash that exhausted the burst) — Restart=always
+# won't retry from there, so that's a real failure and we stop waiting
+# immediately rather than burning the whole window. `is-active` is a
+# non-blocking state query, so the loop never hangs. Never aborts under set -e.
+#   $1 unit   $2 grace-seconds   $3 (optional) health URL to also require
+unit_recovered_within() {
+    local unit=$1 secs=$2 health_url=${3:-}
+    local start=$SECONDS active
+    while (( SECONDS - start < secs )); do
+        active=$(systemctl --user is-active "$unit" 2>/dev/null || true)
+        if [[ "$active" == "active" ]]; then
+            if [[ -z "$health_url" ]] || curl -fsS -o /dev/null -m 5 "$health_url" 2>/dev/null; then
+                return 0
+            fi
+        elif [[ "$active" == "failed" ]]; then
+            return 1
+        fi
+        sleep 3
+    done
+    return 1
+}
+
 # A `systemctl start` that times out (Result: timeout, container KILLed) with no
 # crashloop in the journal is, on SD-card hosts especially, almost always
 # podman blocking on a DAMAGED or INCOMPLETE overlay layer — an image whose
@@ -1088,10 +1121,17 @@ else
     info "restarting signalk-server.service to apply"
     if systemctl --user restart signalk-server.service; then
         ok "signalk-server restarted"
+    elif unit_recovered_within signalk-server.service 120 "$SIGNALK_URL"; then
+        # The blocking restart returned non-zero — a start-timeout under SD-card
+        # I/O contention, not a fault. Restart=always brought the unit back and
+        # it now answers HTTP. Common, self-healing; report it as recovery, not
+        # a failure (the alarming `[!]` + empty `podman logs` from the --rm'd
+        # container was pure noise here).
+        ok "signalk-server recovered after a slow start (SD-card I/O contention)"
     else
-        warn "systemctl --user restart signalk-server.service failed — capturing diagnostics:"
+        warn "systemctl --user restart signalk-server.service failed and did not recover — capturing diagnostics:"
         capture_unit_failure signalk-server.service
-        # A timeout here is most often a damaged overlay layer, not a slow
+        # A timeout here can also be a damaged overlay layer, not just a slow
         # start; surface the repair recipe when the store is inconsistent.
         warn_if_storage_damaged || true
         warn "continuing — the 'signalk' CLI is already installed for recovery (signalk bug-report, signalk uninstall)"
@@ -1122,7 +1162,15 @@ restart_peer_unit() {
         ok "$unit restarted"
         return 0
     fi
-    warn "$unit failed to restart — capturing diagnostics:"
+    # Same transient-timeout reasoning as signalk-server: let Restart bring it
+    # back before alarming. No HTTP arg — the dedicated wait_for_http health
+    # checks below confirm the peers — so we only require the unit to reach
+    # `active` (the failed-state short-circuit still bails fast on a real crash).
+    if unit_recovered_within "$unit" 90; then
+        ok "$unit recovered after a slow start"
+        return 0
+    fi
+    warn "$unit failed to restart and did not recover — capturing diagnostics:"
     capture_unit_failure "$unit"
     warn_if_storage_damaged || true
     warn "continuing — health checks below will retry, and 'signalk bug-report' captures full state"

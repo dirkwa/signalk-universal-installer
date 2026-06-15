@@ -13,8 +13,17 @@ After=podman.socket signalk-updater-server.service signalk-doctor-server.service
 # keys when placed in [Service], which is how they got dropped on the
 # 0.5.x installs (journal logged `Unknown key 'StartLimitIntervalSec'
 # in section [Service], ignoring.` and the unit retried forever).
-# After 5 starts in 5 minutes the unit goes to `failed`.
-StartLimitIntervalSec=300
+#
+# Interval widened to 1800s to match TimeoutStartSec=300 below. On an
+# SD-card host `podman run --replace` can take the full start timeout to
+# create the container under I/O contention; a failed attempt then costs
+# up to TimeoutStartSec + RestartSec = 310s. For the guard to allow all
+# BURST=5 genuine (slow-but-eventually-good) attempts before declaring
+# `failed`, the window must exceed (5-1)×310 = 1240s — rounded to 1800s
+# (30 min). A real crashloop exits in seconds, so it still trips the
+# guard long before 30 min; the wider window only stops penalizing a
+# slow-but-recovering start, it does not weaken genuine-failure detection.
+StartLimitIntervalSec=1800
 StartLimitBurst=5
 
 # Suppress Quadlet's implicit network-readiness dependency. podman 5.x
@@ -114,11 +123,18 @@ Label=io.signalk.role=server
 # (status=0/SUCCESS). Restart=on-failure would not bring it back, and
 # the user would be stranded with a stopped unit. The crashloop guard
 # (StartLimitIntervalSec/StartLimitBurst, in [Unit] above) still kicks
-# in for genuine failure loops — after 5 starts in 5 minutes the unit
+# in for genuine failure loops — after 5 starts in 30 minutes the unit
 # goes to `failed` state and stays there.
 Restart=always
 RestartSec=10
-TimeoutStartSec=180
+# 300s (was 180): on an SD-card host `podman run --replace --rm` can take
+# minutes just to CREATE the container under concurrent I/O (the cold plugin
+# `npm install` runs in the same window) — observed timing out at 180s, getting
+# SIGKILLed, then succeeding in ~3s on a calmer retry. 300s gives the create
+# room to finish on the first attempt so a healthy install usually needs no
+# retry at all. Not raised further — the `systemctl restart` blocks up to this
+# long, so it's also a ceiling on how long the install can stall here.
+TimeoutStartSec=300
 
 [Install]
 WantedBy=default.target
