@@ -35,6 +35,14 @@ if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { 
 
 $ErrorActionPreference = 'Stop'
 
+# wsl.exe writes its console output as UTF-16LE. Without this, a piped capture
+# (`$x = & wsl ...`) comes back with a NUL between every character, so version
+# and distro-name parsing silently fails ("WSL not detected" even though
+# `wsl --version` ran fine). Set the console to Unicode for this one-shot
+# process so captures decode correctly. We also strip stray NULs at each parse
+# site as a belt-and-suspenders guard (older PowerShell ignores this setting).
+try { [Console]::OutputEncoding = [System.Text.Encoding]::Unicode } catch { }
+
 function Info($msg)    { Write-Host "[i] $msg" -ForegroundColor Cyan }
 function Ok($msg)      { Write-Host "[OK] $msg" -ForegroundColor Green }
 function Warn($msg)    { Write-Warning $msg }
@@ -114,7 +122,8 @@ function Get-WslVersion {
     try {
         $raw = & wsl --version 2>$null
         if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
-        $text = ($raw | Out-String)
+        # Strip any NULs left from UTF-16LE output that wasn't decoded.
+        $text = ($raw | Out-String) -replace "`0", ''
         $m = [regex]::Match($text, '(\d+)\.(\d+)\.(\d+)')
         if ($m.Success) { return [version]("{0}.{1}.{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value) }
         return $null
@@ -146,7 +155,8 @@ Ok "WSL $wslVer"
 # 3. WSL2 default + distro install
 Section "WSL2 distro"
 & wsl --set-default-version 2 2>$null | Out-Null  # defensive; never converts an existing distro
-$wslList = & wsl --list --quiet 2>$null
+# Strip stray NULs (UTF-16LE) so the distro-name match doesn't see "D`0e`0b..".
+$wslList = (& wsl --list --quiet 2>$null) -replace "`0", ''
 $hasDistro = $wslList -and ($wslList -match "(?i)^$WslDistro$")
 if (-not $hasDistro) {
     Info "Installing WSL distro '$WslDistro' (a reboot may be required)"
