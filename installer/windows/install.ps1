@@ -288,7 +288,17 @@ if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
         Die "winget is required to install Podman. Install 'App Installer' from the Microsoft Store, or install Podman manually (https://podman.io), then re-run."
     }
     Info "Installing Podman via winget"
-    & winget install -e --id RedHat.Podman --accept-package-agreements --accept-source-agreements --silent
+    # winget draws a Unicode (block-character) progress bar. Set the console to
+    # UTF-8 just for this call so it renders cleanly instead of mojibake, then
+    # restore the previous encoding immediately - leaving it changed would mangle
+    # podman's / wsl's later UTF-8 output (a global change caused exactly that).
+    $prevOutEnc = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        & winget install -e --id RedHat.Podman --accept-package-agreements --accept-source-agreements --disable-interactivity --silent
+    } finally {
+        try { [Console]::OutputEncoding = $prevOutEnc } catch { $null = $_ }
+    }
     # winget may not refresh PATH in this session; probe common install dirs.
     if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
         $cand = Join-Path $env:ProgramFiles 'RedHat\Podman\podman.exe'
