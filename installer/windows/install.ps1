@@ -26,6 +26,8 @@
 
 param(
     [string]$MachineName = 'signalk',
+    [int]$MachineMemoryMB = 0,   # 0 = auto-size from host RAM (see below)
+    [int]$MachineCpus = 2,
     [string]$InstallerVersion,
     [string]$InstallerBaseUrl = 'https://dirkwa.github.io/signalk-universal-installer'
 )
@@ -178,13 +180,30 @@ Ok "podman $(if ($podmanVer) { $podmanVer } else { 'installed' })"
 # 4. Podman Machine — podman creates and owns its own Linux VM (Fedora), the
 # same way the macOS installer does. No user-facing distro, no OOBE.
 Section "Podman Machine"
+
+# Size the VM's memory to fit the host. podman rejects a machine larger than
+# total system RAM, and the stack's preflight needs >= 2048 MB inside the VM.
+# Target 4096 MB but never more than (host RAM - 1024 headroom for Windows),
+# floored at 2048. Auto-sizes unless -MachineMemoryMB was given.
+if ($MachineMemoryMB -le 0) {
+    $totalMB = [int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
+    $MachineMemoryMB = [Math]::Min(4096, $totalMB - 1024)
+    if ($MachineMemoryMB -lt 2048) {
+        Die "Not enough RAM: this host has ${totalMB} MB. The SignalK stack needs a VM with >= 2048 MB plus ~1024 MB headroom for Windows (>= ~3072 MB total). Add RAM (if a VM, raise its memory) and re-run."
+    }
+}
+Info "VM size: ${MachineCpus} CPUs / ${MachineMemoryMB} MB / 30 GB disk"
+
 $machines = (& podman machine list --format '{{.Name}}' 2>$null) -replace "`0", ''
 $hasMachine = $machines -and ($machines -split "\r?\n" | Where-Object { $_.Trim().TrimEnd('*') -eq $MachineName })
 if (-not $hasMachine) {
     Info "Creating Podman machine '$MachineName' (this downloads the VM image; takes a few minutes)"
-    & podman machine init --cpus 2 --memory 4096 --disk-size 30 $MachineName
+    $out = & podman machine init --cpus $MachineCpus --memory $MachineMemoryMB --disk-size 30 $MachineName 2>&1
+    $out | Write-Host
     if ($LASTEXITCODE -ne 0) {
-        Show-VirtualizationHelp
+        # Only steer to the virtualization fix when the failure is actually a
+        # hypervisor problem — not a memory/disk/other config error.
+        if ($out -match 'HCS_|hypervisor|virtualiz') { Show-VirtualizationHelp }
         Die "podman machine init failed (exit $LASTEXITCODE)."
     }
 }
@@ -196,9 +215,10 @@ $isRunning = $running -split "\r?\n" | Where-Object {
 }
 if (-not $isRunning) {
     Info "Starting Podman machine '$MachineName'"
-    & podman machine start $MachineName
+    $out = & podman machine start $MachineName 2>&1
+    $out | Write-Host
     if ($LASTEXITCODE -ne 0) {
-        Show-VirtualizationHelp
+        if ($out -match 'HCS_|hypervisor|virtualiz') { Show-VirtualizationHelp }
         Die "podman machine start failed (exit $LASTEXITCODE)."
     }
 }
