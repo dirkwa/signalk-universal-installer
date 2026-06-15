@@ -108,6 +108,37 @@ function Invoke-Streaming {
     return $LASTEXITCODE
 }
 
+# Thoroughly remove a podman machine, including the orphaned WSL distro podman
+# leaves behind when `machine init` fails partway. After a failed init, podman's
+# own `machine ls`/`rm` no longer see the machine, but the half-registered WSL
+# distro persists and makes the NEXT `machine init` fail instantly (containers/
+# podman #27036, #15154). So we also `wsl --unregister` the distro and clear the
+# stale machine config dirs. All best-effort - never throws, never aborts.
+function Remove-PodmanMachine {
+    param([Parameter(Mandatory)][string]$Name)
+    Invoke-BestEffort podman @('machine', 'rm', '--force', $Name) | Out-Null
+    # podman names its WSL distro after the machine; the default machine is
+    # 'podman-machine-default'. Unregister both candidate names.
+    foreach ($distro in @($Name, 'podman-machine-default')) {
+        Invoke-BestEffort wsl @('--unregister', $distro) | Out-Null
+    }
+    foreach ($dir in @(
+        (Join-Path $env:USERPROFILE '.local\share\containers\podman\machine'),
+        (Join-Path $env:USERPROFILE '.config\containers\podman\machine'))) {
+        if (Test-Path $dir) { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+    }
+}
+
+# True when a WSL distro matching a podman machine exists even though podman's
+# own machine list doesn't show it - the orphaned-distro state that deadlocks
+# `machine init`. We check `wsl --list` (NUL-stripped) for the candidate names.
+function Test-OrphanedMachineDistro {
+    param([Parameter(Mandatory)][string]$Name)
+    $list = (& wsl --list --quiet 2>$null) -replace "`0", ''
+    $names = $list -split "\r?\n" | ForEach-Object { $_.Trim() }
+    return (($names -contains $Name) -or ($names -contains 'podman-machine-default'))
+}
+
 # The two Windows optional features WSL2 (and podman machine) require.
 $WslFeatures = @('VirtualMachinePlatform', 'Microsoft-Windows-Subsystem-Linux')
 
@@ -355,14 +386,20 @@ Info "VM size: ${MachineCpus} CPUs / ${MachineMemoryMB} MB / 30 GB disk"
 $machines = (& podman machine list --format '{{.Name}}' 2>$null) -replace "`0", ''
 $hasMachine = $machines -and ($machines -split "\r?\n" | Where-Object { $_.Trim().TrimEnd('*') -eq $MachineName })
 if (-not $hasMachine) {
+    # A prior failed init can leave an orphaned WSL distro that podman no longer
+    # sees but that makes the next init fail instantly. Clear it up front.
+    if (Test-OrphanedMachineDistro -Name $MachineName) {
+        Info "Cleaning up a leftover podman-machine WSL distro from a prior attempt"
+        Remove-PodmanMachine -Name $MachineName
+    }
     Info "Creating Podman machine '$MachineName' (this downloads the VM image; takes a few minutes)"
     # Stream podman's output live, but via Invoke-Streaming so its progress on
     # stderr ("Getting image source signatures", "Copying blob") doesn't trip
     # the Stop-on-native-stderr behaviour and abort the script mid-pull.
     $rc = Invoke-Streaming podman @('machine', 'init', '--cpus', "$MachineCpus", '--memory', "$MachineMemoryMB", '--disk-size', '30', $MachineName)
     if ($rc -ne 0) {
-        # Clean up the half-created machine so a re-run starts fresh.
-        & podman machine rm --force $MachineName 2>$null | Out-Null
+        # Thoroughly clean up (incl. the orphaned WSL distro) so a re-run is fresh.
+        Remove-PodmanMachine -Name $MachineName
         # If podman enabled a WSL feature mid-init, that needs a reboot first.
         if (Test-RebootPending) { Stop-ForReboot }
         Show-VirtualizationHelp
