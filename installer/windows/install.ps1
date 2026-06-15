@@ -89,6 +89,25 @@ function Invoke-BestEffort {
     }
 }
 
+# Run a native command with its output STREAMING to the console (so progress
+# bars show), but without $ErrorActionPreference='Stop' turning the command's
+# stderr writes into a terminating NativeCommandError. `podman machine init`
+# writes normal progress ("Getting image source signatures", "Copying blob") to
+# stderr, which under Stop would abort the script mid-pull. We redirect stderr to
+# stdout and force Continue for the call, then return the real exit code so the
+# caller decides success/failure.
+function Invoke-Streaming {
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return $LASTEXITCODE
+}
+
 # The two Windows optional features WSL2 (and podman machine) require.
 $WslFeatures = @('VirtualMachinePlatform', 'Microsoft-Windows-Subsystem-Linux')
 
@@ -337,16 +356,17 @@ $machines = (& podman machine list --format '{{.Name}}' 2>$null) -replace "`0", 
 $hasMachine = $machines -and ($machines -split "\r?\n" | Where-Object { $_.Trim().TrimEnd('*') -eq $MachineName })
 if (-not $hasMachine) {
     Info "Creating Podman machine '$MachineName' (this downloads the VM image; takes a few minutes)"
-    # Stream podman's output straight to the console so its download progress
-    # bar shows and UTF-8 text isn't mangled (do NOT capture it).
-    & podman machine init --cpus $MachineCpus --memory $MachineMemoryMB --disk-size 30 $MachineName
-    if ($LASTEXITCODE -ne 0) {
+    # Stream podman's output live, but via Invoke-Streaming so its progress on
+    # stderr ("Getting image source signatures", "Copying blob") doesn't trip
+    # the Stop-on-native-stderr behaviour and abort the script mid-pull.
+    $rc = Invoke-Streaming podman @('machine', 'init', '--cpus', "$MachineCpus", '--memory', "$MachineMemoryMB", '--disk-size', '30', $MachineName)
+    if ($rc -ne 0) {
         # Clean up the half-created machine so a re-run starts fresh.
         & podman machine rm --force $MachineName 2>$null | Out-Null
         # If podman enabled a WSL feature mid-init, that needs a reboot first.
         if (Test-RebootPending) { Stop-ForReboot }
         Show-VirtualizationHelp
-        Die "podman machine init failed (exit $LASTEXITCODE). See the podman output above."
+        Die "podman machine init failed (exit $rc). See the podman output above."
     }
 }
 
@@ -357,11 +377,11 @@ $isRunning = $running -split "\r?\n" | Where-Object {
 }
 if (-not $isRunning) {
     Info "Starting Podman machine '$MachineName'"
-    & podman machine start $MachineName
-    if ($LASTEXITCODE -ne 0) {
+    $rc = Invoke-Streaming podman @('machine', 'start', $MachineName)
+    if ($rc -ne 0) {
         if (Test-RebootPending) { Stop-ForReboot }
         Show-VirtualizationHelp
-        Die "podman machine start failed (exit $LASTEXITCODE). See the podman output above."
+        Die "podman machine start failed (exit $rc). See the podman output above."
     }
 }
 & podman system connection default $MachineName 2>$null | Out-Null
@@ -386,9 +406,13 @@ INSTALLER_VERSION='__VER__' INSTALLER_BASE_URL='__BASE__' bash /tmp/sk-install.s
 '@
 $remote = $remote.Replace('__VER__', $ver).Replace('__BASE__', $base)
 
-& podman machine ssh $MachineName -- bash -lc $remote
-if ($LASTEXITCODE -ne 0) {
-    Die "The Linux installer exited with code $LASTEXITCODE inside the Podman machine."
+# Stream the in-VM installer's output live (it's long), via Invoke-Streaming so
+# its stderr (apt/dnf/podman progress + warnings) doesn't trip Stop-on-stderr
+# and abort before the install finishes. The bash side is `set -euo pipefail`,
+# so a real failure still yields a non-zero exit we surface below.
+$rc = Invoke-Streaming podman @('machine', 'ssh', $MachineName, '--', 'bash', '-lc', $remote)
+if ($rc -ne 0) {
+    Die "The Linux installer exited with code $rc inside the Podman machine."
 }
 
 # 6. Done
