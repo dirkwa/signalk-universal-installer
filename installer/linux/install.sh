@@ -478,6 +478,10 @@ if [[ -n "$VESSEL_MMSI" && ! "$VESSEL_MMSI" =~ ^[0-9]{9}$ ]]; then
     VESSEL_MMSI=""
 fi
 VESSEL_SEED=0
+# Set to 1 when this run seeds config the server only reads at startup (vessel
+# identity, security). On a re-run with the server already up, that means we
+# must `restart` (not just `start`) so the new config takes effect.
+NEED_SERVER_RESTART=0
 if [[ -f "$HOME/.signalk/baseDeltas.json" || -f "$HOME/.signalk/defaults.json" ]]; then
     # Existing vessel identity — never clobber, and keep re-runs prompt-free.
     :
@@ -1435,6 +1439,11 @@ if [[ "$VESSEL_SEED" = "1" ]] && command -v jq >/dev/null 2>&1; then
                 + (if $cs != "" then {communication: {callsignVhf: $cs}} else {} end)
             )}]}]}]' >"$tmp" 2>/dev/null; then
             mv -f "$tmp" "$base_deltas"
+            # signalk-server reads vessel identity from baseDeltas.json ONCE at
+            # startup (into app.config.vesselName, which the admin UI Vessel form
+            # displays). If the server is already running (a re-run), it won't
+            # pick up the just-seeded name until restarted - so flag a restart.
+            NEED_SERVER_RESTART=1
             vessel_label="${VESSEL_NAME:+name ${VESSEL_NAME}, }${VESSEL_MMSI:+MMSI ${VESSEL_MMSI}, }${VESSEL_CALLSIGN:+call sign ${VESSEL_CALLSIGN}, }"
             ok "seeded vessel identity (${vessel_label%, }) into baseDeltas.json"
         else
@@ -1504,6 +1513,9 @@ if [[ "$ADMIN_SEED" = "1" ]]; then
         if [[ "$sec_result" = "exists" ]]; then
             ok "security.json already had users (left as-is)"
         else
+            # New security only takes effect when the server (re)reads it; on an
+            # already-running re-run, restart so auth actually switches on.
+            NEED_SERVER_RESTART=1
             ok "created admin user '$ADMIN_USER' — server starts secured"
         fi
     else
@@ -1531,7 +1543,14 @@ updater_rest_start() {
     done
     return 1
 }
-if [[ -n "$UP_TOKEN" ]]; then
+if [[ "$NEED_SERVER_RESTART" = "1" ]] \
+    && systemctl --user is-active --quiet signalk-server.service; then
+    # Server is already up and we seeded config it only reads at startup
+    # (vessel name / security). `start` is a no-op on a running unit, so the new
+    # config would never load - restart to apply it.
+    info "restarting signalk-server to apply newly seeded config"
+    systemctl --user restart signalk-server.service
+elif [[ -n "$UP_TOKEN" ]]; then
     if updater_rest_start; then
         ok "updater started signalk-server"
     else
