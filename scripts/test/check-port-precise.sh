@@ -97,6 +97,14 @@ run_case "re-run, 3003 held by running updater" "3003" 1 "signalk-updater-server
 # 6. Re-run, 3003 bound but updater NOT running → stray, fail.
 run_case "re-run, 3003 held but updater not running" "3003" 1 "signalk-server" 1
 
+# 7. Re-run WITHOUT the verify marker (bootstrappedAt never written, e.g. a prior
+#    install brought the stack up but died in a later optional step) but the
+#    managed container IS running → must still be treated as expected, not a
+#    conflict. Regression guard: this used to fail because the running-container
+#    check was gated behind is_verify_mode.
+run_case "re-run, no verify marker but signalk-server running" "80" 0 "signalk-server" 0
+run_case "re-run, no verify marker but updater running" "3003" 0 "signalk-updater-server" 0
+
 if (( fail )); then
     echo
     echo "[ERR] check_ports precision is wrong — see entries above." >&2
