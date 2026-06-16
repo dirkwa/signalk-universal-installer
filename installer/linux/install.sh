@@ -920,7 +920,12 @@ gen_token() {
     fi
 }
 for path in "$UPDATER_DATA/token" "$DOCTOR_DATA/token"; do
-    if [[ ! -f "$path" ]]; then
+    # -s, not -f: (re)generate when the file is missing OR empty. An interrupted
+    # earlier run can leave a 0-byte token; with a plain `! -f` check the
+    # installer would "preserve" that empty file forever, and the updater/doctor
+    # then report "Bearer token unavailable (empty token file)" and run
+    # read-only. A non-empty token is still preserved (idempotent).
+    if [[ ! -s "$path" ]]; then
         umask 077
         gen_token >"$path"
         chmod 0600 "$path"
