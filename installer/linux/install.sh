@@ -421,7 +421,12 @@ if [[ "$PRIV_PORTS" = "prompt" && -f "$PRIV_SYSCTL_FILE" ]]; then
     info "Standard web ports already configured (${PRIV_SYSCTL_FILE}); keeping :80/:443."
 fi
 if [[ "$PRIV_PORTS" = "prompt" ]]; then
-    if [[ -r /dev/tty && -w /dev/tty ]]; then
+    # Actually OPEN /dev/tty to decide if we can prompt. A bare `[[ -r /dev/tty ]]`
+    # test passes when the device node merely exists but there's no controlling
+    # terminal behind it (e.g. inside `podman machine ssh`, piped stdin) - then
+    # the real `>/dev/tty` redirect fails with "No such device or address". So we
+    # probe by opening it, in a subshell that can't take the script down.
+    if ( exec 3<>/dev/tty ) 2>/dev/null; then
         printf '\n%sUse standard web ports? HTTP on :80, HTTPS on :443 (default 3000/3443).%s\n' \
             "$C_BOLD" "$C_RESET" >/dev/tty
         printf 'This lowers the host net.ipv4.ip_unprivileged_port_start to 80 (sudo). [Y/n] ' >/dev/tty
@@ -431,7 +436,7 @@ if [[ "$PRIV_PORTS" = "prompt" ]]; then
             *) PRIV_PORTS=1 ;;
         esac
     else
-        # No TTY (curl|bash): honor the default-on intent.
+        # No usable TTY (curl|bash, or no controlling terminal): default-on intent.
         PRIV_PORTS=1
     fi
 fi
@@ -478,7 +483,7 @@ if [[ -f "$HOME/.signalk/baseDeltas.json" || -f "$HOME/.signalk/defaults.json" ]
     :
 elif [[ "$VESSEL_ENV_SET" = "1" ]]; then
     [[ -n "${VESSEL_NAME}${VESSEL_MMSI}${VESSEL_CALLSIGN}" ]] && VESSEL_SEED=1
-elif [[ -r /dev/tty && -w /dev/tty ]]; then
+elif ( exec 3<>/dev/tty ) 2>/dev/null; then  # only prompt if /dev/tty truly opens
     printf '\n%sVessel identity — pre-fills the admin UI (all optional, Enter to skip).%s\n' \
         "$C_BOLD" "$C_RESET" >/dev/tty
     printf 'Boat name: ' >/dev/tty
@@ -535,7 +540,7 @@ elif [[ -n "${SIGNALK_ADMIN_USER:-}" || -n "${SIGNALK_ADMIN_PASSWORD:-}" ]]; the
     else
         ADMIN_SEED=1
     fi
-elif [[ -r /dev/tty && -w /dev/tty ]]; then
+elif ( exec 3<>/dev/tty ) 2>/dev/null; then  # only prompt if /dev/tty truly opens
     printf '\n%sAdmin login — secures the server before it goes on the network.%s\n' \
         "$C_BOLD" "$C_RESET" >/dev/tty
     printf 'Admin username [admin]: ' >/dev/tty
