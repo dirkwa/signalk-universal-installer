@@ -184,18 +184,24 @@ managed_container_running() {
 
 check_ports() {
     local p owner
-    # A real conflict: port bound on a fresh install, OR bound on a re-run
-    # but the managed container that should own it is NOT running (so
-    # something else holds it — e.g. a stray duplicate server on 3000).
+    # A real conflict: a bound port whose owning managed container is NOT running
+    # (so something else holds it — e.g. a stray duplicate server on 3000).
     local conflicts=()
-    # Expected on a re-run: bound and the owning managed container is up.
+    # Expected: bound, and the managed container that should own it IS up.
     local expected=()
+    # `managed_container_running` is the authoritative signal that a bound port
+    # belongs to OUR stack - so it decides per-port, NOT the is_verify_mode
+    # marker. The marker (bootstrappedAt in last-good.json) is written only at the
+    # very last install step, so an install that finished bringing the stack up
+    # but died in a later optional step would leave it unset; gating on it broke
+    # re-runs (the running signalk-* containers looked like a port conflict).
+    # We still compute verify only to word the failure hint.
     local verify=0
     is_verify_mode && verify=1
     for p in "${PORTS_TO_CHECK[@]}"; do
         ss -ltn "( sport = :$p )" 2>/dev/null | tail -n +2 | grep -q . || continue
         owner=$(port_owner "$p")
-        if (( verify )) && [[ -n "$owner" ]] && managed_container_running "$owner"; then
+        if [[ -n "$owner" ]] && managed_container_running "$owner"; then
             expected+=("$p")
         else
             conflicts+=("$p")
