@@ -98,25 +98,29 @@ function Invoke-BestEffort {
 # caller decides success/failure.
 function Invoke-Streaming {
     param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments)
-    # Stream the command's output (stdout+stderr) to the console via Out-Host,
+    # Stream the command's output (stdout+stderr) to the console as PLAIN TEXT,
     # and return ONLY its exit code.
     #
-    # Why Out-Host and not a bare call or `| ForEach-Object`:
-    #   - A bare `& $Exe @Arguments` lets podman's stderr (turned into
-    #     ErrorRecords under Continue) flow into THIS function's output stream, so
-    #     `$rc = Invoke-Streaming ...` captures podman's text lines, not the exit
-    #     code - then `$rc -ne 0` is wrongly true even on success. Out-Host
-    #     displays the output and emits nothing to the pipeline, keeping the
-    #     return value clean.
-    #   - PowerShell does not connect stdin to the pipeline, so piping the OUTPUT
-    #     here does not affect podman's stdin/tty - `machine init`'s `wsl --import`
-    #     still runs fine.
-    # ErrorActionPreference=Continue keeps podman's stderr from raising a
-    # terminating NativeCommandError; $LASTEXITCODE is then podman's own.
+    # Pipeline, stage by stage:
+    #   2>&1                      merge stderr into the stream so we see progress
+    #                             (podman writes "Getting image source signatures"
+    #                             etc. to stderr).
+    #   | ForEach-Object {"$_"}   stringify each item. Under Continue, native
+    #                             stderr arrives as ErrorRecords, which the host
+    #                             would otherwise render as scary red
+    #                             "NativeCommandError" blocks - alarming to a user
+    #                             even though it's just progress. Stringifying
+    #                             renders them as ordinary lines.
+    #   | Out-Host                display the lines and emit NOTHING to the
+    #                             pipeline, so the function returns only the exit
+    #                             code (a bare call would leak podman's text into
+    #                             the return, making `$rc -ne 0` wrongly true).
+    # PowerShell does not connect stdin to the pipeline, so piping the OUTPUT does
+    # not affect podman's stdin/tty - `machine init`'s `wsl --import` runs fine.
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $Exe @Arguments 2>&1 | Out-Host
+        & $Exe @Arguments 2>&1 | ForEach-Object { "$_" } | Out-Host
     } finally {
         $ErrorActionPreference = $prev
     }
