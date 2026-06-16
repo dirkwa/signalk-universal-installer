@@ -337,23 +337,36 @@ elif [[ "$SUDO" = "sudo" ]]; then
     # The -nv probe above can't catch every non-sudoer: sudo
     # authenticates BEFORE the sudoers lookup, so with -n a non-sudoer
     # often just gets "a password is required" (localized) and sails
-    # past the pattern grep. The denial then surfaced mid-run at the
-    # first real $SUDO call, which warned and carried on into a doomed
-    # install. Validate for real, once, interactively — sudo prompts on
-    # /dev/tty (works under curl|bash), caches the timestamp for the
-    # $SUDO steps that follow, and fails here cleanly for non-sudoers
-    # and for unattended runs without NOPASSWD.
-    if ! sudo -v; then
-        err "sudo validation failed for '$USER' — cannot continue."
-        echo >&2
-        err "Either the password was wrong, or '$USER' is not authorized"
-        err "to use sudo. If you just added the user to the sudo group,"
-        err "CLOSE this SSH session entirely and reconnect, then verify"
-        err "with:  groups | grep -qw sudo && echo OK"
-        echo >&2
-        err "To add the user to the sudo group, run as root:"
-        err "  /usr/sbin/usermod -aG sudo $USER"
-        exit 1
+    # past the pattern grep. So validate for real, once.
+    #
+    # First try NON-INTERACTIVELY (`sudo -n -v`): this succeeds when the user
+    # has NOPASSWD or a cached timestamp, and is the only thing that works in a
+    # no-TTY context like `podman machine ssh` (where this installer runs inside
+    # the podman-machine VM). Only if that fails do we fall back to an
+    # interactive `sudo -v` — and only when there's a TTY to prompt on; a plain
+    # interactive `sudo -v` in a no-TTY session dies with "a terminal is required
+    # to read the password" even when NOPASSWD is configured for other commands.
+    if ! sudo -n -v 2>/dev/null; then
+        if [[ -t 0 || -r /dev/tty ]]; then
+            sudo_ok=0
+            sudo -v && sudo_ok=1
+        else
+            sudo_ok=0
+        fi
+        if [[ "$sudo_ok" != "1" ]]; then
+            err "sudo validation failed for '$USER' — cannot continue."
+            echo >&2
+            err "Either the password was wrong, or '$USER' is not authorized"
+            err "to use sudo (and there is no TTY to prompt for a password)."
+            err "If you just added the user to the sudo group, CLOSE this SSH"
+            err "session entirely and reconnect, then verify with:"
+            err "  groups | grep -qw sudo && echo OK"
+            echo >&2
+            err "For an unattended/no-TTY run (e.g. inside a podman machine),"
+            err "grant the user passwordless sudo as root:"
+            err "  echo '$USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-$USER-nopasswd"
+            exit 1
+        fi
     fi
 fi
 if [[ "${DEPRECATED_LAN_EXPOSE_SEEN:-0}" = "1" ]]; then
