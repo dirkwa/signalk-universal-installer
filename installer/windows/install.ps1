@@ -149,13 +149,21 @@ function Invoke-VmScript {
     )
     $lf = $Script -replace "`r", ''
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($lf))
+    # `podman machine ssh` ignores the trailing argv command on Windows and just
+    # runs a login shell reading stdin. So we pipe a SINGLE self-decoding line:
+    #   echo <b64> | base64 -d | bash #
+    # - base64 is one token, no shell metacharacters -> no quote mangling.
+    # - PowerShell appends CRLF to the piped line; the trailing ` #` turns the
+    #   stray \r into a comment so it can't corrupt the final `bash` token.
+    # - It runs as a real piped `bash`, so the script's exit code propagates.
+    $line = "echo $b64 | base64 -d | bash #"
     $sshArgs = @('machine', 'ssh')
     if ($AsUser) { $sshArgs += @('--username', $AsUser) }
-    $sshArgs += @($Machine, '--', 'bash', '-c', 'base64 -d | bash')
+    $sshArgs += $Machine
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $b64 | & podman @sshArgs 2>&1 | ForEach-Object { "$_" } | Out-Host
+        $line | & podman @sshArgs 2>&1 | ForEach-Object { "$_" } | Out-Host
     } finally {
         $ErrorActionPreference = $prev
     }
