@@ -98,10 +98,17 @@ function Invoke-BestEffort {
 # caller decides success/failure.
 function Invoke-Streaming {
     param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments)
+    # Run the command with output going STRAIGHT to the console - no pipe.
+    # Piping (e.g. `... 2>&1 | ForEach-Object`) detaches stdin from the
+    # terminal, and `podman machine init`'s `wsl --import` step is tty-sensitive:
+    # it works run directly but fails (exit 0xffffffff) when its stdio is
+    # redirected. Setting ErrorActionPreference=Continue is enough to keep
+    # podman's stderr writes from raising a terminating NativeCommandError, so we
+    # don't need to redirect at all. $LASTEXITCODE is then podman's own.
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
+        & $Exe @Arguments
     } finally {
         $ErrorActionPreference = $prev
     }

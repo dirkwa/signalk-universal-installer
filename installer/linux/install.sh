@@ -808,6 +808,31 @@ if [[ -f "$PODMAN_SVC_OVERRIDE" ]] && ! grep -q -- '--log-level=warn' "$PODMAN_S
     fi
 fi
 
+# 4b-ter. Circuit breaker: cap concurrent tasks under podman.service.
+#
+# podman's /info & /version (which dockerode clients poll) shell out
+# `dpkg-query --search` on each helper binary to report provenance. The
+# engines now cache runtime detection so steady-state is a non-event, but
+# a COLD boot — all three engines starting concurrently with empty caches —
+# can still fan out a burst before the caches fill. TasksMax is a hard
+# ceiling on how many children the podman daemon cgroup can fork at once,
+# so even a worst-case cold burst can't melt a slow box. 256 is ~8x the
+# observed idle task count (32) — invisible to legitimate pull/run/recreate
+# but a firm stop on a runaway dpkg fork-storm. TasksMax ONLY: a CPUQuota
+# or MemoryMax here would throttle/OOM real image pulls (the daemon peaks
+# ~2G RSS during unpack), so we deliberately don't set those.
+PODMAN_LIMITS_DIR="$HOME/.config/systemd/user/podman.service.d"
+PODMAN_LIMITS_CONF="$PODMAN_LIMITS_DIR/resource-limits.conf"
+if [[ ! -f "$PODMAN_LIMITS_CONF" ]] || ! grep -q '^TasksMax=' "$PODMAN_LIMITS_CONF"; then
+    if mkdir -p "$PODMAN_LIMITS_DIR" 2>/dev/null \
+        && printf '[Service]\nTasksMax=256\n' > "$PODMAN_LIMITS_CONF"; then
+        systemctl --user daemon-reload || true
+        ok "podman.service TasksMax cap applied (fork-storm circuit breaker)"
+    else
+        warn "Could not write $PODMAN_LIMITS_CONF; podman fork-storm cap not applied"
+    fi
+fi
+
 # 4c. Cgroup delegation for the user slice.
 #
 # The kernel may have memory + pids enabled at the root cgroup, but
