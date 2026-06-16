@@ -658,6 +658,25 @@ if (( pv_major < req_major )) || { (( pv_major == req_major )) && (( pv_minor < 
     exit 1
 fi
 
+# Ensure subuid/subgid ranges exist for rootless podman. Debian/Ubuntu/Pi OS
+# auto-populate /etc/subuid + /etc/subgid for human users via adduser, so this
+# is a no-op there. But minimally-provisioned images (e.g. the Fedora
+# podman-machine VM, where the user is created from a Containerfile) can lack a
+# range — and then the very first `podman pull` below fails with
+# "lookup user ...: no subuid ranges found". preflight only warns about this; we
+# actually fix it here. Idempotent: only added when missing.
+if ! grep -q "^${USER}:" /etc/subuid 2>/dev/null; then
+    info "Adding subuid range for $USER (rootless podman; requires sudo)"
+    $SUDO usermod --add-subuids 100000-165535 "$USER" || warn "could not add subuid range for $USER"
+fi
+if ! grep -q "^${USER}:" /etc/subgid 2>/dev/null; then
+    info "Adding subgid range for $USER (rootless podman; requires sudo)"
+    $SUDO usermod --add-subgids 100000-165535 "$USER" || warn "could not add subgid range for $USER"
+fi
+# Re-read the (possibly new) ranges so the first pull doesn't trip over a stale
+# user-namespace mapping.
+podman system migrate >/dev/null 2>&1 || true
+
 # jq smooths a few optional steps (sslport / vessel-identity / security seeding,
 # admin-user lookup, the last-good snapshot) and `signalk bug-report`'s JSON
 # handling — every consumer guards on `command -v jq` and degrades without it,
