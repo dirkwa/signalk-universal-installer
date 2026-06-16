@@ -555,11 +555,15 @@ Info "Fetching $linuxUrl and running it in the machine"
 # documented Linux one-liner runs, and what the self-fetch logic expects.
 $ver = $InstallerVersion -replace "'", "'\''"
 $base = $InstallerBaseUrl -replace "'", "'\''"
+# Keep the curl|bash on ONE line - no backslash line-continuation. A `\` at end
+# of line followed by CRLF makes bash continue the line and swallow the `\r`
+# into the next token (seen as `$'bash\r': command not found`). One line has no
+# internal newline to carry a CR into the middle of a command. Invoke-VmScript
+# also strips CR, but a single line removes the failure mode entirely.
 $remote = @'
 set -euo pipefail
 cd "$HOME"
-curl -fsSL '__BASE__/installer/linux/install.sh' \
-  | INSTALLER_VERSION='__VER__' INSTALLER_BASE_URL='__BASE__' bash
+curl -fsSL '__BASE__/installer/linux/install.sh' | INSTALLER_VERSION='__VER__' INSTALLER_BASE_URL='__BASE__' bash
 '@
 $remote = $remote.Replace('__VER__', $ver).Replace('__BASE__', $base)
 
