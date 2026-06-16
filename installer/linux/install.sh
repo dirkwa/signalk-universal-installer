@@ -907,10 +907,22 @@ ok "groups: dialout, gpio, netdev (ensured if present on host)"
 # 6. Tokens
 section "Authentication tokens"
 mkdir -p "$UPDATER_DATA" "$DOCTOR_DATA"
+# Generate 32 random bytes, base64-encoded. Prefer /dev/urandom (+ base64),
+# which are always present, so we don't depend on openssl - it isn't installed
+# on every image (e.g. the Fedora podman-machine VM, where this died with
+# "openssl: command not found"). Fall back to openssl only if /dev/urandom is
+# somehow unreadable.
+gen_token() {
+    if [[ -r /dev/urandom ]]; then
+        head -c 32 /dev/urandom | base64 | tr -d '\n'
+    else
+        openssl rand -base64 32 | tr -d '\n'
+    fi
+}
 for path in "$UPDATER_DATA/token" "$DOCTOR_DATA/token"; do
     if [[ ! -f "$path" ]]; then
         umask 077
-        openssl rand -base64 32 | tr -d '\n' >"$path"
+        gen_token >"$path"
         chmod 0600 "$path"
         ok "generated $path"
     else
