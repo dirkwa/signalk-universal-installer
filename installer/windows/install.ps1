@@ -127,6 +127,34 @@ function Invoke-Streaming {
     return $LASTEXITCODE
 }
 
+# Run a bash script inside the podman machine, fed via STDIN - not as a
+# `bash -lc '<script>'` argument. Passing a script as an ssh command argument
+# gets its quotes mangled on the PowerShell -> podman -> WSL path (a `printf
+# '...'` lost its arguments and wrote an empty file; '(' triggered "syntax error
+# near unexpected token"). Piping the script to `podman machine ssh` (which runs
+# a shell reading stdin) sidesteps all of that. We also strip CR so the VM's
+# bash sees Unix LF lines (PowerShell here-strings are CRLF, and a stray \r
+# breaks tools like `cut`). Output streams to the console; returns the exit code.
+function Invoke-VmScript {
+    param(
+        [Parameter(Mandatory)][string]$Machine,
+        [Parameter(Mandatory)][string]$Script,
+        [string]$AsUser  # empty => default user
+    )
+    $lf = $Script -replace "`r", ''
+    $sshArgs = @('machine', 'ssh')
+    if ($AsUser) { $sshArgs += @('--username', $AsUser) }
+    $sshArgs += $Machine
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $lf | & podman @sshArgs 2>&1 | ForEach-Object { "$_" } | Out-Host
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return $LASTEXITCODE
+}
+
 # Thoroughly remove a podman machine, including the orphaned WSL distro podman
 # leaves behind when `machine init` fails partway. After a failed init, podman's
 # own `machine ls`/`rm` no longer see the machine, but the half-registered WSL
@@ -507,7 +535,7 @@ if ! visudo -cf "$f"; then
 fi
 echo "granted NOPASSWD sudo to $u"
 '@
-$rc = Invoke-Streaming podman @('machine', 'ssh', '--username', 'root', $MachineName, '--', 'bash', '-lc', $sudoersScript)
+$rc = Invoke-VmScript -Machine $MachineName -AsUser 'root' -Script $sudoersScript
 if ($rc -ne 0) {
     Die "Could not grant passwordless sudo to the machine's user (exit $rc). The in-VM installer needs it. See the output above."
 }
@@ -535,11 +563,10 @@ curl -fsSL '__BASE__/installer/linux/install.sh' \
 '@
 $remote = $remote.Replace('__VER__', $ver).Replace('__BASE__', $base)
 
-# Stream the in-VM installer's output live (it's long), via Invoke-Streaming so
-# its stderr (apt/dnf/podman progress + warnings) doesn't trip Stop-on-stderr
-# and abort before the install finishes. The bash side is `set -euo pipefail`,
-# so a real failure still yields a non-zero exit we surface below.
-$rc = Invoke-Streaming podman @('machine', 'ssh', $MachineName, '--', 'bash', '-lc', $remote)
+# Feed the script via stdin (Invoke-VmScript) so its quotes survive the
+# PowerShell -> podman -> WSL path; output streams live. The bash side is
+# `set -euo pipefail`, so a real failure still yields a non-zero exit below.
+$rc = Invoke-VmScript -Machine $MachineName -Script $remote
 if ($rc -ne 0) {
     Die "The Linux installer exited with code $rc inside the Podman machine."
 }
