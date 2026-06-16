@@ -487,14 +487,20 @@ Info "Fetching $linuxUrl and running it in the machine"
 # Single-quoted here-string: every $ is for bash. The two installer values are
 # spliced in after escaping single quotes (they're URLs/versions, low risk, but
 # be safe).
+#
+# PIPE install.sh into bash (curl ... | bash) rather than saving to a file and
+# running it. The Linux installer fetches its lib/ helpers + Quadlet templates
+# itself ONLY when invoked from stdin (BASH_SOURCE empty); run from a saved file
+# it assumes the siblings are on disk and dies with
+# "/tmp/lib/colors.sh: No such file or directory". Piping is exactly how the
+# documented Linux one-liner runs, and what the self-fetch logic expects.
 $ver = $InstallerVersion -replace "'", "'\''"
 $base = $InstallerBaseUrl -replace "'", "'\''"
 $remote = @'
 set -euo pipefail
 cd "$HOME"
-curl -fsSL '__BASE__/installer/linux/install.sh' -o /tmp/sk-install.sh
-chmod +x /tmp/sk-install.sh
-INSTALLER_VERSION='__VER__' INSTALLER_BASE_URL='__BASE__' bash /tmp/sk-install.sh
+curl -fsSL '__BASE__/installer/linux/install.sh' \
+  | INSTALLER_VERSION='__VER__' INSTALLER_BASE_URL='__BASE__' bash
 '@
 $remote = $remote.Replace('__VER__', $ver).Replace('__BASE__', $base)
 

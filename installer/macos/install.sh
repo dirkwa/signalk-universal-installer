@@ -89,9 +89,8 @@ info "Fetching $LINUX_URL and running it in the machine"
 podman machine ssh "$MACHINE_NAME" -- bash -lc "
     set -euo pipefail
     cd \$HOME
-    curl -fsSL '${LINUX_URL}' -o /tmp/sk-install.sh
-    chmod +x /tmp/sk-install.sh
-    INSTALLER_VERSION='${INSTALLER_VERSION}' INSTALLER_BASE_URL='${INSTALLER_BASE_URL}' bash /tmp/sk-install.sh
+    curl -fsSL '${LINUX_URL}' \
+      | INSTALLER_VERSION='${INSTALLER_VERSION}' INSTALLER_BASE_URL='${INSTALLER_BASE_URL}' bash
 "
 
 # 5. Forward the ports out of the machine
