@@ -1570,10 +1570,15 @@ DOCTOR_TOKEN_PATH="$HOME/.signalk-doctor/signalk-token"
 SK_TOKEN_BIN=/home/node/signalk/node_modules/signalk-server/bin/signalk-generate-token
 SK_SECURITY_PATH=/home/node/.signalk/security.json
 section "Doctor admin token"
+# This step is OPTIONAL and best-effort: it mints a token so the doctor's drift
+# scanner can hit the admin-gated diagnostics endpoint. It only does anything
+# when the server is secured (has users), and it must NEVER fail the install -
+# the stack is fully up by this point. The `podman exec` probes below can return
+# non-zero in ways that aren't already in an `if`-condition position (e.g. exit
+# 125 if the container's exec path hiccups), which under `set -e` would abort the
+# whole install. Guard the section by relaxing `set -e` for it, then restore.
+set +e
 # The token's `id` claim must match an admin in security.json's users[].
-# Prefer the user we just seeded; on re-runs (or operator-set security)
-# read the first admin straight from the host-side file — it's
-# host-readable, no podman needed. Fall back to "admin".
 sk_admin_user="$ADMIN_USER"
 if [[ -z "$sk_admin_user" ]] && command -v jq >/dev/null 2>&1; then
     sk_admin_user=$(jq -r '[.users[]? | select(.type == "admin")][0].username // empty' \
@@ -1609,6 +1614,7 @@ else
         warn "you can retry with:  podman exec signalk-server $SK_TOKEN_BIN -u $sk_admin_user -e 5y -s $SK_SECURITY_PATH"
     fi
 fi
+set -e   # end of the relaxed-set-e doctor-token section
 
 # 16. Ensure ~/.local/bin is on PATH for future logins.
 #
