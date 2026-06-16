@@ -685,6 +685,56 @@ if ($rc -ne 0) {
     Die "The Linux installer exited with code $rc inside the Podman machine."
 }
 
+# 5b. Install a Windows-side `signalk` command that forwards into the VM.
+# On Linux the installer puts `signalk` on PATH; on Windows the CLI lives inside
+# the machine. We drop two files on the user's PATH: signalk.ps1 (does the work)
+# and signalk.cmd (a thin shim so it runs from cmd.exe too).
+#
+# Transport (the load-bearing bit, learned the hard way): you CANNOT reliably
+# pass `signalk <args>` to the VM as `podman machine ssh -- bash -lc '<script>'`
+# - on Windows that path drops trailing positional args AND mangles quotes, so
+# the subcommand never reaches the CLI (it just prints help). The robust method,
+# same as the install handoff: base64-encode the command and pipe it via STDIN
+# to `base64 -d | bash`. base64 has no shell metacharacters and `base64 -d`
+# ignores the CR PowerShell appends, so it's immune to both failure modes. The
+# .ps1 joins the user's args, prefixes `signalk `, base64s it, and pipes it in.
+Section "Windows CLI"
+$skCmdDir = Join-Path $env:LOCALAPPDATA 'Programs\signalk'
+# The PS1 forwards its args to the in-VM `signalk` over the base64-stdin
+# transport. `bash -lc` gives the login PATH that has ~/.local/bin/signalk.
+$ps1Body = @"
+# SignalK CLI shim - forwards to `signalk` inside Podman machine '$MachineName'.
+`$cmd = 'signalk ' + (`$args -join ' ')
+`$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$cmd))
+# Pipe via stdin: base64 -d ignores the CR PowerShell appends inside the b64, and
+# the trailing ` #` turns the CR after `bash -l` into a comment (without it bash
+# sees `-l<CR>` = invalid option). `-l` = login shell so ~/.local/bin (signalk)
+# is on PATH.
+"echo `$b64 | base64 -d | bash -l #" | podman machine ssh $MachineName
+exit `$LASTEXITCODE
+"@
+# .cmd shim so `signalk ...` works from cmd.exe and PowerShell alike.
+$cmdBody = @"
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0signalk.ps1" %*
+"@
+try {
+    New-Item -ItemType Directory -Force -Path $skCmdDir | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $skCmdDir 'signalk.ps1'), ($ps1Body -replace "`r?`n", "`r`n"), [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText((Join-Path $skCmdDir 'signalk.cmd'), ($cmdBody -replace "`r?`n", "`r`n"), [System.Text.Encoding]::ASCII)
+    # Add the dir to the USER PATH (no admin needed) if not already there.
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (($userPath -split ';') -notcontains $skCmdDir) {
+        $newPath = if ($userPath) { "$userPath;$skCmdDir" } else { $skCmdDir }
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+        Ok "Installed 'signalk' command to $skCmdDir (added to PATH - open a NEW terminal to use it)"
+    } else {
+        Ok "Installed 'signalk' command to $skCmdDir"
+    }
+} catch {
+    Warn "Could not install the Windows 'signalk' command ($($_.Exception.Message)); use 'podman machine ssh $MachineName' then 'signalk ...' instead."
+}
+
 # 6. Done
 @"
 
@@ -696,9 +746,11 @@ OK - SignalK is up inside Podman Machine '$MachineName'.
 
 Podman Machine forwards published container ports to Windows localhost.
 
-To open a shell in the machine for diagnostics:
-  podman machine ssh $MachineName
-  ~/.local/bin/signalk-recovery status
+Manage it from a NEW terminal with the 'signalk' command, e.g.:
+  signalk health
+  signalk version
+  signalk bug-report
+(or open a shell in the machine: podman machine ssh $MachineName)
 
 USB serial passthrough requires usbipd-win on the Windows side; see
 docs/installation.md (section "Windows USB").
