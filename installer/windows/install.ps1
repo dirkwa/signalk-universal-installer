@@ -127,14 +127,20 @@ function Invoke-Streaming {
     return $LASTEXITCODE
 }
 
-# Run a bash script inside the podman machine, fed via STDIN - not as a
-# `bash -lc '<script>'` argument. Passing a script as an ssh command argument
-# gets its quotes mangled on the PowerShell -> podman -> WSL path (a `printf
-# '...'` lost its arguments and wrote an empty file; '(' triggered "syntax error
-# near unexpected token"). Piping the script to `podman machine ssh` (which runs
-# a shell reading stdin) sidesteps all of that. We also strip CR so the VM's
-# bash sees Unix LF lines (PowerShell here-strings are CRLF, and a stray \r
-# breaks tools like `cut`). Output streams to the console; returns the exit code.
+# Run a bash script inside the podman machine, immune to BOTH hazards on the
+# PowerShell -> podman -> WSL path:
+#   1. Quote mangling - passing a script as `bash -lc '<script>'` strips its
+#      quotes (a `printf '...'` lost its args and wrote an empty file; '('
+#      gave "syntax error near unexpected token").
+#   2. CRLF injection - Windows PowerShell re-inserts CRLF when piping a string
+#      to a native process's stdin, so stripping CR from the string is futile;
+#      the `\r` reaches bash and breaks the last token ("$'bash\r': not found").
+# Solution: base64-encode the script (one line; only [A-Za-z0-9+/=], no shell
+# metacharacters) and pipe THAT via stdin to `base64 -d | bash` in the VM.
+# `base64 -d` ignores the trailing CR PowerShell adds, and the decoded bytes are
+# the exact original script. The decode command is passed as a single argv
+# element via array splat, which podman forwards intact (only inline quotes in a
+# typed command get mangled).
 function Invoke-VmScript {
     param(
         [Parameter(Mandatory)][string]$Machine,
@@ -142,13 +148,22 @@ function Invoke-VmScript {
         [string]$AsUser  # empty => default user
     )
     $lf = $Script -replace "`r", ''
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($lf))
+    # `podman machine ssh` ignores the trailing argv command on Windows and just
+    # runs a login shell reading stdin. So we pipe a SINGLE self-decoding line:
+    #   echo <b64> | base64 -d | bash #
+    # - base64 is one token, no shell metacharacters -> no quote mangling.
+    # - PowerShell appends CRLF to the piped line; the trailing ` #` turns the
+    #   stray \r into a comment so it can't corrupt the final `bash` token.
+    # - It runs as a real piped `bash`, so the script's exit code propagates.
+    $line = "echo $b64 | base64 -d | bash #"
     $sshArgs = @('machine', 'ssh')
     if ($AsUser) { $sshArgs += @('--username', $AsUser) }
     $sshArgs += $Machine
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $lf | & podman @sshArgs 2>&1 | ForEach-Object { "$_" } | Out-Host
+        $line | & podman @sshArgs 2>&1 | ForEach-Object { "$_" } | Out-Host
     } finally {
         $ErrorActionPreference = $prev
     }
