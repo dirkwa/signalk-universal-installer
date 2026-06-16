@@ -80,6 +80,21 @@ podman system connection default "$MACHINE_NAME" 2>/dev/null || true
 # 4. Run the Linux installer inside the machine.
 section "Bootstrapping inside the Podman machine"
 
+# The Linux installer runs as the machine's regular user and sudo's for its few
+# system steps. `podman machine ssh` has no TTY, so if that user's sudo wants a
+# password the install dies ("a terminal is required to read the password").
+# Grant the default user passwordless sudo first, via the root connection
+# (podman machine init creates both a user and a root system connection). The
+# default user is whoever `podman machine ssh` lands as; we resolve it rather
+# than hardcode (it's `core` on Fedora CoreOS, `user` on the WSL Fedora image).
+info "Ensuring the machine's user can sudo non-interactively"
+SK_VM_USER="$(podman machine ssh "$MACHINE_NAME" -- whoami | tr -d '[:space:]')"
+podman machine ssh --username root "$MACHINE_NAME" -- bash -lc "
+    set -euo pipefail
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' '${SK_VM_USER}' > /etc/sudoers.d/90-signalk-nopasswd
+    chmod 0440 /etc/sudoers.d/90-signalk-nopasswd
+"
+
 # We pipe install.sh through `podman machine ssh` which runs an interactive
 # shell in the VM. The Linux install.sh handles podman, systemd-user, linger,
 # Quadlets — all of which exist inside the VM.

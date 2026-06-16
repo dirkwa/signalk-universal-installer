@@ -481,6 +481,26 @@ Ok "Podman machine '$MachineName' running"
 
 # 5. Run the Linux installer inside the machine (exactly like macOS).
 Section "Bootstrapping inside the Podman machine"
+
+# The Linux installer runs as the machine's regular user and sudo's for its few
+# system steps. `podman machine ssh` has no TTY, so if that user's sudo wants a
+# password the install dies ("a terminal is required to read the password").
+# Grant the default user passwordless sudo first, via the root connection. The
+# default user is whoever `podman machine ssh` lands as (resolved, not hardcoded
+# - it's `user` on the WSL Fedora image, `core` on Fedora CoreOS).
+Info "Ensuring the machine's user can sudo non-interactively"
+$skVmUser = (& podman machine ssh $MachineName -- whoami) -replace "`0", '' -replace '\s', ''
+$sudoersScript = @'
+set -euo pipefail
+printf '%s ALL=(ALL) NOPASSWD:ALL\n' '__SK_VM_USER__' > /etc/sudoers.d/90-signalk-nopasswd
+chmod 0440 /etc/sudoers.d/90-signalk-nopasswd
+'@
+$sudoersScript = $sudoersScript.Replace('__SK_VM_USER__', $skVmUser)
+$rc = Invoke-Streaming podman @('machine', 'ssh', '--username', 'root', $MachineName, '--', 'bash', '-lc', $sudoersScript)
+if ($rc -ne 0) {
+    Warn "Could not pre-grant passwordless sudo (exit $rc); the in-VM install may prompt and fail."
+}
+
 $linuxUrl = "$InstallerBaseUrl/installer/linux/install.sh"
 Info "Fetching $linuxUrl and running it in the machine"
 
