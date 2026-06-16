@@ -339,14 +339,17 @@ elif [[ "$SUDO" = "sudo" ]]; then
     # often just gets "a password is required" (localized) and sails
     # past the pattern grep. So validate for real, once.
     #
-    # First try NON-INTERACTIVELY (`sudo -n -v`): this succeeds when the user
-    # has NOPASSWD or a cached timestamp, and is the only thing that works in a
-    # no-TTY context like `podman machine ssh` (where this installer runs inside
-    # the podman-machine VM). Only if that fails do we fall back to an
-    # interactive `sudo -v` — and only when there's a TTY to prompt on; a plain
-    # interactive `sudo -v` in a no-TTY session dies with "a terminal is required
-    # to read the password" even when NOPASSWD is configured for other commands.
-    if ! sudo -n -v 2>/dev/null; then
+    # First try a NON-INTERACTIVE real command (`sudo -n true`): this is what the
+    # installer actually does (run commands as root), and it's exactly what
+    # NOPASSWD covers. We deliberately do NOT use `sudo -n -v` here: `-v` only
+    # validates/refreshes the credential timestamp, and on many sudoers configs
+    # (a catch-all `%wheel ALL=(ALL) ALL` matched before the NOPASSWD line, or
+    # Defaults that gate -v) it still demands a password even when NOPASSWD
+    # applies to commands — which fails in a no-TTY context like
+    # `podman machine ssh` even though `sudo -n true` succeeds. So `sudo -n true`
+    # is the reliable "can this user sudo unattended?" check. Only if it fails do
+    # we fall back to an interactive `sudo -v`, and only when a TTY exists.
+    if ! sudo -n true 2>/dev/null; then
         if [[ -t 0 || -r /dev/tty ]]; then
             sudo_ok=0
             sudo -v && sudo_ok=1
