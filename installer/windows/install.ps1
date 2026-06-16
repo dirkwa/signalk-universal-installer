@@ -29,6 +29,7 @@ param(
     [int]$MachineMemoryMB = 0,   # 0 = auto-size from host RAM (see below)
     [int]$MachineCpus = 2,
     [switch]$NoPause,            # skip the "press Enter to close" pause at the end
+    [switch]$NoPrompt,           # don't ask for vessel identity / admin login
     [string]$InstallerVersion,
     [string]$InstallerBaseUrl = 'https://dirkwa.github.io/signalk-universal-installer'
 )
@@ -168,6 +169,33 @@ function Invoke-VmScript {
         $ErrorActionPreference = $prev
     }
     return $LASTEXITCODE
+}
+
+# Like Invoke-VmScript but CAPTURES and returns the script's stdout (trimmed),
+# for probes whose output we need to read. Same base64-over-stdin transport.
+function Get-VmOutput {
+    param(
+        [Parameter(Mandatory)][string]$Machine,
+        [Parameter(Mandatory)][string]$Script,
+        [string]$AsUser
+    )
+    $lf = $Script -replace "`r", ''
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($lf))
+    $line = "echo $b64 | base64 -d | bash #"
+    $sshArgs = @('machine', 'ssh')
+    if ($AsUser) { $sshArgs += @('--username', $AsUser) }
+    $sshArgs += $Machine
+    $out = $line | & podman @sshArgs 2>$null
+    return (($out | Out-String) -replace "`0", '').Trim()
+}
+
+# True when this run can prompt the user (interactive console, stdin not piped,
+# and -NoPrompt not set). Mirrors the Linux installer only prompting on a TTY.
+function Test-CanPrompt {
+    if ($NoPrompt) { return $false }
+    if (-not [Environment]::UserInteractive) { return $false }
+    if ([Console]::IsInputRedirected) { return $false }
+    return $true
 }
 
 # Thoroughly remove a podman machine, including the orphaned WSL distro podman
@@ -555,6 +583,65 @@ if ($rc -ne 0) {
     Die "Could not grant passwordless sudo to the machine's user (exit $rc). The in-VM installer needs it. See the output above."
 }
 
+# Vessel identity + admin login. The in-VM install has no TTY, so the Linux
+# installer can't prompt - we ask here (PowerShell has a real console) and
+# forward the answers as SIGNALK_* env vars it reads. Like the Linux installer,
+# only ask when the info doesn't already exist: probe the VM for an existing
+# vessel-identity file and for users in security.json, and prompt only for the
+# missing piece. Skipped entirely under -NoPrompt or a non-interactive run.
+$skEnvVars = @{}
+if (Test-CanPrompt) {
+    Section "SignalK setup"
+    # Probe existing state inside the VM (~/.signalk lives in the server's data
+    # dir, mounted from the user's home). Echo a token per item that exists.
+    $probe = @'
+v=no; a=no
+[ -f "$HOME/.signalk/baseDeltas.json" ] || [ -f "$HOME/.signalk/defaults.json" ] && v=yes
+if [ -f "$HOME/.signalk/security.json" ] && grep -q '"users"' "$HOME/.signalk/security.json" 2>/dev/null; then a=yes; fi
+echo "vessel=$v admin=$a"
+'@
+    $state = Get-VmOutput -Machine $MachineName -Script $probe
+    $haveVessel = $state -match 'vessel=yes'
+    $haveAdmin  = $state -match 'admin=yes'
+
+    if ($haveVessel) {
+        Info "Vessel identity already configured - leaving it as-is."
+    } else {
+        Write-Host "Vessel identity (pre-fills the admin UI; press Enter to skip any field):"
+        $vn = (Read-Host "  Boat name").Trim()
+        if ($vn) { $skEnvVars['SIGNALK_VESSEL_NAME'] = $vn }
+        $vm = (Read-Host "  MMSI (9 digits)").Trim()
+        if ($vm) {
+            if ($vm -match '^\d{9}$') { $skEnvVars['SIGNALK_VESSEL_MMSI'] = $vm }
+            else { Warn "MMSI must be exactly 9 digits - skipping it." }
+        }
+        $vc = (Read-Host "  VHF call sign").Trim()
+        if ($vc) { $skEnvVars['SIGNALK_VESSEL_CALLSIGN'] = $vc }
+    }
+
+    if ($haveAdmin) {
+        Info "Server security already configured - leaving it as-is."
+    } else {
+        Write-Host "Admin login (secures the server before it goes on the network; Enter to skip):"
+        $au = (Read-Host "  Admin username [admin]").Trim()
+        if (-not $au) { $au = 'admin' }
+        $ap1 = Read-Host "  Admin password" -AsSecureString
+        $p1 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($ap1))
+        if ($p1) {
+            $ap2 = Read-Host "  Confirm password" -AsSecureString
+            $p2 = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($ap2))
+            if ($p1 -ne $p2) {
+                Warn "Passwords did not match - skipping admin setup (server starts UNSECURED; set it up in the admin UI)."
+            } else {
+                $skEnvVars['SIGNALK_ADMIN_USER'] = $au
+                $skEnvVars['SIGNALK_ADMIN_PASSWORD'] = $p1
+            }
+        } else {
+            Info "No password entered - server will start unsecured (set it up in the admin UI later)."
+        }
+    }
+}
+
 $linuxUrl = "$InstallerBaseUrl/installer/linux/install.sh"
 Info "Fetching $linuxUrl and running it in the machine"
 
@@ -570,6 +657,14 @@ Info "Fetching $linuxUrl and running it in the machine"
 # documented Linux one-liner runs, and what the self-fetch logic expects.
 $ver = $InstallerVersion -replace "'", "'\''"
 $base = $InstallerBaseUrl -replace "'", "'\''"
+# Build the SIGNALK_* env assignments the in-VM installer reads, each value
+# bash-single-quote-escaped. They go inside the base64'd script, so the password
+# never appears on a command line (no `ps` exposure).
+$skEnv = ''
+foreach ($k in $skEnvVars.Keys) {
+    $esc = $skEnvVars[$k] -replace "'", "'\''"
+    $skEnv += "$k='$esc' "
+}
 # Keep the curl|bash on ONE line - no backslash line-continuation. A `\` at end
 # of line followed by CRLF makes bash continue the line and swallow the `\r`
 # into the next token (seen as `$'bash\r': command not found`). One line has no
@@ -578,9 +673,9 @@ $base = $InstallerBaseUrl -replace "'", "'\''"
 $remote = @'
 set -euo pipefail
 cd "$HOME"
-curl -fsSL '__BASE__/installer/linux/install.sh' | INSTALLER_VERSION='__VER__' INSTALLER_BASE_URL='__BASE__' bash
+curl -fsSL '__BASE__/installer/linux/install.sh' | __SKENV__INSTALLER_VERSION='__VER__' INSTALLER_BASE_URL='__BASE__' bash
 '@
-$remote = $remote.Replace('__VER__', $ver).Replace('__BASE__', $base)
+$remote = $remote.Replace('__SKENV__', $skEnv).Replace('__VER__', $ver).Replace('__BASE__', $base)
 
 # Feed the script via stdin (Invoke-VmScript) so its quotes survive the
 # PowerShell -> podman -> WSL path; output streams live. The bash side is
