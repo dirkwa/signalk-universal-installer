@@ -98,17 +98,25 @@ function Invoke-BestEffort {
 # caller decides success/failure.
 function Invoke-Streaming {
     param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments)
-    # Run the command with output going STRAIGHT to the console - no pipe.
-    # Piping (e.g. `... 2>&1 | ForEach-Object`) detaches stdin from the
-    # terminal, and `podman machine init`'s `wsl --import` step is tty-sensitive:
-    # it works run directly but fails (exit 0xffffffff) when its stdio is
-    # redirected. Setting ErrorActionPreference=Continue is enough to keep
-    # podman's stderr writes from raising a terminating NativeCommandError, so we
-    # don't need to redirect at all. $LASTEXITCODE is then podman's own.
+    # Stream the command's output (stdout+stderr) to the console via Out-Host,
+    # and return ONLY its exit code.
+    #
+    # Why Out-Host and not a bare call or `| ForEach-Object`:
+    #   - A bare `& $Exe @Arguments` lets podman's stderr (turned into
+    #     ErrorRecords under Continue) flow into THIS function's output stream, so
+    #     `$rc = Invoke-Streaming ...` captures podman's text lines, not the exit
+    #     code - then `$rc -ne 0` is wrongly true even on success. Out-Host
+    #     displays the output and emits nothing to the pipeline, keeping the
+    #     return value clean.
+    #   - PowerShell does not connect stdin to the pipeline, so piping the OUTPUT
+    #     here does not affect podman's stdin/tty - `machine init`'s `wsl --import`
+    #     still runs fine.
+    # ErrorActionPreference=Continue keeps podman's stderr from raising a
+    # terminating NativeCommandError; $LASTEXITCODE is then podman's own.
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $Exe @Arguments
+        & $Exe @Arguments 2>&1 | Out-Host
     } finally {
         $ErrorActionPreference = $prev
     }
