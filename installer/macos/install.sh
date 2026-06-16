@@ -88,12 +88,25 @@ section "Bootstrapping inside the Podman machine"
 # default user is whoever `podman machine ssh` lands as; we resolve it rather
 # than hardcode (it's `core` on Fedora CoreOS, `user` on the WSL Fedora image).
 info "Ensuring the machine's user can sudo non-interactively"
-SK_VM_USER="$(podman machine ssh "$MACHINE_NAME" -- whoami | tr -d '[:space:]')"
-podman machine ssh --username root "$MACHINE_NAME" -- bash -lc "
+# Do everything in root bash on the VM: resolve the default uid-1000 user there,
+# write the drop-in, and VALIDATE it with `visudo -c`. An invalid/empty-username
+# file makes sudo ignore the ENTIRE /etc/sudoers.d, so remove a bad one. Passing
+# the script as a single-quoted heredoc (not interpolating a captured username)
+# avoids the shell-quoting traps that can mangle the printf and write an empty
+# file.
+podman machine ssh --username root "$MACHINE_NAME" -- bash -lc '
     set -euo pipefail
-    printf '%s ALL=(ALL) NOPASSWD:ALL\n' '${SK_VM_USER}' > /etc/sudoers.d/90-signalk-nopasswd
-    chmod 0440 /etc/sudoers.d/90-signalk-nopasswd
-"
+    u="$(getent passwd 1000 | cut -d: -f1)"
+    if [ -z "$u" ]; then echo "ERR: no uid-1000 user in VM" >&2; exit 1; fi
+    f="/etc/sudoers.d/90-signalk-nopasswd"
+    printf "%s ALL=(ALL) NOPASSWD:ALL\n" "$u" > "$f"
+    chmod 0440 "$f"
+    if ! visudo -cf "$f"; then
+        echo "ERR: sudoers drop-in for $u failed validation; removing it" >&2
+        rm -f "$f"; exit 1
+    fi
+    echo "granted NOPASSWD sudo to $u"
+'
 
 # We pipe install.sh through `podman machine ssh` which runs an interactive
 # shell in the VM. The Linux install.sh handles podman, systemd-user, linger,
