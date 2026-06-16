@@ -127,14 +127,20 @@ function Invoke-Streaming {
     return $LASTEXITCODE
 }
 
-# Run a bash script inside the podman machine, fed via STDIN - not as a
-# `bash -lc '<script>'` argument. Passing a script as an ssh command argument
-# gets its quotes mangled on the PowerShell -> podman -> WSL path (a `printf
-# '...'` lost its arguments and wrote an empty file; '(' triggered "syntax error
-# near unexpected token"). Piping the script to `podman machine ssh` (which runs
-# a shell reading stdin) sidesteps all of that. We also strip CR so the VM's
-# bash sees Unix LF lines (PowerShell here-strings are CRLF, and a stray \r
-# breaks tools like `cut`). Output streams to the console; returns the exit code.
+# Run a bash script inside the podman machine, immune to BOTH hazards on the
+# PowerShell -> podman -> WSL path:
+#   1. Quote mangling - passing a script as `bash -lc '<script>'` strips its
+#      quotes (a `printf '...'` lost its args and wrote an empty file; '('
+#      gave "syntax error near unexpected token").
+#   2. CRLF injection - Windows PowerShell re-inserts CRLF when piping a string
+#      to a native process's stdin, so stripping CR from the string is futile;
+#      the `\r` reaches bash and breaks the last token ("$'bash\r': not found").
+# Solution: base64-encode the script (one line; only [A-Za-z0-9+/=], no shell
+# metacharacters) and pipe THAT via stdin to `base64 -d | bash` in the VM.
+# `base64 -d` ignores the trailing CR PowerShell adds, and the decoded bytes are
+# the exact original script. The decode command is passed as a single argv
+# element via array splat, which podman forwards intact (only inline quotes in a
+# typed command get mangled).
 function Invoke-VmScript {
     param(
         [Parameter(Mandatory)][string]$Machine,
@@ -142,13 +148,14 @@ function Invoke-VmScript {
         [string]$AsUser  # empty => default user
     )
     $lf = $Script -replace "`r", ''
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($lf))
     $sshArgs = @('machine', 'ssh')
     if ($AsUser) { $sshArgs += @('--username', $AsUser) }
-    $sshArgs += $Machine
+    $sshArgs += @($Machine, '--', 'bash', '-c', 'base64 -d | bash')
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $lf | & podman @sshArgs 2>&1 | ForEach-Object { "$_" } | Out-Host
+        $b64 | & podman @sshArgs 2>&1 | ForEach-Object { "$_" } | Out-Host
     } finally {
         $ErrorActionPreference = $prev
     }
