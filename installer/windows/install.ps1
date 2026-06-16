@@ -489,16 +489,27 @@ Section "Bootstrapping inside the Podman machine"
 # default user is whoever `podman machine ssh` lands as (resolved, not hardcoded
 # - it's `user` on the WSL Fedora image, `core` on Fedora CoreOS).
 Info "Ensuring the machine's user can sudo non-interactively"
-$skVmUser = (& podman machine ssh $MachineName -- whoami) -replace "`0", '' -replace '\s', ''
+# Do the whole thing in root bash on the VM: resolve the default uid-1000 user
+# there (robust - no fragile PowerShell whoami capture), write the drop-in, and
+# VALIDATE it with `visudo -c`. An invalid or empty-username file makes sudo
+# ignore the ENTIRE /etc/sudoers.d, so we remove a bad file rather than leave it.
 $sudoersScript = @'
 set -euo pipefail
-printf '%s ALL=(ALL) NOPASSWD:ALL\n' '__SK_VM_USER__' > /etc/sudoers.d/90-signalk-nopasswd
-chmod 0440 /etc/sudoers.d/90-signalk-nopasswd
+u="$(getent passwd 1000 | cut -d: -f1)"
+if [ -z "$u" ]; then echo "ERR: no uid-1000 user in VM" >&2; exit 1; fi
+f="/etc/sudoers.d/90-signalk-nopasswd"
+printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$u" > "$f"
+chmod 0440 "$f"
+if ! visudo -cf "$f"; then
+    echo "ERR: sudoers drop-in for $u failed validation; removing it" >&2
+    rm -f "$f"
+    exit 1
+fi
+echo "granted NOPASSWD sudo to $u"
 '@
-$sudoersScript = $sudoersScript.Replace('__SK_VM_USER__', $skVmUser)
 $rc = Invoke-Streaming podman @('machine', 'ssh', '--username', 'root', $MachineName, '--', 'bash', '-lc', $sudoersScript)
 if ($rc -ne 0) {
-    Warn "Could not pre-grant passwordless sudo (exit $rc); the in-VM install may prompt and fail."
+    Die "Could not grant passwordless sudo to the machine's user (exit $rc). The in-VM installer needs it. See the output above."
 }
 
 $linuxUrl = "$InstallerBaseUrl/installer/linux/install.sh"
