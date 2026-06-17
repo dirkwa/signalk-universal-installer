@@ -51,8 +51,46 @@ DOCTOR_DATA="${DOCTOR_DATA:-${HOME}/.signalk-doctor}"
 QUADLET_DIR="${HOME}/.config/containers/systemd"
 UNITS=(signalk-server signalk-updater-server signalk-doctor-server)
 
+# Turn an internal probe URL (always http://127.0.0.1:<port>...) into the URL
+# we PRINT for the operator to open. Two transforms:
+#   - host: when SIGNALK_PUBLIC_HOST is set (the Windows shim sets it to
+#     "localhost", because the stack is reached from Windows over Podman
+#     Machine's localhost port-forward and 127.0.0.1 is the VM's loopback, not
+#     something the user should copy), swap 127.0.0.1 for it. Empty by default,
+#     so Linux/macOS keep 127.0.0.1 (which works there for both probe and
+#     display).
+#   - port: drop a default :80 (http) / :443 (https) so the printed URL is the
+#     clean "http://host/admin" the browser shows, not "http://host:80/admin".
+# Probes themselves never go through this — they keep hitting 127.0.0.1:<port>
+# inside the VM. Display only.
+pub_url() {
+    local u="$1"
+    if [[ -n "${SIGNALK_PUBLIC_HOST:-}" ]]; then
+        u="${u/\/\/127.0.0.1///${SIGNALK_PUBLIC_HOST}}"
+    fi
+    # Strip a default port that sits between the host and the path-or-end.
+    u="${u/:80\//\/}"      # http://host:80/...  -> http://host/...
+    u="${u%:80}"           # http://host:80      -> http://host
+    u="${u/:443\//\/}"
+    u="${u%:443}"
+    printf '%s' "$u"
+}
+
 usage() {
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    # Print the leading comment block (from line 2 up to the first non-comment
+    # line — the `set -euo pipefail` that ends the header) as the help text.
+    # Keying on "stop at the first non-# line" rather than a fixed line range
+    # means adding a help entry never silently truncates the output. On Windows
+    # (SIGNALK_PUBLIC_HOST set by the shim) drop the socketcan line — that
+    # subcommand is a Pi CAN-HAT setup the Podman machine VM can't use, and the
+    # Windows shim rejects it, so it shouldn't be advertised there.
+    local help
+    help=$(sed -n '2,${/^#/!q;p}' "$0" | sed 's/^# \{0,1\}//')
+    if [[ -n "${SIGNALK_PUBLIC_HOST:-}" ]]; then
+        printf '%s\n' "$help" | grep -v 'signalk socketcan'
+    else
+        printf '%s\n' "$help"
+    fi
 }
 
 cmd_version() {
@@ -89,13 +127,15 @@ cmd_health() {
         "doctor (:3004)  $DOCTOR_URL/api/health"; do
         name=${entry% *}
         url=${entry##* }
+        # Probe the internal URL (127.0.0.1 inside the VM); print the public one.
+        disp=$(pub_url "$url")
         read -r status secs < <(health_probe "$url")
         if [[ "$status" != "ok" ]]; then
-            printf '  [FAIL] %-20s %s\n' "$name" "$url"
+            printf '  [FAIL] %-20s %s\n' "$name" "$disp"
         elif awk -v s="$secs" -v lim="$slow_secs" 'BEGIN{exit !(s>lim)}'; then
-            printf '  [SLOW] %-20s %s  (%ss — likely disk I/O; an SSD helps)\n' "$name" "$url" "$secs"
+            printf '  [SLOW] %-20s %s  (%ss — likely disk I/O; an SSD helps)\n' "$name" "$disp" "$secs"
         else
-            printf '  [OK]   %-20s %s\n' "$name" "$url"
+            printf '  [OK]   %-20s %s\n' "$name" "$disp"
         fi
     done
 
@@ -110,7 +150,7 @@ cmd_health() {
 
     echo
     echo "For deeper diagnostics:"
-    echo "  curl -fsS $DOCTOR_URL/api/probes | jq ."
+    echo "  curl -fsS $(pub_url "$DOCTOR_URL")/api/probes | jq ."
     echo "  signalk recover doctor"
 }
 
@@ -160,7 +200,7 @@ cmd_update() {
     local token
     token=$(cat "$token_path")
 
-    echo "[i] Refreshing installer via doctor ($DOCTOR_URL)…"
+    echo "[i] Refreshing installer via doctor ($(pub_url "$DOCTOR_URL"))…"
     local http_code
     local body_file
     body_file=$(mktemp -t signalk-update.XXXXXX)
@@ -175,7 +215,7 @@ cmd_update() {
 
     case "$http_code" in
         000)
-            echo "[ERR] doctor is unreachable at $DOCTOR_URL" >&2
+            echo "[ERR] doctor is unreachable at $(pub_url "$DOCTOR_URL")" >&2
             echo "      Use the bash one-liner as the floor:" >&2
             echo "      curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash" >&2
             rm -f "$body_file"
@@ -379,7 +419,7 @@ cmd_resetadmin() {
     # could clobber the file we just wrote).
     echo "[i] Admin user '${username}' ${result}. Restarting signalk-server..."
     systemctl --user restart signalk-server
-    echo "[OK] Done — log in at ${SIGNALK_URL%/signalk*}/admin with username '${username}'."
+    echo "[OK] Done — log in at $(pub_url "${SIGNALK_URL%/signalk*}")/admin with username '${username}'."
     echo "     Existing API tokens (doctor, updater) remain valid: the secretKey was preserved."
 }
 

@@ -719,6 +719,11 @@ $ps1Body = @"
 #                 offer to remove the Podman machine + this CLI wrapper + PATH.
 `$ErrorActionPreference = 'Stop'
 `$Machine = '$MachineName'
+# Prepended to every in-VM ``signalk`` call. SIGNALK_PUBLIC_HOST tells the CLI to
+# print URLs the operator can actually open from Windows: the stack is reached
+# over Podman Machine's localhost port-forward, so 127.0.0.1 (the VM's loopback,
+# which the CLI uses internally to probe) is not what the user should click.
+`$SkEnv = 'SIGNALK_PUBLIC_HOST=localhost '
 
 # Base64-encode a bash command and run it in the VM. base64 is one token with no
 # shell metacharacters (immune to quote mangling) and ``base64 -d`` ignores the
@@ -730,15 +735,28 @@ function Send-Vm {
     `$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$BashCommand))
     "echo `$b64 | base64 -d | bash -l #" | podman machine ssh `$Machine
 }
-# Like Send-Vm but captures the VM command's stdout as text. Joins the native
-# command's output lines with -join (NOT Out-String, which wraps at the console
-# width and would corrupt a long single line such as base64 -w0 of a tarball).
+# Like Send-Vm but captures the VM command's stdout as text. Two hazards this
+# has to defeat:
+#   1. `podman machine ssh` prints a "Connecting to vm ... use ``~.`` or exit"
+#      banner (and a login shell may print an MOTD) on STDOUT, ahead of the real
+#      output. Capturing raw would prepend that junk - which silently broke
+#      bug-report (the banner got treated as the tarball filename).
+#   2. Out-String wraps long lines at the console width, corrupting a long
+#      single line such as base64 -w0 of a tarball - so we -join instead.
+# Fix for (1): wrap the real output between two unique sentinels the banner/MOTD
+# can't contain, then return only what's strictly between them.
 function Get-Vm {
     param([string]`$BashCommand)
-    `$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$BashCommand))
+    `$wrapped = "printf '<<<SKO>>>\n'; { " + `$BashCommand + "; }; printf '<<<SKE>>>\n'"
+    `$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$wrapped))
     `$out = "echo `$b64 | base64 -d | bash -l #" | podman machine ssh `$Machine 2>`$null
     if (`$null -eq `$out) { return '' }
-    return ((`$out -join "``n") -replace "``0", '').Trim()
+    `$text = ((`$out -join "``n") -replace "``0", '')
+    `$m = [regex]::Match(`$text, '<<<SKO>>>\s*(.*?)\s*<<<SKE>>>', [Text.RegularExpressions.RegexOptions]::Singleline)
+    if (`$m.Success) { return `$m.Groups[1].Value.Trim() }
+    # Sentinels missing (command died before printing them) - return nothing
+    # rather than the banner so callers fail cleanly instead of on junk.
+    return ''
 }
 # Single-quote one arg for bash: wrap in '...' and turn embedded ' into '\''.
 function Quote-Bash {
@@ -749,6 +767,17 @@ function Quote-Bash {
 `$sub = if (`$args.Count -gt 0) { `$args[0] } else { '' }
 
 switch (`$sub) {
+
+  'socketcan' {
+    # Pi CAN-HAT (GPIO/SPI socketcan) setup. Meaningless on Windows: the stack
+    # runs in the Podman machine's VM, which has no CAN hardware, no SPI bus,
+    # and no Pi device-tree. Don't forward it (inside the VM it would just run
+    # the helper and find nothing - confusing). Reject with a clear note.
+    Write-Host "'signalk socketcan' is not available on Windows - it sets up a"
+    Write-Host 'Raspberry Pi CAN HAT (SPI/socketcan), which the Podman machine VM'
+    Write-Host 'has no access to. Use a USB or network NMEA 2000 gateway instead.'
+    exit 1
+  }
 
   'resetadmin' {
     # The VM CLI can't prompt (no PTY, stdin busy). Prompt on Windows, confirm
@@ -765,7 +794,7 @@ switch (`$sub) {
         `$pwc = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(`$b2)
         if ([string]::IsNullOrEmpty(`$pw)) { Write-Host '[ERR] Password must not be empty.'; exit 1 }
         if (`$pw -ne `$pwc)                { Write-Host '[ERR] Passwords do not match.';   exit 1 }
-        `$cmd = 'SIGNALK_RESETADMIN_PASSWORD=' + (Quote-Bash `$pw) + ' signalk resetadmin ' + (Quote-Bash `$user)
+        `$cmd = 'SIGNALK_RESETADMIN_PASSWORD=' + (Quote-Bash `$pw) + ' ' + `$SkEnv + 'signalk resetadmin ' + (Quote-Bash `$user)
         Send-Vm `$cmd
         `$rc = `$LASTEXITCODE
     } finally {
@@ -788,7 +817,7 @@ switch (`$sub) {
     # create a literal '`$HOME' directory.
     `$vmDir = '"`$HOME"/.signalk-updater/bug-reports'
     Write-Host '[i] Generating the bug report inside the Podman machine...'
-    Send-Vm ("signalk bug-report --to " + `$vmDir)
+    Send-Vm (`$SkEnv + "signalk bug-report --to " + `$vmDir)
     if (`$LASTEXITCODE -ne 0) { Write-Host '[ERR] bug-report failed inside the VM.'; exit `$LASTEXITCODE }
     # Newest tarball in that dir. The glob must stay UNQUOTED so the shell
     # expands *; the dir prefix carries its own quoting (see above).
@@ -821,7 +850,7 @@ switch (`$sub) {
     # First the in-VM teardown (stack + preserved-data summary), then the
     # Windows-side teardown the in-VM CLI can't do: the Podman machine itself
     # (where ALL SignalK data lives), this CLI wrapper, and the PATH entry.
-    Send-Vm 'signalk uninstall'
+    Send-Vm (`$SkEnv + 'signalk uninstall')
     `$vmRc = `$LASTEXITCODE
     Write-Host ''
     if (`$vmRc -eq 0) {
@@ -874,7 +903,7 @@ switch (`$sub) {
     # Everything else: forward verbatim. Single-quote EACH arg so spaces don't
     # split and shell metacharacters can't inject (e.g. 'health; rm -rf ...').
     `$q = `$args | ForEach-Object { Quote-Bash `$_ }
-    Send-Vm ('signalk ' + (`$q -join ' '))
+    Send-Vm (`$SkEnv + 'signalk ' + (`$q -join ' '))
     exit `$LASTEXITCODE
   }
 }
