@@ -414,8 +414,19 @@ try {
 #    A failure here must NOT abort the installer - the DISM enable above already
 #    did the reboot-requiring work, and on the post-reboot re-run this succeeds.
 Info "Installing/updating the WSL2 platform (no distribution)"
-Invoke-BestEffort wsl @('--install', '--no-distribution') | Out-Null
-Invoke-BestEffort wsl @('--update') | Out-Null
+Write-Host "    This downloads the WSL kernel from the Microsoft Store and can take"
+Write-Host "    SEVERAL MINUTES with little or no further output. Do not close this"
+Write-Host "    window - it is not frozen. Any 'msstore'/HTTP 403 lines below are"
+Write-Host "    harmless (the reboot-requiring work was already done above)."
+# Stream wsl's own progress to the console (via Invoke-Streaming, which forces
+# ErrorActionPreference=Continue so the Store backend's stderr 403 noise renders
+# as plain lines instead of a terminating NativeCommandError, and returns only
+# the exit code). We previously suppressed all output with *>$null, which made
+# this multi-minute step look like a hang. Exit code is ignored on purpose -
+# these calls are best-effort; the DISM enable + reboot gate below is what
+# actually gates correctness.
+Invoke-Streaming wsl @('--install', '--no-distribution') | Out-Null
+Invoke-Streaming wsl @('--update') | Out-Null
 
 # 3) If a reboot is pending (from the feature enable or the CBS flag), stop here
 #    - BEFORE podman - and tell the user it's expected. Re-run resumes after.
