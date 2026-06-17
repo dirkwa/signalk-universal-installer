@@ -687,8 +687,8 @@ if ($rc -ne 0) {
 
 # 5b. Install a Windows-side `signalk` command that forwards into the VM.
 # On Linux the installer puts `signalk` on PATH; on Windows the CLI lives inside
-# the machine. We drop two files on the user's PATH: signalk.ps1 (does the work)
-# and signalk.cmd (a thin shim so it runs from cmd.exe too).
+# the machine. We drop two files on the user's PATH: signalk-run.ps1 (does the
+# work) and signalk.cmd (the entry point - the only thing named `signalk`).
 #
 # Transport (the load-bearing bit, learned the hard way): you CANNOT reliably
 # pass `signalk <args>` to the VM as `podman machine ssh -- bash -lc '<script>'`
@@ -718,14 +718,30 @@ $ps1Body = @"
 "echo `$b64 | base64 -d | bash -l #" | podman machine ssh $MachineName
 exit `$LASTEXITCODE
 "@
-# .cmd shim so `signalk ...` works from cmd.exe and PowerShell alike.
+# .cmd shim so `signalk ...` works from cmd.exe and PowerShell alike. The worker
+# is named signalk-RUN.ps1 (not signalk.ps1) ON PURPOSE: if it were signalk.ps1,
+# typing `signalk` in PowerShell would resolve to that .ps1 directly and fail
+# under a restricted execution policy ("running scripts is disabled"). With only
+# `signalk.cmd` named `signalk` on PATH, both cmd and PowerShell run the .cmd,
+# which re-launches PowerShell with -ExecutionPolicy Bypass for the worker.
 $cmdBody = @"
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0signalk.ps1" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0signalk-run.ps1" %*
 "@
 try {
     New-Item -ItemType Directory -Force -Path $skCmdDir | Out-Null
-    [System.IO.File]::WriteAllText((Join-Path $skCmdDir 'signalk.ps1'), ($ps1Body -replace "`r?`n", "`r`n"), [System.Text.Encoding]::UTF8)
+    # Remove a stale signalk.ps1 from an earlier installer version - if left, a
+    # bare `signalk` in PowerShell would still resolve to it (PowerShell prefers
+    # .ps1 over .cmd) and fail under a restricted execution policy. Warn if it
+    # can't be removed (e.g. locked), since silently leaving it keeps the bug.
+    $staleP1 = Join-Path $skCmdDir 'signalk.ps1'
+    if (Test-Path $staleP1) {
+        Remove-Item -Force $staleP1 -ErrorAction SilentlyContinue
+        if (Test-Path $staleP1) {
+            Warn "Could not remove the old $staleP1 - if 'signalk' fails with an execution-policy error, delete that file manually."
+        }
+    }
+    [System.IO.File]::WriteAllText((Join-Path $skCmdDir 'signalk-run.ps1'), ($ps1Body -replace "`r?`n", "`r`n"), [System.Text.Encoding]::UTF8)
     [System.IO.File]::WriteAllText((Join-Path $skCmdDir 'signalk.cmd'), ($cmdBody -replace "`r?`n", "`r`n"), [System.Text.Encoding]::ASCII)
     # Add the dir to the USER PATH (no admin needed) if not already there.
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
