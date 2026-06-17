@@ -768,6 +768,17 @@ function Quote-Bash {
 
 switch (`$sub) {
 
+  'socketcan' {
+    # Pi CAN-HAT (GPIO/SPI socketcan) setup. Meaningless on Windows: the stack
+    # runs in the Podman machine's VM, which has no CAN hardware, no SPI bus,
+    # and no Pi device-tree. Don't forward it (inside the VM it would just run
+    # the helper and find nothing - confusing). Reject with a clear note.
+    Write-Host "'signalk socketcan' is not available on Windows - it sets up a"
+    Write-Host 'Raspberry Pi CAN HAT (SPI/socketcan), which the Podman machine VM'
+    Write-Host 'has no access to. Use a USB or network NMEA 2000 gateway instead.'
+    exit 1
+  }
+
   'resetadmin' {
     # The VM CLI can't prompt (no PTY, stdin busy). Prompt on Windows, confirm
     # the match here, then hand the password to the VM via the env var

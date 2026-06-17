@@ -77,7 +77,20 @@ pub_url() {
 }
 
 usage() {
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    # Print the leading comment block (from line 2 up to the first non-comment
+    # line — the `set -euo pipefail` that ends the header) as the help text.
+    # Keying on "stop at the first non-# line" rather than a fixed line range
+    # means adding a help entry never silently truncates the output. On Windows
+    # (SIGNALK_PUBLIC_HOST set by the shim) drop the socketcan line — that
+    # subcommand is a Pi CAN-HAT setup the Podman machine VM can't use, and the
+    # Windows shim rejects it, so it shouldn't be advertised there.
+    local help
+    help=$(sed -n '2,${/^#/!q;p}' "$0" | sed 's/^# \{0,1\}//')
+    if [[ -n "${SIGNALK_PUBLIC_HOST:-}" ]]; then
+        printf '%s\n' "$help" | grep -v 'signalk socketcan'
+    else
+        printf '%s\n' "$help"
+    fi
 }
 
 cmd_version() {
