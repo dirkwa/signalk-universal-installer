@@ -128,12 +128,18 @@ The Windows installer:
 
 Result: the same container stack as Linux, reachable from Windows via Podman Machine's localhost port forwarding — open `http://localhost` (the admin UI; `:3000` if you decline standard ports), `http://localhost:3003` (Updater), `http://localhost:3004` (Doctor).
 
+The installer also drops a `signalk` command on your PATH (open a **new** terminal to use it) that forwards into the machine, so `signalk health`, `signalk version`, etc. work the same as on Linux. Three subcommands get Windows-aware handling because they can't run unchanged inside the VM:
+
+- `signalk resetadmin [user]` — prompts for the new password **on Windows** (the VM has no terminal to prompt on) and applies it inside the machine.
+- `signalk bug-report` — generates the bundle inside the machine and copies the resulting `.tar.gz` out to your **Desktop**, so you have a file you can actually attach to an issue.
+- `signalk uninstall` — removes the stack inside the machine, then offers to remove the Podman machine itself (and with it **all** SignalK data — on Windows there is no `~/.signalk*` on the host; everything lives in the VM) plus the `signalk` command and its PATH entry.
+
 ### Windows troubleshooting
 
 - **`podman machine init`/`start` fails / "virtualization not enabled" / `HCS_E_HYPERV_NOT_INSTALLED`** — the Windows hypervisor can't create the VM. If this is a guest VM, enable **nested virtualization** on the host (the VM must be powered off): Hyper-V `Set-VMProcessor -VMName <VM> -ExposeVirtualizationExtensions $true`; VMware "Virtualize Intel VT-x/EPT or AMD-V/RVI"; Proxmox/KVM CPU type `host` + nested KVM. On bare metal, enable VT-x/AMD-V in BIOS/UEFI. Confirm with `(Get-CimInstance Win32_ComputerSystem).HypervisorPresent` (want `True`). See <https://aka.ms/enablevirtualization>.
 - **WSL won't start after the reboot** — confirm hardware virtualization is enabled in BIOS/UEFI.
 - **"Podman isn't on PATH"** — open a new Administrator PowerShell after the winget install and re-run.
-- Reset the machine if needed: `podman machine stop signalk; podman machine rm signalk` then re-run (your SignalK data lives outside the machine in `~/.signalk*`).
+- Reset the machine if needed: `podman machine stop signalk; podman machine rm signalk` then re-run. **Note:** unlike Linux/macOS, on Windows your SignalK data lives **inside** the machine, so removing it discards all configs, plugins, and tokens — back up anything you need first. Run the backup through `cmd /c` so the redirect goes through the native shell, not PowerShell's pipeline (PowerShell before 7.4 transcodes a `>`-redirected byte stream and corrupts the `.tgz`): `cmd /c "podman machine ssh signalk -- tar czf - .signalk > backup.tgz"`. `signalk uninstall` does this teardown for you, with a confirmation prompt.
 
 ### Windows USB serial
 

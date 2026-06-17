@@ -9,7 +9,10 @@
 #   signalk update         refresh installer scripts + Quadlet templates via doctor
 #   signalk resetadmin [user]
 #                          reset (or create) an admin user's password for the
-#                          Admin UI login (default user: admin)
+#                          Admin UI login (default user: admin). Prompts for the
+#                          password, or reads SIGNALK_RESETADMIN_PASSWORD from the
+#                          environment when set (used by the Windows shim, which
+#                          has no TTY to prompt on inside the VM).
 #   signalk bug-report [--to <dir>]
 #                          bundle logs + state into <dir>/signalk-bug-report-*.tar.gz
 #                          (default: /tmp)
@@ -311,15 +314,29 @@ cmd_resetadmin() {
         esac
     fi
 
+    # Password source. Normally prompted interactively (read -rs, twice,
+    # confirmed). But the Windows `signalk` shim runs this command over
+    # `podman machine ssh`, which has no PTY and whose stdin is the piped
+    # transport — so `read` returns EOF instantly and every reset failed
+    # with "Password must not be empty". When SIGNALK_RESETADMIN_PASSWORD
+    # is set (the Windows shim prompts on the Windows side, then passes it
+    # in through the base64 payload so it never appears on any argv / in
+    # `ps`), use it and skip the prompts. The confirm-match is the
+    # prompter's job in that case; we only enforce non-empty here. Also
+    # useful for Linux automation.
     local pw pw2
-    read -rs -p "New password for '${username}': " pw; echo
-    read -rs -p "Confirm password: " pw2; echo
+    if [[ -n "${SIGNALK_RESETADMIN_PASSWORD:-}" ]]; then
+        pw="$SIGNALK_RESETADMIN_PASSWORD"
+    else
+        read -rs -p "New password for '${username}': " pw; echo
+        read -rs -p "Confirm password: " pw2; echo
+        if [[ "$pw" != "$pw2" ]]; then
+            echo "[ERR] Passwords do not match." >&2
+            exit 1
+        fi
+    fi
     if [[ -z "$pw" ]]; then
         echo "[ERR] Password must not be empty." >&2
-        exit 1
-    fi
-    if [[ "$pw" != "$pw2" ]]; then
-        echo "[ERR] Passwords do not match." >&2
         exit 1
     fi
 
