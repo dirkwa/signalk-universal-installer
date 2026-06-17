@@ -452,6 +452,22 @@ cmd_uninstall() {
 
     systemctl --user daemon-reload || true
 
+    # The "Preserved / To purge" guidance below lists paths INSIDE this host
+    # ($HOME/.signalk etc.). On Windows this command runs inside the Podman
+    # machine VM via the Windows `signalk` shim, so those are VM-internal paths
+    # the Windows user can't reach, and "~/.local/bin/signalk — This command" is
+    # wrong (on Windows the command is the .cmd shim on the Windows side). The
+    # shim also immediately offers to remove the whole VM, which wipes all of
+    # this anyway. So when invoked from the Windows shim (it sets
+    # SIGNALK_PUBLIC_HOST), suppress this host-path block; the shim prints its
+    # own Windows-accurate summary and prompt.
+    if [[ -n "${SIGNALK_PUBLIC_HOST:-}" ]]; then
+        echo
+        echo "Stack removed inside the Podman machine. Your SignalK data still"
+        echo "exists in the machine until you remove it (the next prompt does that)."
+        return 0
+    fi
+
     echo
     echo "Preserved (intentional):"
     echo "  ~/.signalk/                — SignalK configs + plugins"

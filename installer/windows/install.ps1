@@ -970,16 +970,17 @@ switch (`$sub) {
     }
     Write-Host '[OK] Removed the Podman machine and the PATH entry.'
     Write-Host '(WSL and the Podman app are left installed - remove them via Windows Settings if you want.)'
-    # Self-delete the wrapper dir last, best-effort. The .ps1 is already loaded
-    # into memory, but the parent signalk.cmd may still hold the directory open,
-    # so this can fail with "in use" - tell the user how to finish by hand.
-    Remove-Item -Recurse -Force `$dir -ErrorAction SilentlyContinue
-    if (Test-Path `$dir) {
-        Write-Host "[i] Could not remove `$dir while it is in use."
-        Write-Host "    Delete it manually after this window closes:  rmdir /s /q `"`$dir`""
-    } else {
-        Write-Host "[OK] Removed the 'signalk' command files."
-    }
+    # Remove the wrapper dir, but NOT from inside this process: we are running as
+    # %LOCALAPPDATA%\Programs\signalk\signalk.cmd -> signalk-run.ps1, both living
+    # in `$dir. Deleting `$dir while signalk.cmd is mid-execution makes cmd.exe
+    # print "The system cannot find the path specified." when PowerShell returns
+    # and cmd tries to read the next batch line from the now-deleted file. So we
+    # hand the delete to a DETACHED cmd that waits for this window to release the
+    # files, then removes the dir - nothing deletes the running script out from
+    # under itself. Output is discarded (>nul 2>&1) so no stray error surfaces.
+    `$rmCmd = '/c ping -n 3 127.0.0.1 >nul 2>&1 & rmdir /s /q "' + `$dir + '" >nul 2>&1'
+    Start-Process -FilePath 'cmd.exe' -ArgumentList `$rmCmd -WindowStyle Hidden | Out-Null
+    Write-Host "[OK] Scheduled removal of the 'signalk' command files (`$dir)."
     exit 0
   }
 
