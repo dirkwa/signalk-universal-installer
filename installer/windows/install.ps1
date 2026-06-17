@@ -401,27 +401,56 @@ Section "WSL2 platform"
 #    authoritative RestartNeeded flag (Get-WindowsOptionalFeature does not).
 $restartNeeded = $false
 try {
+    # Enable-WindowsOptionalFeature -NoRestart emits a localized warning
+    # (e.g. German "Der Neustart wird unterdrueckt...", English "The restart
+    # was suppressed...") whenever the change needs a reboot. That warning IS
+    # the reboot signal, but on its own it reads to the user as a scary error.
+    # Capture RestartNeeded and translate it into our own plain line below.
     $r = Enable-WindowsOptionalFeature -Online -All -NoRestart -FeatureName $WslFeatures -ErrorAction Stop
     if ($r -and $r.RestartNeeded) { $restartNeeded = $true }
 } catch {
     Warn "Could not enable WSL features via DISM ($($_.Exception.Message)); falling back to 'wsl --install'."
 }
 
-# 2) Install the Store WSL app + kernel (user-mode MSIX; needs no reboot) and
-#    keep it current. --no-distribution: platform only, no user-facing distro.
-#    Best-effort: these hit the Microsoft Store backend, which can return 403
-#    (region prompt / network / not-ready-until-reboot, microsoft/WSL #40285).
-#    A failure here must NOT abort the installer - the DISM enable above already
-#    did the reboot-requiring work, and on the post-reboot re-run this succeeds.
-Info "Installing/updating the WSL2 platform (no distribution)"
-Invoke-BestEffort wsl @('--install', '--no-distribution') | Out-Null
-Invoke-BestEffort wsl @('--update') | Out-Null
+# 2) Reboot gate FIRST, right after the enable. On a fresh box the feature
+#    enable needs a reboot to activate the VM platform; the Store-backed
+#    `wsl --install`/`--update` calls below can't succeed (and `wsl --status`
+#    can hang) until that reboot happens. So if a reboot is pending we stop
+#    here - BEFORE those calls and before podman - and tell the user clearly.
+#    Doing the wsl Store calls first made the installer sit dead-silent and
+#    look frozen when the real situation was "you need to reboot." Re-running
+#    after the reboot resumes from here, where no reboot is pending, and falls
+#    through to the Store calls.
+if (Test-RebootPending -RestartNeeded $restartNeeded) {
+    Info "Windows enabled the WSL2 feature but needs a reboot to activate it."
+    Stop-ForReboot
+}
 
-# 3) If a reboot is pending (from the feature enable or the CBS flag), stop here
-#    - BEFORE podman - and tell the user it's expected. Re-run resumes after.
-#    This fires on a fresh box right after the DISM enable, so the flaky
-#    Store-backed wsl calls above are irrelevant: we reboot, then re-run.
-if (Test-RebootPending -RestartNeeded $restartNeeded) { Stop-ForReboot }
+# 3) No reboot pending (post-reboot re-run, or a box that already had the
+#    feature). Install the Store WSL app + kernel (user-mode MSIX; needs no
+#    reboot) and keep it current. --no-distribution: platform only, no
+#    user-facing distro. Best-effort: these hit the Microsoft Store backend,
+#    which can return 403 (region prompt / network, microsoft/WSL #40285); a
+#    failure here must NOT abort the installer.
+Info "Installing/updating the WSL2 platform (no distribution)"
+Write-Host "    This downloads the WSL kernel from the Microsoft Store and can take"
+Write-Host "    SEVERAL MINUTES with little or no further output. Do not close this"
+Write-Host "    window - it is not frozen. Any 'msstore'/HTTP 403 lines below are"
+Write-Host "    harmless."
+# Stream wsl's own progress to the console (via Invoke-Streaming, which forces
+# ErrorActionPreference=Continue so the Store backend's stderr 403 noise renders
+# as plain lines instead of a terminating NativeCommandError, and returns only
+# the exit code). We previously suppressed all output with *>$null, which made
+# this step look like a hang. Exit code is ignored on purpose - best-effort.
+Invoke-Streaming wsl @('--install', '--no-distribution') | Out-Null
+Invoke-Streaming wsl @('--update') | Out-Null
+
+# A reboot can also become pending as a result of the Store calls above
+# (rare, but the MSIX install can stage one). Re-check before the WSL probe.
+if (Test-RebootPending -RestartNeeded $restartNeeded) {
+    Info "The WSL install staged a pending reboot."
+    Stop-ForReboot
+}
 
 # 4) Functional gate: WSL must actually be usable before we hand to podman.
 #    We reach here only when NO reboot is pending (step 3 already handled that),

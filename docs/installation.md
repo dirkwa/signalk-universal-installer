@@ -116,6 +116,18 @@ Open PowerShell **as administrator**:
 iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows/install.ps1 | iex
 ```
 
+The WSL2 platform step downloads the WSL kernel from the Microsoft Store and can sit for **several minutes with little or no output** — that is normal, not a hang; don't close the window.
+
+**To capture a log** (recommended, especially if a run closed its window before you could read it — the installer exits the window for the reboot, and `iwr … | iex` closes with it), wrap it in a transcript:
+
+```powershell
+Start-Transcript -Path "$env:USERPROFILE\Desktop\signalk-install.log"
+try { iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows/install.ps1 | iex }
+finally { Stop-Transcript; Read-Host 'Press Enter to close' }
+```
+
+The transcript on your Desktop survives the window closing and the reboot exit, and the `Read-Host` keeps the window open so you can read the result. Attach `signalk-install.log` if you report a problem.
+
 The Windows installer:
 
 1. Checks for Administrator and Windows 11.
