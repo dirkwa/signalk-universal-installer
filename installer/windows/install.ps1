@@ -735,15 +735,28 @@ function Send-Vm {
     `$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$BashCommand))
     "echo `$b64 | base64 -d | bash -l #" | podman machine ssh `$Machine
 }
-# Like Send-Vm but captures the VM command's stdout as text. Joins the native
-# command's output lines with -join (NOT Out-String, which wraps at the console
-# width and would corrupt a long single line such as base64 -w0 of a tarball).
+# Like Send-Vm but captures the VM command's stdout as text. Two hazards this
+# has to defeat:
+#   1. `podman machine ssh` prints a "Connecting to vm ... use ``~.`` or exit"
+#      banner (and a login shell may print an MOTD) on STDOUT, ahead of the real
+#      output. Capturing raw would prepend that junk - which silently broke
+#      bug-report (the banner got treated as the tarball filename).
+#   2. Out-String wraps long lines at the console width, corrupting a long
+#      single line such as base64 -w0 of a tarball - so we -join instead.
+# Fix for (1): wrap the real output between two unique sentinels the banner/MOTD
+# can't contain, then return only what's strictly between them.
 function Get-Vm {
     param([string]`$BashCommand)
-    `$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$BashCommand))
+    `$wrapped = "printf '<<<SKO>>>\n'; { " + `$BashCommand + "; }; printf '<<<SKE>>>\n'"
+    `$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$wrapped))
     `$out = "echo `$b64 | base64 -d | bash -l #" | podman machine ssh `$Machine 2>`$null
     if (`$null -eq `$out) { return '' }
-    return ((`$out -join "``n") -replace "``0", '').Trim()
+    `$text = ((`$out -join "``n") -replace "``0", '')
+    `$m = [regex]::Match(`$text, '<<<SKO>>>\s*(.*?)\s*<<<SKE>>>', [Text.RegularExpressions.RegexOptions]::Singleline)
+    if (`$m.Success) { return `$m.Groups[1].Value.Trim() }
+    # Sentinels missing (command died before printing them) - return nothing
+    # rather than the banner so callers fail cleanly instead of on junk.
+    return ''
 }
 # Single-quote one arg for bash: wrap in '...' and turn embedded ' into '\''.
 function Quote-Bash {
