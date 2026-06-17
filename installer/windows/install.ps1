@@ -731,10 +731,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0signalk-run.ps1" %*
 try {
     New-Item -ItemType Directory -Force -Path $skCmdDir | Out-Null
     # Remove a stale signalk.ps1 from an earlier installer version - if left, a
-    # bare `signalk` in PowerShell would still resolve to it and fail under a
-    # restricted execution policy.
+    # bare `signalk` in PowerShell would still resolve to it (PowerShell prefers
+    # .ps1 over .cmd) and fail under a restricted execution policy. Warn if it
+    # can't be removed (e.g. locked), since silently leaving it keeps the bug.
     $staleP1 = Join-Path $skCmdDir 'signalk.ps1'
-    if (Test-Path $staleP1) { Remove-Item -Force $staleP1 -ErrorAction SilentlyContinue }
+    if (Test-Path $staleP1) {
+        Remove-Item -Force $staleP1 -ErrorAction SilentlyContinue
+        if (Test-Path $staleP1) {
+            Warn "Could not remove the old $staleP1 - if 'signalk' fails with an execution-policy error, delete that file manually."
+        }
+    }
     [System.IO.File]::WriteAllText((Join-Path $skCmdDir 'signalk-run.ps1'), ($ps1Body -replace "`r?`n", "`r`n"), [System.Text.Encoding]::UTF8)
     [System.IO.File]::WriteAllText((Join-Path $skCmdDir 'signalk.cmd'), ($cmdBody -replace "`r?`n", "`r`n"), [System.Text.Encoding]::ASCII)
     # Add the dir to the USER PATH (no admin needed) if not already there.
