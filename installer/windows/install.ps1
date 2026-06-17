@@ -703,20 +703,169 @@ $skCmdDir = Join-Path $env:LOCALAPPDATA 'Programs\signalk'
 # The PS1 forwards its args to the in-VM `signalk` over the base64-stdin
 # transport. `bash -l` gives the login-shell PATH that has ~/.local/bin/signalk.
 $ps1Body = @"
-# SignalK CLI shim - forwards to `signalk` inside Podman machine '$MachineName'.
-# Single-quote EACH arg for bash before joining (wrap in '...', and turn any
-# embedded ' into the '\'' idiom). Without this, '`$args -join " "' would let an
-# arg with spaces split into several (e.g. --to "/x/with space") and let shell
-# metacharacters inject commands into the VM (e.g. 'health; rm -rf ...').
-`$q = `$args | ForEach-Object { "'" + (`$_ -replace "'", "'\''") + "'" }
-`$cmd = 'signalk ' + (`$q -join ' ')
-`$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$cmd))
-# Pipe via stdin: base64 -d ignores the CR PowerShell appends inside the b64, and
-# the trailing ` #` turns the CR after `bash -l` into a comment (without it bash
-# sees `-l<CR>` = invalid option). `-l` = login shell so ~/.local/bin (signalk)
-# is on PATH.
-"echo `$b64 | base64 -d | bash -l #" | podman machine ssh $MachineName
-exit `$LASTEXITCODE
+# SignalK CLI shim - forwards to ``signalk`` inside Podman machine '$MachineName'.
+#
+# Most subcommands are forwarded verbatim over a base64-over-stdin transport
+# (the only reliable way to run a command in the VM from Windows: podman
+# machine ssh -- bash -lc drops trailing args AND mangles quotes).
+# Three subcommands need host-side handling because their UX assumes the CLI
+# runs on the machine the operator sits at:
+#   resetadmin  - reads a password from the TTY; there is no PTY over ssh and
+#                 stdin is the transport, so we prompt HERE and pass the
+#                 password into the VM through the (base64'd) payload.
+#   bug-report  - writes a tarball to a VM path Windows can't reach; we run it
+#                 into a known VM dir, then copy the tarball out to the Desktop.
+#   uninstall   - the in-VM teardown removes the stack only; on Windows we also
+#                 offer to remove the Podman machine + this CLI wrapper + PATH.
+`$ErrorActionPreference = 'Stop'
+`$Machine = '$MachineName'
+
+# Base64-encode a bash command and run it in the VM. base64 is one token with no
+# shell metacharacters (immune to quote mangling) and ``base64 -d`` ignores the
+# CR PowerShell appends; the trailing `` #`` turns the CR after ``bash -l`` into a
+# comment. ``-l`` = login shell so ~/.local/bin (signalk) is on PATH. Returns the
+# VM command's exit code in `$LASTEXITCODE.
+function Send-Vm {
+    param([string]`$BashCommand)
+    `$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$BashCommand))
+    "echo `$b64 | base64 -d | bash -l #" | podman machine ssh `$Machine
+}
+# Like Send-Vm but captures the VM command's stdout as text. Joins the native
+# command's output lines with -join (NOT Out-String, which wraps at the console
+# width and would corrupt a long single line such as base64 -w0 of a tarball).
+function Get-Vm {
+    param([string]`$BashCommand)
+    `$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$BashCommand))
+    `$out = "echo `$b64 | base64 -d | bash -l #" | podman machine ssh `$Machine 2>`$null
+    if (`$null -eq `$out) { return '' }
+    return ((`$out -join "``n") -replace "``0", '').Trim()
+}
+# Single-quote one arg for bash: wrap in '...' and turn embedded ' into '\''.
+function Quote-Bash {
+    param([string]`$s)
+    return "'" + (`$s -replace "'", "'\''") + "'"
+}
+
+`$sub = if (`$args.Count -gt 0) { `$args[0] } else { '' }
+
+switch (`$sub) {
+
+  'resetadmin' {
+    # The VM CLI can't prompt (no PTY, stdin busy). Prompt on Windows, confirm
+    # the match here, then hand the password to the VM via the env var
+    # SIGNALK_RESETADMIN_PASSWORD - embedded inside the base64 payload so the
+    # plaintext never appears on podman's argv or the VM's process list.
+    `$user = if (`$args.Count -gt 1) { `$args[1] } else { 'admin' }
+    `$p1 = Read-Host "New password for '`$user'" -AsSecureString
+    `$p2 = Read-Host "Confirm password" -AsSecureString
+    `$b1 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(`$p1)
+    `$b2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(`$p2)
+    try {
+        `$pw  = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(`$b1)
+        `$pwc = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(`$b2)
+        if ([string]::IsNullOrEmpty(`$pw)) { Write-Host '[ERR] Password must not be empty.'; exit 1 }
+        if (`$pw -ne `$pwc)                { Write-Host '[ERR] Passwords do not match.';   exit 1 }
+        `$cmd = 'SIGNALK_RESETADMIN_PASSWORD=' + (Quote-Bash `$pw) + ' signalk resetadmin ' + (Quote-Bash `$user)
+        Send-Vm `$cmd
+        `$rc = `$LASTEXITCODE
+    } finally {
+        # Zero the plaintext + the unmanaged BSTRs so the password doesn't linger.
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR(`$b1)
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR(`$b2)
+        `$pw = `$null; `$pwc = `$null; `$cmd = `$null
+    }
+    exit `$rc
+  }
+
+  'bug-report' {
+    # Run the bundler into a known on-disk VM dir (NOT /tmp - tmpfs), then copy
+    # the tarball out to the Windows Desktop. The bundle is gzip (binary): pull
+    # it base64-encoded so ssh's text/CRLF handling can't corrupt it.
+    #
+    # The VM dir is written in BASH form: "`$HOME" is double-quoted so bash
+    # expands it, and the suffix is a bare literal (no spaces/metacharacters).
+    # Do NOT single-quote the whole thing - that would stop `$HOME expanding and
+    # create a literal '`$HOME' directory.
+    `$vmDir = '"`$HOME"/.signalk-updater/bug-reports'
+    Write-Host '[i] Generating the bug report inside the Podman machine...'
+    Send-Vm ("signalk bug-report --to " + `$vmDir)
+    if (`$LASTEXITCODE -ne 0) { Write-Host '[ERR] bug-report failed inside the VM.'; exit `$LASTEXITCODE }
+    # Newest tarball in that dir. The glob must stay UNQUOTED so the shell
+    # expands *; the dir prefix carries its own quoting (see above).
+    `$vmPath = Get-Vm ("ls -1t " + `$vmDir + "/signalk-bug-report-*.tar.gz 2>/dev/null | head -1")
+    if ([string]::IsNullOrWhiteSpace(`$vmPath)) {
+        Write-Host '[ERR] Could not locate the generated bundle inside the VM.'; exit 1
+    }
+    `$name = Split-Path -Leaf `$vmPath
+    `$dest = Join-Path ([Environment]::GetFolderPath('Desktop')) `$name
+    Write-Host "[i] Copying `$name to the Desktop..."
+    `$b64 = Get-Vm ("base64 -w0 " + (Quote-Bash `$vmPath))
+    if ([string]::IsNullOrWhiteSpace(`$b64)) { Write-Host '[ERR] Failed to read the bundle from the VM.'; exit 1 }
+    try {
+        [System.IO.File]::WriteAllBytes(`$dest, [Convert]::FromBase64String(`$b64))
+    } catch {
+        Write-Host "[ERR] Could not write the bundle to `$dest (`$(`$_.Exception.Message))."; exit 1
+    }
+    # Remove the VM-side copy now that it's safely on Windows.
+    Send-Vm ("rm -f " + (Quote-Bash `$vmPath)) | Out-Null
+    Write-Host ''
+    Write-Host '[OK] Bug report bundle saved to:'
+    Write-Host "  `$dest"
+    Write-Host ''
+    Write-Host 'Attach that file to a new issue at:'
+    Write-Host '  https://github.com/SignalK/signalk-server/issues/new'
+    exit 0
+  }
+
+  'uninstall' {
+    # First the in-VM teardown (stack + preserved-data summary), then the
+    # Windows-side teardown the in-VM CLI can't do: the Podman machine itself
+    # (where ALL SignalK data lives), this CLI wrapper, and the PATH entry.
+    Send-Vm 'signalk uninstall'
+    Write-Host ''
+    Write-Host 'The command above removed the SignalK stack INSIDE the Podman machine.'
+    Write-Host "On Windows, the SignalK data lives entirely in the Podman machine '`$Machine'."
+    Write-Host ''
+    `$ans = Read-Host "Remove the Podman machine '`$Machine' and ALL its data, plus this 'signalk' command? [y/N]"
+    if (`$ans -notmatch '^[Yy]') {
+        Write-Host 'Left the Podman machine and the signalk command in place.'
+        Write-Host "To finish later: podman machine rm -f `$Machine"
+        exit 0
+    }
+    Write-Host "[i] Stopping and removing Podman machine '`$Machine'..."
+    & podman machine stop `$Machine 2>`$null | Out-Null
+    & podman machine rm -f `$Machine
+    if (`$LASTEXITCODE -ne 0) { Write-Host "[WARN] 'podman machine rm' reported an error; check 'podman machine list'." }
+    # Strip our dir from the user PATH.
+    `$dir = Split-Path -Parent `$MyInvocation.MyCommand.Path
+    `$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (`$userPath) {
+        `$kept = (`$userPath -split ';') | Where-Object { `$_ -and (`$_ -ne `$dir) }
+        [Environment]::SetEnvironmentVariable('Path', (`$kept -join ';'), 'User')
+    }
+    Write-Host '[OK] Removed the Podman machine and the PATH entry.'
+    Write-Host '(WSL and the Podman app are left installed - remove them via Windows Settings if you want.)'
+    # Self-delete the wrapper dir last, best-effort. The .ps1 is already loaded
+    # into memory, but the parent signalk.cmd may still hold the directory open,
+    # so this can fail with "in use" - tell the user how to finish by hand.
+    Remove-Item -Recurse -Force `$dir -ErrorAction SilentlyContinue
+    if (Test-Path `$dir) {
+        Write-Host "[i] Could not remove `$dir while it is in use."
+        Write-Host "    Delete it manually after this window closes:  rmdir /s /q `"`$dir`""
+    } else {
+        Write-Host "[OK] Removed the 'signalk' command files."
+    }
+    exit 0
+  }
+
+  default {
+    # Everything else: forward verbatim. Single-quote EACH arg so spaces don't
+    # split and shell metacharacters can't inject (e.g. 'health; rm -rf ...').
+    `$q = `$args | ForEach-Object { Quote-Bash `$_ }
+    Send-Vm ('signalk ' + (`$q -join ' '))
+    exit `$LASTEXITCODE
+  }
+}
 "@
 # .cmd shim so `signalk ...` works from cmd.exe and PowerShell alike. The worker
 # is named signalk-RUN.ps1 (not signalk.ps1) ON PURPOSE: if it were signalk.ps1,
