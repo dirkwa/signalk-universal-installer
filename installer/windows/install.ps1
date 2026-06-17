@@ -840,9 +840,64 @@ switch (`$sub) {
     Write-Host ''
     Write-Host '[OK] Bug report bundle saved to:'
     Write-Host "  `$dest"
+
+    # Optional filebin upload + issue-page open, on the WINDOWS side. The in-VM
+    # CLI skips these (no TTY/browser in the VM); here we have both. Same flow,
+    # endpoints, and default-Y prompts as the Linux cmd_bug_report.
+    `$issueBase = 'https://github.com/SignalK/signalk-server/issues/new'
+    # Stamp from the filename: signalk-bug-report-<stamp>.tar.gz
+    `$stamp = `$name -replace '^signalk-bug-report-', '' -replace '\.tar\.gz`$', ''
+    `$tarballUrl = ''
+
     Write-Host ''
-    Write-Host 'Attach that file to a new issue at:'
-    Write-Host '  https://github.com/SignalK/signalk-server/issues/new'
+    Write-Host 'Upload the bundle to filebin.net so it can be linked from the issue?'
+    Write-Host '  - filebin.net is PUBLIC: anyone with the bin URL can download it.'
+    Write-Host '  - The bundle has tokens and pipedProviders options redacted, but'
+    Write-Host '    still contains settings.json, hardware.json, plugin versions,'
+    Write-Host '    and 24 hours of journal output. Review the tarball first if'
+    Write-Host '    you are on a shared boat or run custom plugins.'
+    Write-Host '  - filebin auto-expires bins after ~6 days.'
+    `$ansUp = Read-Host 'Upload now? [Y/n]'
+    if ([string]::IsNullOrWhiteSpace(`$ansUp)) { `$ansUp = 'Y' }
+    if (`$ansUp -match '^[Yy]') {
+        # Bin name mixes timestamp + a random suffix so the URL is infeasible to
+        # guess; that is the only access control filebin offers.
+        `$bin = 'signalk-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss') + '-' + (Get-Random)
+        `$url = 'https://filebin.net/' + `$bin + '/' + `$name
+        Write-Host "[i] Uploading `$name ..."
+        try {
+            # -InFile streams the file's raw bytes (no transcoding) on both
+            # Windows PowerShell 5.1 and PS7 - safe for the gzip.
+            Invoke-RestMethod -Uri `$url -Method Post -InFile `$dest ``
+                -ContentType 'application/gzip' -TimeoutSec 120 | Out-Null
+            `$tarballUrl = `$url
+            Write-Host '[OK] Uploaded:'
+            Write-Host "  `$tarballUrl"
+        } catch {
+            Write-Host "[WARN] Upload failed (`$(`$_.Exception.Message)). Attach the file from your Desktop manually."
+        }
+    }
+
+    Write-Host ''
+    `$ansIssue = Read-Host 'Open the GitHub issue page in your browser? [Y/n]'
+    if ([string]::IsNullOrWhiteSpace(`$ansIssue)) { `$ansIssue = 'Y' }
+    if (`$ansIssue -match '^[Yy]') {
+        if (`$tarballUrl) {
+            `$body = "**Bug report bundle:** `$tarballUrl``n_(filebin link, auto-expires in ~6 days - please download soon)_"
+        } else {
+            `$body = "**Bug report bundle:** attach the file '`$name' from your Desktop"
+        }
+        `$body += "``n``n**What happened:**``n``n**Expected:**``n``n**Steps to reproduce:**``n"
+        `$issueUrl = `$issueBase + '?title=' + [uri]::EscapeDataString("Bug report `$stamp") + '&body=' + [uri]::EscapeDataString(`$body)
+        Write-Host '[i] Opening:'
+        Write-Host "  `$issueUrl"
+        try { Start-Process `$issueUrl } catch {
+            Write-Host '(could not open a browser - copy the URL above)'
+        }
+    } else {
+        Write-Host 'Open this when you are ready:'
+        Write-Host "  `$issueBase"
+    }
     exit 0
   }
 
