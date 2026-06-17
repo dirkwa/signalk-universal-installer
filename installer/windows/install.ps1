@@ -719,6 +719,11 @@ $ps1Body = @"
 #                 offer to remove the Podman machine + this CLI wrapper + PATH.
 `$ErrorActionPreference = 'Stop'
 `$Machine = '$MachineName'
+# Prepended to every in-VM ``signalk`` call. SIGNALK_PUBLIC_HOST tells the CLI to
+# print URLs the operator can actually open from Windows: the stack is reached
+# over Podman Machine's localhost port-forward, so 127.0.0.1 (the VM's loopback,
+# which the CLI uses internally to probe) is not what the user should click.
+`$SkEnv = 'SIGNALK_PUBLIC_HOST=localhost '
 
 # Base64-encode a bash command and run it in the VM. base64 is one token with no
 # shell metacharacters (immune to quote mangling) and ``base64 -d`` ignores the
@@ -765,7 +770,7 @@ switch (`$sub) {
         `$pwc = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(`$b2)
         if ([string]::IsNullOrEmpty(`$pw)) { Write-Host '[ERR] Password must not be empty.'; exit 1 }
         if (`$pw -ne `$pwc)                { Write-Host '[ERR] Passwords do not match.';   exit 1 }
-        `$cmd = 'SIGNALK_RESETADMIN_PASSWORD=' + (Quote-Bash `$pw) + ' signalk resetadmin ' + (Quote-Bash `$user)
+        `$cmd = 'SIGNALK_RESETADMIN_PASSWORD=' + (Quote-Bash `$pw) + ' ' + `$SkEnv + 'signalk resetadmin ' + (Quote-Bash `$user)
         Send-Vm `$cmd
         `$rc = `$LASTEXITCODE
     } finally {
@@ -788,7 +793,7 @@ switch (`$sub) {
     # create a literal '`$HOME' directory.
     `$vmDir = '"`$HOME"/.signalk-updater/bug-reports'
     Write-Host '[i] Generating the bug report inside the Podman machine...'
-    Send-Vm ("signalk bug-report --to " + `$vmDir)
+    Send-Vm (`$SkEnv + "signalk bug-report --to " + `$vmDir)
     if (`$LASTEXITCODE -ne 0) { Write-Host '[ERR] bug-report failed inside the VM.'; exit `$LASTEXITCODE }
     # Newest tarball in that dir. The glob must stay UNQUOTED so the shell
     # expands *; the dir prefix carries its own quoting (see above).
@@ -821,7 +826,7 @@ switch (`$sub) {
     # First the in-VM teardown (stack + preserved-data summary), then the
     # Windows-side teardown the in-VM CLI can't do: the Podman machine itself
     # (where ALL SignalK data lives), this CLI wrapper, and the PATH entry.
-    Send-Vm 'signalk uninstall'
+    Send-Vm (`$SkEnv + 'signalk uninstall')
     `$vmRc = `$LASTEXITCODE
     Write-Host ''
     if (`$vmRc -eq 0) {
@@ -874,7 +879,7 @@ switch (`$sub) {
     # Everything else: forward verbatim. Single-quote EACH arg so spaces don't
     # split and shell metacharacters can't inject (e.g. 'health; rm -rf ...').
     `$q = `$args | ForEach-Object { Quote-Bash `$_ }
-    Send-Vm ('signalk ' + (`$q -join ' '))
+    Send-Vm (`$SkEnv + 'signalk ' + (`$q -join ' '))
     exit `$LASTEXITCODE
   }
 }
