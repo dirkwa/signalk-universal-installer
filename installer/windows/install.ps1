@@ -822,15 +822,27 @@ switch (`$sub) {
     # Windows-side teardown the in-VM CLI can't do: the Podman machine itself
     # (where ALL SignalK data lives), this CLI wrapper, and the PATH entry.
     Send-Vm 'signalk uninstall'
+    `$vmRc = `$LASTEXITCODE
     Write-Host ''
-    Write-Host 'The command above removed the SignalK stack INSIDE the Podman machine.'
+    if (`$vmRc -eq 0) {
+        Write-Host 'The command above removed the SignalK stack INSIDE the Podman machine.'
+    } else {
+        # Don't claim a success the VM didn't report. Removing the machine below
+        # wipes everything regardless, so still offer to continue - but be honest
+        # that the in-VM teardown failed if the user declines.
+        Write-Host "[WARN] The in-VM 'signalk uninstall' exited with code `$vmRc - the stack may NOT be fully removed inside the machine."
+    }
     Write-Host "On Windows, the SignalK data lives entirely in the Podman machine '`$Machine'."
     Write-Host ''
     `$ans = Read-Host "Remove the Podman machine '`$Machine' and ALL its data, plus this 'signalk' command? [y/N]"
     if (`$ans -notmatch '^[Yy]') {
-        Write-Host 'Left the Podman machine and the signalk command in place.'
-        Write-Host "To finish later: podman machine rm -f `$Machine"
-        exit 0
+        if (`$vmRc -ne 0) {
+            Write-Host "[WARN] The in-VM teardown FAILED (code `$vmRc) and you declined machine removal - the stack may still be running. Re-run 'signalk uninstall', or remove the machine with: podman machine rm -f `$Machine"
+        } else {
+            Write-Host 'Left the Podman machine and the signalk command in place.'
+            Write-Host "To finish later: podman machine rm -f `$Machine"
+        }
+        exit `$vmRc
     }
     Write-Host "[i] Stopping and removing Podman machine '`$Machine'..."
     & podman machine stop `$Machine 2>`$null | Out-Null
