@@ -701,10 +701,15 @@ if ($rc -ne 0) {
 Section "Windows CLI"
 $skCmdDir = Join-Path $env:LOCALAPPDATA 'Programs\signalk'
 # The PS1 forwards its args to the in-VM `signalk` over the base64-stdin
-# transport. `bash -lc` gives the login PATH that has ~/.local/bin/signalk.
+# transport. `bash -l` gives the login-shell PATH that has ~/.local/bin/signalk.
 $ps1Body = @"
 # SignalK CLI shim - forwards to `signalk` inside Podman machine '$MachineName'.
-`$cmd = 'signalk ' + (`$args -join ' ')
+# Single-quote EACH arg for bash before joining (wrap in '...', and turn any
+# embedded ' into the '\'' idiom). Without this, '`$args -join " "' would let an
+# arg with spaces split into several (e.g. --to "/x/with space") and let shell
+# metacharacters inject commands into the VM (e.g. 'health; rm -rf ...').
+`$q = `$args | ForEach-Object { "'" + (`$_ -replace "'", "'\''") + "'" }
+`$cmd = 'signalk ' + (`$q -join ' ')
 `$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$cmd))
 # Pipe via stdin: base64 -d ignores the CR PowerShell appends inside the b64, and
 # the trailing ` #` turns the CR after `bash -l` into a comment (without it bash
