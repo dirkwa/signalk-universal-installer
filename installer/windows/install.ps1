@@ -971,7 +971,11 @@ switch (`$sub) {
     `$dir = Split-Path -Parent `$MyInvocation.MyCommand.Path
     `$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (`$userPath) {
-        `$kept = (`$userPath -split ';') | Where-Object { `$_ -and (`$_ -ne `$dir) }
+        # -ine: explicit case-insensitive match. PowerShell's -ne is already
+        # case-insensitive by default, but Windows paths are case-insensitive
+        # and `$dir (from $MyInvocation) may differ in case from the stored PATH
+        # entry, so spell out the intent.
+        `$kept = (`$userPath -split ';') | Where-Object { `$_ -and (`$_ -ine `$dir) }
         [Environment]::SetEnvironmentVariable('Path', (`$kept -join ';'), 'User')
     }
     Write-Host '[OK] Removed the Podman machine and the PATH entry.'
