@@ -38,6 +38,12 @@ if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { 
 
 $ErrorActionPreference = 'Stop'
 
+# The TCP ports the stack may serve on, in ONE place: 80/443 standard web,
+# 3000/3443 the declined-standard fallback, 3003 updater, 3004 doctor. Used both
+# to open the firewall at install time and (interpolated into the generated
+# signalk-run.ps1) to remove those rules on uninstall, so the two never drift.
+$SignalkPorts = @(80, 443, 3000, 3443, 3003, 3004)
+
 # NOTE on output encoding: wsl.exe emits UTF-16LE, so a captured `& wsl ...`
 # comes back with a NUL between every character - Get-VersionFrom strips those
 # NULs to parse the version. We deliberately do NOT set
@@ -1186,8 +1192,10 @@ switch (`$sub) {
     # Remove the boot auto-start task the installer registered (name must match
     # Register-MachineAutostart). Best-effort - absent on installs from before it.
     Unregister-ScheduledTask -TaskName "SignalK Podman Machine (`$Machine)" -Confirm:`$false -ErrorAction SilentlyContinue
-    # Remove the firewall allow rules (names must match Add-FirewallRules).
-    foreach (`$p in 80,443,3000,3443,3003,3004) {
+    # Remove the firewall allow rules (names must match Add-FirewallRules). The
+    # port list is interpolated from `$SignalkPorts at generation time so it
+    # can't drift from the install-side Add-FirewallRules call.
+    foreach (`$p in $($SignalkPorts -join ',')) {
         Remove-NetFirewallRule -Name "SignalK-`$p" -ErrorAction SilentlyContinue
     }
     # Strip our dir from the user PATH.
@@ -1269,7 +1277,7 @@ try {
 # standard ports (80/443) and the declined-standard fallback (3000/3443), plus
 # the two consoles - opening a couple unused ports is harmless.
 Section "Firewall"
-Add-FirewallRules -Ports @(80, 443, 3000, 3443, 3003, 3004)
+Add-FirewallRules -Ports $SignalkPorts
 
 # 5d. Start the machine automatically after a reboot (a podman machine doesn't
 # start on boot on its own). Registered last, once the stack is confirmed up.
