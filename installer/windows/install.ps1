@@ -38,6 +38,12 @@ if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { 
 
 $ErrorActionPreference = 'Stop'
 
+# The TCP ports the stack may serve on, in ONE place: 80/443 standard web,
+# 3000/3443 the declined-standard fallback, 3003 updater, 3004 doctor. Used both
+# to open the firewall at install time and (interpolated into the generated
+# signalk-run.ps1) to remove those rules on uninstall, so the two never drift.
+$SignalkPorts = @(80, 443, 3000, 3443, 3003, 3004)
+
 # NOTE on output encoding: wsl.exe emits UTF-16LE, so a captured `& wsl ...`
 # comes back with a NUL between every character - Get-VersionFrom strips those
 # NULs to parse the version. We deliberately do NOT set
@@ -392,7 +398,25 @@ powershell -NoProfile -WindowStyle Hidden -Command "podman machine start $Machin
                     Ok "Registered BOOT task '$taskName' - the stack starts at boot with no sign-in."
                     $registeredBoot = $true
                 } catch {
-                    Warn "Boot task registration failed ($($_.Exception.Message)); falling back to a sign-in task."
+                    # A Microsoft-account-linked Windows account can't have its
+                    # password stored in a "run whether logged on or not" task:
+                    # the credential authority is Microsoft online, not the local
+                    # SAM, so Register-ScheduledTask rejects it. The signatures are
+                    # HRESULT 0x8007052E ("username or password incorrect") here,
+                    # and 0x8646 / "not authoritative for the account" if the
+                    # operator first tried to reset the password. This is a
+                    # property of the ACCOUNT, not a typo - so don't just say
+                    # "wrong password"; tell them the real fix.
+                    $msg = "$($_.Exception.Message)"
+                    if ($msg -match '0x8007052E' -or $msg -match '0x8646' -or $msg -match 'not authoritative') {
+                        Warn "This Windows account is linked to a Microsoft account, so its password can't be stored for a boot-without-login task (a Microsoft-account limitation, not a wrong password)."
+                        Write-Host "    For true boot-without-login, either:"
+                        Write-Host "      - create a LOCAL Windows account and run this installer signed in as that account, or"
+                        Write-Host "      - enable Windows auto-login for this account (Sysinternals Autologon)."
+                        Write-Host "    Falling back to a SIGN-IN task for now (starts the stack when you log in)."
+                    } else {
+                        Warn "Boot task registration failed ($msg); falling back to a sign-in task."
+                    }
                 }
             }
         }
@@ -1168,8 +1192,10 @@ switch (`$sub) {
     # Remove the boot auto-start task the installer registered (name must match
     # Register-MachineAutostart). Best-effort - absent on installs from before it.
     Unregister-ScheduledTask -TaskName "SignalK Podman Machine (`$Machine)" -Confirm:`$false -ErrorAction SilentlyContinue
-    # Remove the firewall allow rules (names must match Add-FirewallRules).
-    foreach (`$p in 80,443,3000,3443,3003,3004) {
+    # Remove the firewall allow rules (names must match Add-FirewallRules). The
+    # port list is interpolated from `$SignalkPorts at generation time so it
+    # can't drift from the install-side Add-FirewallRules call.
+    foreach (`$p in $($SignalkPorts -join ',')) {
         Remove-NetFirewallRule -Name "SignalK-`$p" -ErrorAction SilentlyContinue
     }
     # Strip our dir from the user PATH.
@@ -1251,7 +1277,7 @@ try {
 # standard ports (80/443) and the declined-standard fallback (3000/3443), plus
 # the two consoles - opening a couple unused ports is harmless.
 Section "Firewall"
-Add-FirewallRules -Ports @(80, 443, 3000, 3443, 3003, 3004)
+Add-FirewallRules -Ports $SignalkPorts
 
 # 5d. Start the machine automatically after a reboot (a podman machine doesn't
 # start on boot on its own). Registered last, once the stack is confirmed up.
