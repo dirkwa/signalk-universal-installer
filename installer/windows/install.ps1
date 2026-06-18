@@ -412,28 +412,50 @@ powershell -NoProfile -WindowStyle Hidden -Command "podman machine start $Machin
 # it. Under mirrored networking inbound LAN traffic hits the Windows host's
 # firewall first, and the default inbound policy BLOCKS it - so without this the
 # consoles are unreachable from a phone/laptop (the operator otherwise has to
-# disable the firewall entirely). Idempotent: -Force replaces same-named rules.
-# Needs admin (the installer already runs elevated). Best-effort.
+# disable the firewall entirely). Needs admin (the installer already runs
+# elevated). Best-effort - a failure on one port warns but doesn't abort.
+#
+# Idempotent via a stable per-port -Name ("SignalK-<port>"): skip ports whose
+# rule already exists, so repeated installer runs converge to one rule per port
+# instead of accumulating duplicates (DisplayName alone is not unique).
+# Scoped to LocalSubnet so the rule only admits same-LAN clients, not arbitrary
+# remote hosts. Profile stays Any (a boat's WiFi may be classified Public, and
+# we still want LAN access there); LocalSubnet is what bounds the exposure.
 function Add-FirewallRules {
     param([Parameter(Mandatory)][int[]]$Ports)
+    $opened = @()
     foreach ($p in $Ports) {
+        $ruleName = "SignalK-$p"
         try {
-            New-NetFirewallRule -DisplayName "SignalK $p" -Direction Inbound -Action Allow `
-                -Protocol TCP -LocalPort $p -Profile Any -ErrorAction Stop | Out-Null
+            if (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue) {
+                $opened += $p   # already present (prior run) - count as in place
+                continue
+            }
+            New-NetFirewallRule -Name $ruleName -DisplayName "SignalK $p" -Direction Inbound -Action Allow `
+                -Protocol TCP -LocalPort $p -Profile Any -RemoteAddress LocalSubnet -ErrorAction Stop | Out-Null
+            $opened += $p
         } catch {
             Warn "Could not add a firewall allow rule for port $p ($($_.Exception.Message)); open it manually if other devices can't reach the stack."
         }
     }
-    Ok "Opened the Windows firewall for ports: $($Ports -join ', ')"
+    if ($opened.Count -gt 0) {
+        Ok "Firewall allows LAN access on ports: $($opened -join ', ')"
+    } else {
+        Warn "No firewall rules could be added; other devices may not reach the stack until you open the ports."
+    }
 }
 
 # The Windows host's primary LAN IPv4 (what to point a browser at, since under
-# mirrored networking the VM shares this address). Skips loopback / APIPA /
-# WSL-internal (172.x) addresses. Returns $null if none found.
+# mirrored networking the VM shares this address). Skips loopback and APIPA
+# (link-local) only; picks the lowest-metric interface, which is the active
+# default route - that's the real LAN NIC. We deliberately do NOT exclude
+# 172.x: 172.16.0.0/12 is a valid private LAN range, and under mirrored mode the
+# WSL NAT interface (also 172.x) isn't present on the host anyway. Returns $null
+# if none found.
 function Get-HostLanIp {
     try {
         $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
-            Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '172.*' } |
+            Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
             Sort-Object -Property @{Expression={$_.InterfaceMetric}} |
             Select-Object -First 1 -ExpandProperty IPAddress
         return $ip
@@ -1146,6 +1168,10 @@ switch (`$sub) {
     # Remove the boot auto-start task the installer registered (name must match
     # Register-MachineAutostart). Best-effort - absent on installs from before it.
     Unregister-ScheduledTask -TaskName "SignalK Podman Machine (`$Machine)" -Confirm:`$false -ErrorAction SilentlyContinue
+    # Remove the firewall allow rules (names must match Add-FirewallRules).
+    foreach (`$p in 80,443,3000,3443,3003,3004) {
+        Remove-NetFirewallRule -Name "SignalK-`$p" -ErrorAction SilentlyContinue
+    }
     # Strip our dir from the user PATH.
     `$dir = Split-Path -Parent `$MyInvocation.MyCommand.Path
     `$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
