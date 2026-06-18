@@ -282,6 +282,120 @@ function Stop-ForReboot {
     exit 0
 }
 
+# --- Headless / always-on support --------------------------------------------
+# A boat PC powers on with NO ONE logged in and the stack must be reachable from
+# any device on the LAN. Three pieces make that work (all verified live):
+#   1. mirrored networking - the VM takes the Windows host's LAN IP, so a browser
+#      on any device reaches http://<host-ip> directly (NAT mode hides the VM
+#      behind a 172.x address with no inbound path).
+#   2. an ~/.ssh/config localhost->IPv4 rule - podman invokes `ssh user@localhost`
+#      and Windows resolves localhost to ::1 first; the VM's sshd forward is
+#      IPv4-only, so each `podman machine ssh` ate a ~21s IPv6 timeout. Forcing
+#      localhost to AddressFamily inet drops it to <1s.
+#   3. a boot Scheduled Task (run whether logged on or not) that starts the
+#      machine at Windows startup with no sign-in; systemd inside then starts
+#      the containers.
+
+# Write networkingMode=mirrored into %USERPROFILE%\.wslconfig. MERGE, never
+# clobber: the file is machine-wide (all WSL distros) and the user may have
+# their own keys. If a networkingMode is already set we leave it alone (respect
+# an explicit choice) and just report it.
+function Set-WslConfigMirrored {
+    $path = Join-Path $env:USERPROFILE '.wslconfig'
+    $text = if (Test-Path $path) { Get-Content $path -Raw } else { '' }
+    if ($text -match '(?im)^\s*networkingMode\s*=') {
+        $current = ([regex]::Match($text, '(?im)^\s*networkingMode\s*=\s*(\S+)')).Groups[1].Value
+        if ($current -ieq 'mirrored') {
+            Ok ".wslconfig already sets networkingMode=mirrored"
+        } else {
+            Warn ".wslconfig sets networkingMode=$current (not mirrored). LAN access from other devices may not work; set networkingMode=mirrored to enable it."
+        }
+        return
+    }
+    # No networkingMode yet. Append it under a [wsl2] section (add the header
+    # only if absent), preserving any existing content.
+    if ($text -match '(?im)^\s*\[wsl2\]\s*$') {
+        # Insert the key right after the [wsl2] header line.
+        $new = [regex]::Replace($text, '(?im)^(\s*\[wsl2\]\s*)$', "`$1`r`nnetworkingMode=mirrored", 1)
+    } else {
+        if ($text -and -not $text.EndsWith("`n")) { $text += "`r`n" }
+        $new = $text + "[wsl2]`r`nnetworkingMode=mirrored`r`n"
+    }
+    [System.IO.File]::WriteAllText($path, $new, [System.Text.Encoding]::ASCII)
+    Ok "Enabled mirrored networking in $path (VM shares the host's LAN IP)"
+}
+
+# Add a per-user ~/.ssh/config rule forcing `localhost` to IPv4, so podman's
+# `ssh user@localhost` doesn't burn ~21s on an IPv6 (::1) connect timeout.
+# Scoped to the user, needs no admin, and doesn't touch the hosts file. MERGE:
+# append the block only if a `Host localhost` stanza isn't already present.
+function Set-SshLocalhostIPv4 {
+    $sshDir = Join-Path $env:USERPROFILE '.ssh'
+    $cfg = Join-Path $sshDir 'config'
+    $text = if (Test-Path $cfg) { Get-Content $cfg -Raw } else { '' }
+    if ($text -match '(?im)^\s*Host\s+localhost\s*$') {
+        Ok "~/.ssh/config already has a 'Host localhost' stanza (leaving it as-is)"
+        return
+    }
+    New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+    if ($text -and -not $text.EndsWith("`n")) { $text += "`r`n" }
+    $block = "Host localhost`r`n    AddressFamily inet`r`n"
+    [System.IO.File]::WriteAllText($cfg, ($text + $block), [System.Text.Encoding]::ASCII)
+    Ok "Added a localhost->IPv4 rule to $cfg (keeps 'podman machine ssh' fast under mirrored networking)"
+}
+
+# Register a boot Scheduled Task that starts the machine with NO user logged in.
+# It must run as the user (WSL2 is per-user) "whether logged on or not", which
+# needs the user's password stored with the task. Prompt for it when we can;
+# skip cleanly (manual start / re-run) when we can't, since this is an
+# enhancement, not a hard requirement - the stack is already up at this point.
+function Register-MachineAutostart {
+    param(
+        [Parameter(Mandatory)][string]$Machine,
+        [Parameter(Mandatory)][string]$CmdDir
+    )
+    $taskName = "SignalK Podman Machine ($Machine)"
+    try {
+        # Hidden launcher so nothing flashes at boot; output discarded.
+        $launcher = Join-Path $CmdDir 'signalk-autostart.cmd'
+        $launcherBody = @"
+@echo off
+rem Start the SignalK Podman machine at boot. Installed by signalk-universal-installer.
+powershell -NoProfile -WindowStyle Hidden -Command "podman machine start $Machine" >nul 2>&1
+"@
+        New-Item -ItemType Directory -Force -Path $CmdDir | Out-Null
+        [System.IO.File]::WriteAllText($launcher, ($launcherBody -replace "`r?`n", "`r`n"), [System.Text.Encoding]::ASCII)
+
+        $action  = New-ScheduledTaskAction -Execute $launcher
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $set     = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+
+        if (Test-CanPrompt) {
+            Write-Host ""
+            Info "To start SignalK at boot with NO ONE logged in, Windows needs to store this account's password for a startup task."
+            Write-Host "    (Press Enter at the prompt to SKIP - you can instead enable Windows auto-login, or run 'podman machine start $Machine' after each reboot.)"
+            $cred = $null
+            try { $cred = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message "Password for $env:USERDOMAIN\$env:USERNAME (stored for the boot task; Enter/Cancel to skip)" } catch { $cred = $null }
+            if (-not $cred -or [string]::IsNullOrEmpty($cred.GetNetworkCredential().Password)) {
+                Warn "Skipped the boot auto-start task (no password given). The stack will NOT start until you log in or run 'podman machine start $Machine'. Re-run the installer to set it up later."
+                return
+            }
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $set `
+                -User $cred.UserName -Password $cred.GetNetworkCredential().Password -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+            Ok "Registered boot task '$taskName' - the stack starts at boot with no sign-in."
+        } else {
+            # Non-interactive: register a LOGON task (no stored password needed),
+            # which still starts the machine, just at sign-in rather than boot.
+            $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+            $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $set -Principal $principal -Force -ErrorAction Stop | Out-Null
+            Warn "Registered a LOGON auto-start task (no password prompt available). For boot-without-login, re-run interactively or enable Windows auto-login."
+        }
+    } catch {
+        Warn "Could not register the auto-start task ($($_.Exception.Message)); after a reboot, run 'podman machine start $Machine' to bring the stack back."
+    }
+}
+
 # Best-effort identification of the host hypervisor when running as a guest VM,
 # so the virtualization help can name the right per-host toggle.
 function Get-HostHypervisor {
@@ -518,6 +632,24 @@ if (-not (Test-VirtualizationCapable)) {
     Section "Virtualization not available"
     Show-VirtualizationHelp
     Die "Virtualization is not available on this machine; enable it (see above) and re-run."
+}
+
+# Headless networking, applied BEFORE the machine is created/started so it comes
+# up with the right config:
+#   - mirrored networking (.wslconfig) so the VM shares the host LAN IP and the
+#     stack is reachable from other devices' browsers.
+#   - localhost->IPv4 in ~/.ssh/config so `podman machine ssh` stays fast.
+# .wslconfig is read when WSL (re)starts a distro; if WSL is already up from an
+# earlier step a shutdown is needed for mirrored to take effect. We only shut
+# down when we actually changed .wslconfig AND the machine isn't created yet
+# (nothing to disrupt) - a no-op on re-runs where mirrored is already set.
+$wslconfigBefore = if (Test-Path (Join-Path $env:USERPROFILE '.wslconfig')) { Get-Content (Join-Path $env:USERPROFILE '.wslconfig') -Raw } else { '' }
+Set-WslConfigMirrored
+Set-SshLocalhostIPv4
+$wslconfigAfter = Get-Content (Join-Path $env:USERPROFILE '.wslconfig') -Raw
+if ($wslconfigBefore -ne $wslconfigAfter) {
+    Info "Applying the WSL networking change (wsl --shutdown)"
+    Invoke-BestEffort wsl @('--shutdown') | Out-Null
 }
 
 # Size the VM's memory to fit the host. podman rejects a machine larger than
@@ -967,6 +1099,9 @@ switch (`$sub) {
     & podman machine stop `$Machine 2>`$null | Out-Null
     & podman machine rm -f `$Machine
     if (`$LASTEXITCODE -ne 0) { Write-Host "[WARN] 'podman machine rm' reported an error; check 'podman machine list'." }
+    # Remove the boot auto-start task the installer registered (name must match
+    # Register-MachineAutostart). Best-effort - absent on installs from before it.
+    Unregister-ScheduledTask -TaskName "SignalK Podman Machine (`$Machine)" -Confirm:`$false -ErrorAction SilentlyContinue
     # Strip our dir from the user PATH.
     `$dir = Split-Path -Parent `$MyInvocation.MyCommand.Path
     `$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -1040,6 +1175,11 @@ try {
 } catch {
     Warn "Could not install the Windows 'signalk' command ($($_.Exception.Message)); use 'podman machine ssh $MachineName' then 'signalk ...' instead."
 }
+
+# 5c. Start the machine automatically after a reboot (a podman machine doesn't
+# start on boot on its own). Registered last, once the stack is confirmed up.
+Section "Auto-start on reboot"
+Register-MachineAutostart -Machine $MachineName -CmdDir $skCmdDir
 
 # 6. Done
 @"

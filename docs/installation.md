@@ -133,12 +133,24 @@ The Windows installer:
 1. Checks for Administrator and Windows 11.
 2. Installs the WSL2 platform with `wsl --install --no-distribution` (no user-facing distro, no OOBE prompt).
 3. Installs the Podman CLI via `winget install RedHat.Podman`.
-4. Runs `podman machine init` / `podman machine start`, which creates and owns its own Linux VM (already has systemd + rootless podman set up).
-5. Hands off to the Linux installer inside the machine via `podman machine ssh`.
+4. Enables **mirrored networking** (`networkingMode=mirrored` in `%USERPROFILE%\.wslconfig`) and adds a `localhost`→IPv4 rule to `%USERPROFILE%\.ssh\config` (see "Headless / always-on" below). Both are merged into existing files, never clobbered.
+5. Runs `podman machine init` / `podman machine start`, which creates and owns its own Linux VM (already has systemd + rootless podman set up).
+6. Hands off to the Linux installer inside the machine via `podman machine ssh`.
+7. Registers a boot **Scheduled Task** that starts the machine after a Windows restart (see below).
 
 **Expect one reboot on a fresh machine — this is normal, not an error.** Enabling WSL2 turns on a Windows feature (VirtualMachinePlatform) that only activates after a restart. The installer enables WSL2 up front, then tells you to reboot and re-run; it is idempotent, so re-running after the reboot picks up where it left off and continues to Podman. (Doing this up front avoids a confusing mid-install failure where Podman would otherwise enable the feature itself and fail to create the VM before the reboot.)
 
-Result: the same container stack as Linux, reachable from Windows via Podman Machine's localhost port forwarding — open `http://localhost` (the admin UI; `:3000` if you decline standard ports), `http://localhost:3003` (Updater), `http://localhost:3004` (Doctor).
+Result: the same container stack as Linux. With mirrored networking the Podman Machine VM shares the Windows host's LAN IP, so you reach the stack from **any device** at `http://<windows-host-ip>` (admin UI; `:3000` if you decline standard ports), `:3003` (Updater), `:3004` (Doctor) — and from Windows itself at `http://localhost`.
+
+### Headless / always-on (boat PC)
+
+A boat PC should power on and serve the stack with **no one logged in**. That works, but it leans on three Windows-specific pieces the installer sets up — worth understanding:
+
+- **Boot Scheduled Task.** A Podman machine does not start when Windows boots. The installer registers a task (`SignalK Podman Machine (signalk)`) that runs `podman machine start signalk` at startup. To start with **nobody signed in**, the task must run "whether the user is logged on or not", which needs Windows to store this account's password — so the installer **prompts for it** during step 7. Press Enter to skip (then either enable Windows auto-login, or run `podman machine start signalk` after each reboot). It can't be a Windows *service*: the machine is a per-user WSL2 distro and WSL2 only starts from a user session, which `LocalSystem`/session-0 services don't have — but a startup task running *as your user* does, even with no interactive sign-in. systemd inside the VM then starts the containers.
+- **Mirrored networking.** Without it, the VM sits behind a private NAT address with no inbound path, so other devices can't reach it. Mirrored mode gives the VM the host's LAN IP. (Trade-off: under mirrored mode `podman machine start` prints a harmless `could not start api proxy … expected pipe is not available` line — that's the Docker-API named pipe, which the stack doesn't use.)
+- **`localhost`→IPv4 in `~/.ssh/config`.** podman runs `ssh user@localhost`; Windows resolves `localhost` to IPv6 `::1` first, but the VM's SSH forward is IPv4-only, so each `podman machine ssh` would stall ~21 s on an IPv6 timeout before falling back. The `Host localhost` / `AddressFamily inet` rule forces IPv4 and keeps the `signalk` CLI fast.
+
+After a reboot with no sign-in, give the machine ~30–60 s, then the stack is reachable at `http://<windows-host-ip>` from any device.
 
 The installer also drops a `signalk` command on your PATH (open a **new** terminal to use it) that forwards into the machine, so `signalk health`, `signalk version`, etc. work the same as on Linux. Three subcommands get Windows-aware handling because they can't run unchanged inside the VM:
 
