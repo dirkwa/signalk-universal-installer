@@ -392,7 +392,25 @@ powershell -NoProfile -WindowStyle Hidden -Command "podman machine start $Machin
                     Ok "Registered BOOT task '$taskName' - the stack starts at boot with no sign-in."
                     $registeredBoot = $true
                 } catch {
-                    Warn "Boot task registration failed ($($_.Exception.Message)); falling back to a sign-in task."
+                    # A Microsoft-account-linked Windows account can't have its
+                    # password stored in a "run whether logged on or not" task:
+                    # the credential authority is Microsoft online, not the local
+                    # SAM, so Register-ScheduledTask rejects it. The signatures are
+                    # HRESULT 0x8007052E ("username or password incorrect") here,
+                    # and 0x8646 / "not authoritative for the account" if the
+                    # operator first tried to reset the password. This is a
+                    # property of the ACCOUNT, not a typo - so don't just say
+                    # "wrong password"; tell them the real fix.
+                    $msg = "$($_.Exception.Message)"
+                    if ($msg -match '0x8007052E' -or $msg -match '0x8646' -or $msg -match 'not authoritative') {
+                        Warn "This Windows account is linked to a Microsoft account, so its password can't be stored for a boot-without-login task (a Microsoft-account limitation, not a wrong password)."
+                        Write-Host "    For true boot-without-login, either:"
+                        Write-Host "      - create a LOCAL Windows account and run this installer signed in as that account, or"
+                        Write-Host "      - enable Windows auto-login for this account (Sysinternals Autologon)."
+                        Write-Host "    Falling back to a SIGN-IN task for now (starts the stack when you log in)."
+                    } else {
+                        Warn "Boot task registration failed ($msg); falling back to a sign-in task."
+                    }
                 }
             }
         }
