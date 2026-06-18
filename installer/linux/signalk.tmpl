@@ -80,13 +80,15 @@ usage() {
     # Print the leading comment block (from line 2 up to the first non-comment
     # line — the `set -euo pipefail` that ends the header) as the help text.
     # Keying on "stop at the first non-# line" rather than a fixed line range
-    # means adding a help entry never silently truncates the output. On Windows
-    # (SIGNALK_PUBLIC_HOST set by the shim) drop the socketcan line — that
+    # means adding a help entry never silently truncates the output. Under the
+    # Windows shim (SIGNALK_WINDOWS_SHIM=1) drop the socketcan line — that
     # subcommand is a Pi CAN-HAT setup the Podman machine VM can't use, and the
-    # Windows shim rejects it, so it shouldn't be advertised there.
+    # Windows shim rejects it, so it shouldn't be advertised there. Keyed on the
+    # dedicated shim flag, not SIGNALK_PUBLIC_HOST (a Linux/macOS user may set a
+    # public host for URL display and must still see socketcan).
     local help
     help=$(sed -n '2,${/^#/!q;p}' "$0" | sed 's/^# \{0,1\}//')
-    if [[ -n "${SIGNALK_PUBLIC_HOST:-}" ]]; then
+    if [[ "${SIGNALK_WINDOWS_SHIM:-0}" == "1" ]]; then
         printf '%s\n' "$help" | grep -v 'signalk socketcan'
     else
         printf '%s\n' "$help"
@@ -459,9 +461,11 @@ cmd_uninstall() {
     # wrong (on Windows the command is the .cmd shim on the Windows side). The
     # shim also immediately offers to remove the whole VM, which wipes all of
     # this anyway. So when invoked from the Windows shim (it sets
-    # SIGNALK_PUBLIC_HOST), suppress this host-path block; the shim prints its
-    # own Windows-accurate summary and prompt.
-    if [[ -n "${SIGNALK_PUBLIC_HOST:-}" ]]; then
+    # SIGNALK_WINDOWS_SHIM=1), suppress this host-path block; the shim prints its
+    # own Windows-accurate summary and prompt. Keyed on the dedicated shim flag,
+    # NOT SIGNALK_PUBLIC_HOST (which a Linux/macOS user may set just for URL
+    # display — they must still see the purge guidance).
+    if [[ "${SIGNALK_WINDOWS_SHIM:-0}" == "1" ]]; then
         echo
         echo "Stack removed inside the Podman machine. Your SignalK data still"
         echo "exists in the machine until you remove it (the next prompt does that)."

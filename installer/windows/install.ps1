@@ -748,11 +748,17 @@ $ps1Body = @"
 #                 offer to remove the Podman machine + this CLI wrapper + PATH.
 `$ErrorActionPreference = 'Stop'
 `$Machine = '$MachineName'
-# Prepended to every in-VM ``signalk`` call. SIGNALK_PUBLIC_HOST tells the CLI to
-# print URLs the operator can actually open from Windows: the stack is reached
-# over Podman Machine's localhost port-forward, so 127.0.0.1 (the VM's loopback,
-# which the CLI uses internally to probe) is not what the user should click.
-`$SkEnv = 'SIGNALK_PUBLIC_HOST=localhost '
+# Prepended to every in-VM ``signalk`` call. Two distinct flags:
+#  - SIGNALK_PUBLIC_HOST=localhost: tells the CLI to print URLs the operator can
+#    open from Windows (the stack is reached over Podman Machine's localhost
+#    port-forward; 127.0.0.1 - the VM's loopback the CLI probes - is not what the
+#    user should click). This is genuinely a "display host" knob.
+#  - SIGNALK_WINDOWS_SHIM=1: a dedicated "this CLI is being driven by the Windows
+#    shim" sentinel for Windows-context behavior (hide the Pi-only socketcan
+#    line, suppress the VM-internal-path uninstall block). Kept separate from
+#    SIGNALK_PUBLIC_HOST so a Linux/macOS user who sets a public host for URL
+#    display doesn't accidentally trigger the Windows-only behavior.
+`$SkEnv = 'SIGNALK_PUBLIC_HOST=localhost SIGNALK_WINDOWS_SHIM=1 '
 
 # Base64-encode a bash command and run it in the VM. base64 is one token with no
 # shell metacharacters (immune to quote mangling) and ``base64 -d`` ignores the
