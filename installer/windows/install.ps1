@@ -367,33 +367,77 @@ powershell -NoProfile -WindowStyle Hidden -Command "podman machine start $Machin
         [System.IO.File]::WriteAllText($launcher, ($launcherBody -replace "`r?`n", "`r`n"), [System.Text.Encoding]::ASCII)
 
         $action  = New-ScheduledTaskAction -Execute $launcher
-        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $bootTrigger  = New-ScheduledTaskTrigger -AtStartup
+        $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $set     = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 
+        # Try for a true no-login BOOT task (needs the stored password). If the
+        # operator skips the password, or we can't prompt, fall back to a LOGON
+        # task so the machine at least starts when they sign in - NEVER register
+        # nothing (that was the "LAST UP: Never" failure: skip left no task at
+        # all, so the stack never came back after a reboot).
+        $registeredBoot = $false
         if (Test-CanPrompt) {
             Write-Host ""
-            Info "To start SignalK at boot with NO ONE logged in, Windows needs to store this account's password for a startup task."
-            Write-Host "    (Press Enter at the prompt to SKIP - you can instead enable Windows auto-login, or run 'podman machine start $Machine' after each reboot.)"
+            Info "OPTIONAL: to start SignalK at boot with NO ONE logged in (a boat PC at the lock screen),"
+            Info "Windows must store this account's password for a startup task."
+            Write-Host "    Enter the password for $env:USERDOMAIN\$env:USERNAME, or press Enter/Cancel to"
+            Write-Host "    skip - then it starts at SIGN-IN instead (still automatic once you log in)."
             $cred = $null
-            try { $cred = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message "Password for $env:USERDOMAIN\$env:USERNAME (stored for the boot task; Enter/Cancel to skip)" } catch { $cred = $null }
-            if (-not $cred -or [string]::IsNullOrEmpty($cred.GetNetworkCredential().Password)) {
-                Warn "Skipped the boot auto-start task (no password given). The stack will NOT start until you log in or run 'podman machine start $Machine'. Re-run the installer to set it up later."
-                return
+            try { $cred = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message "Password for $env:USERDOMAIN\$env:USERNAME (stored for a boot-without-login task; Enter/Cancel to skip)" } catch { $cred = $null }
+            if ($cred -and -not [string]::IsNullOrEmpty($cred.GetNetworkCredential().Password)) {
+                try {
+                    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $bootTrigger -Settings $set `
+                        -User $cred.UserName -Password $cred.GetNetworkCredential().Password -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+                    Ok "Registered BOOT task '$taskName' - the stack starts at boot with no sign-in."
+                    $registeredBoot = $true
+                } catch {
+                    Warn "Boot task registration failed ($($_.Exception.Message)); falling back to a sign-in task."
+                }
             }
-            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $set `
-                -User $cred.UserName -Password $cred.GetNetworkCredential().Password -RunLevel Highest -Force -ErrorAction Stop | Out-Null
-            Ok "Registered boot task '$taskName' - the stack starts at boot with no sign-in."
-        } else {
-            # Non-interactive: register a LOGON task (no stored password needed),
-            # which still starts the machine, just at sign-in rather than boot.
-            $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        }
+        if (-not $registeredBoot) {
+            # Logon task: no stored password, runs in the user's session at sign-in.
             $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $set -Principal $principal -Force -ErrorAction Stop | Out-Null
-            Warn "Registered a LOGON auto-start task (no password prompt available). For boot-without-login, re-run interactively or enable Windows auto-login."
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $logonTrigger -Settings $set -Principal $principal -Force -ErrorAction Stop | Out-Null
+            Ok "Registered SIGN-IN task '$taskName' - the stack starts when you log in."
+            Info "For boot-WITHOUT-login (lock screen), re-run the installer and supply the password, or enable Windows auto-login."
         }
     } catch {
         Warn "Could not register the auto-start task ($($_.Exception.Message)); after a reboot, run 'podman machine start $Machine' to bring the stack back."
     }
+}
+
+# Open the Windows firewall for the stack's ports so other LAN devices can reach
+# it. Under mirrored networking inbound LAN traffic hits the Windows host's
+# firewall first, and the default inbound policy BLOCKS it - so without this the
+# consoles are unreachable from a phone/laptop (the operator otherwise has to
+# disable the firewall entirely). Idempotent: -Force replaces same-named rules.
+# Needs admin (the installer already runs elevated). Best-effort.
+function Add-FirewallRules {
+    param([Parameter(Mandatory)][int[]]$Ports)
+    foreach ($p in $Ports) {
+        try {
+            New-NetFirewallRule -DisplayName "SignalK $p" -Direction Inbound -Action Allow `
+                -Protocol TCP -LocalPort $p -Profile Any -ErrorAction Stop | Out-Null
+        } catch {
+            Warn "Could not add a firewall allow rule for port $p ($($_.Exception.Message)); open it manually if other devices can't reach the stack."
+        }
+    }
+    Ok "Opened the Windows firewall for ports: $($Ports -join ', ')"
+}
+
+# The Windows host's primary LAN IPv4 (what to point a browser at, since under
+# mirrored networking the VM shares this address). Skips loopback / APIPA /
+# WSL-internal (172.x) addresses. Returns $null if none found.
+function Get-HostLanIp {
+    try {
+        $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+            Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '172.*' } |
+            Sort-Object -Property @{Expression={$_.InterfaceMetric}} |
+            Select-Object -First 1 -ExpandProperty IPAddress
+        return $ip
+    } catch { return $null }
 }
 
 # Best-effort identification of the host hypervisor when running as a guest VM,
@@ -1176,21 +1220,33 @@ try {
     Warn "Could not install the Windows 'signalk' command ($($_.Exception.Message)); use 'podman machine ssh $MachineName' then 'signalk ...' instead."
 }
 
-# 5c. Start the machine automatically after a reboot (a podman machine doesn't
+# 5c. Open the firewall so other LAN devices can reach the stack (under mirrored
+# networking the host firewall gates inbound, default-block). Cover both the
+# standard ports (80/443) and the declined-standard fallback (3000/3443), plus
+# the two consoles - opening a couple unused ports is harmless.
+Section "Firewall"
+Add-FirewallRules -Ports @(80, 443, 3000, 3443, 3003, 3004)
+
+# 5d. Start the machine automatically after a reboot (a podman machine doesn't
 # start on boot on its own). Registered last, once the stack is confirmed up.
 Section "Auto-start on reboot"
 Register-MachineAutostart -Machine $MachineName -CmdDir $skCmdDir
 
-# 6. Done
+# 6. Done. Under mirrored networking the stack lives at the host's LAN IP, NOT
+# localhost (mirrored replaces the NAT localhost-forward), so point the operator
+# there - that's also the address other devices use.
+$lanIp = Get-HostLanIp
+$accessHost = if ($lanIp) { $lanIp } else { '<this-pc-ip>' }
 @"
 
 OK - SignalK is up inside Podman Machine '$MachineName'.
 
-  SignalK admin UI : http://localhost  (or :3000 if you declined standard ports)
-  Updater Console  : http://localhost:3003
-  Doctor Console   : http://localhost:3004
+Open from THIS PC or any device on the network (mirrored networking - use the
+host's LAN IP, not localhost):
 
-Podman Machine forwards published container ports to Windows localhost.
+  SignalK admin UI : http://$accessHost        (or :3000 if you declined standard ports)
+  Updater Console  : http://${accessHost}:3003
+  Doctor Console   : http://${accessHost}:3004
 
 Manage it from a NEW terminal with the 'signalk' command, e.g.:
   signalk health
