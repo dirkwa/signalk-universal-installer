@@ -692,17 +692,24 @@ if (-not (Test-VirtualizationCapable)) {
 #   - mirrored networking (.wslconfig) so the VM shares the host LAN IP and the
 #     stack is reachable from other devices' browsers.
 #   - localhost->IPv4 in ~/.ssh/config so `podman machine ssh` stays fast.
-# .wslconfig is read when WSL (re)starts a distro; if WSL is already up from an
-# earlier step a shutdown is needed for mirrored to take effect. We only shut
-# down when we actually changed .wslconfig AND the machine isn't created yet
-# (nothing to disrupt) - a no-op on re-runs where mirrored is already set.
-$wslconfigBefore = if (Test-Path (Join-Path $env:USERPROFILE '.wslconfig')) { Get-Content (Join-Path $env:USERPROFILE '.wslconfig') -Raw } else { '' }
 Set-WslConfigMirrored
 Set-SshLocalhostIPv4
-$wslconfigAfter = Get-Content (Join-Path $env:USERPROFILE '.wslconfig') -Raw
-if ($wslconfigBefore -ne $wslconfigAfter) {
-    Info "Applying the WSL networking change (wsl --shutdown)"
+
+# .wslconfig is only read when the WSL VM (re)starts. By this point earlier steps
+# (`wsl --status`, `wsl --install`, `wsl --update`) may have already started the
+# lightweight WSL VM in the OLD/NAT mode, so mirrored won't take effect for the
+# podman machine we're about to create/start until WSL is shut down. We MUST do
+# this whenever mirrored is the desired mode - NOT only when we just edited
+# .wslconfig: if .wslconfig already said mirrored (e.g. a prior run/manual edit)
+# but WSL is live in NAT, skipping the shutdown leaves the machine on a 172.x NAT
+# address with no LAN reachability (only localhost works) - the exact bug this
+# fixes. A one-time `wsl --shutdown` here is cheap and guarantees the new machine
+# boots mirrored. Only skip it when the user opted OUT of mirrored in .wslconfig.
+$wslconfigText = Get-Content (Join-Path $env:USERPROFILE '.wslconfig') -Raw -ErrorAction SilentlyContinue
+if ($wslconfigText -match '(?im)^\s*networkingMode\s*=\s*mirrored\s*$') {
+    Info "Restarting WSL so mirrored networking takes effect (wsl --shutdown)"
     Invoke-BestEffort wsl @('--shutdown') | Out-Null
+    Start-Sleep -Seconds 3
 }
 
 # Size the VM's memory to fit the host. podman rejects a machine larger than
