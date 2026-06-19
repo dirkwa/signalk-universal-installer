@@ -151,7 +151,7 @@ A boat PC should power on and serve the stack with **no one logged in**. That wo
 - **Firewall rules.** The installer opens inbound TCP for the stack's ports (80/443/3000/3443/3003/3004). Under mirrored mode inbound LAN traffic hits the Windows host firewall first (default-block), so without these rules other devices can't connect (and you'd have to disable the firewall entirely).
 - **`localhost`→IPv4 in `~/.ssh/config`.** podman runs `ssh user@localhost`; Windows resolves `localhost` to IPv6 `::1` first, but the VM's SSH forward is IPv4-only, so each `podman machine ssh` would stall ~21 s on an IPv6 timeout before falling back. The `Host localhost` / `AddressFamily inet` rule forces IPv4 and keeps the `signalk` CLI fast.
 
-After a reboot — **with no one signed in** — give the machine ~30–60 s, then the stack is reachable at `http://<windows-host-ip>` from any device.
+After a reboot — **with no one signed in** — give the machine a short delay to come up, then the stack is reachable at `http://<windows-host-ip>` from any device.
 
 The installer also drops a `signalk` command on your PATH (open a **new** terminal to use it) that forwards into the machine, so `signalk health`, `signalk version`, etc. work the same as on Linux. Three subcommands get Windows-aware handling because they can't run unchanged inside the VM:
 
