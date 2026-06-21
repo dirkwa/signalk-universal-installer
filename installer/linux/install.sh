@@ -13,6 +13,7 @@
 #   4. Enable linger
 #   4b. Enable user podman.socket (engine containers bind-mount it)
 #   4c. Cgroup delegation: write user@.service.d/delegate.conf if needed
+#   4d. Open-files limit: write user@.service.d/nofile.conf if needed
 #   5. Ensure group memberships (dialout, gpio, netdev)
 #   6. Generate auth tokens for updater and doctor
 #   7. Initialize ~/.signalk-doctor/{snapshots,last-good.json}
@@ -858,7 +859,13 @@ fi
 section "Cgroup delegation"
 USER_SLICE="/sys/fs/cgroup/user.slice/user-$(id -u).slice"
 NEED_DELEGATE_FIX=0
-DELEGATE_RELOGIN_HINT=0
+# Both the cgroup-delegation and open-files (nofile) steps below write
+# user@.service.d/ drop-ins that only take effect on a fresh user@.service
+# instance. They share one re-login advisory: USER_SERVICE_RELOGIN_HINT
+# flags that at least one fired, and USER_SERVICE_OVERRIDES accumulates the
+# per-file lines printed at the end of the run.
+USER_SERVICE_RELOGIN_HINT=0
+USER_SERVICE_OVERRIDES=""
 if [[ -f "$USER_SLICE/cgroup.controllers" ]]; then
     USER_SLICE_CTL=$(cat "$USER_SLICE/cgroup.controllers" 2>/dev/null || echo "")
     if grep -qw memory <<<"$USER_SLICE_CTL" && grep -qw pids <<<"$USER_SLICE_CTL"; then
@@ -895,7 +902,54 @@ EOF
     # daemon-reload doesn't re-apply Delegate= to the already-running
     # user@.service instance; the user has to log out and back in (or
     # reboot) for the new delegation to take effect.
-    DELEGATE_RELOGIN_HINT=1
+    USER_SERVICE_RELOGIN_HINT=1
+    USER_SERVICE_OVERRIDES+="  • $DELEGATE_CONF (cgroup memory/pids delegation)"$'\n'
+fi
+
+# 4d. Open-files limit (RLIMIT_NOFILE) for the user slice.
+#
+# Rootless containers inherit their per-process open-files ceiling from
+# the parent user@<uid>.service bounding limit, which defaults to
+# systemd's DefaultLimitNOFILE (524288 on this Debian/trixie host).
+# QuestDB (running inside signalk-server) asks for 1048576 fds and warns
+# + risks WAL corruption under heavy ingestion when it gets less, so
+# signalk-container clamps the request to the host ceiling and surfaces an
+# "open-files limit capped by the host" advisory. The Quadlet's own
+# LimitNOFILE=1048576 can't lift the bound on its own — the parent
+# user@.service caps it — so we raise the bound here, mirroring the
+# user@.service.d/nofile.conf drop-in signalk-container's README prescribes.
+#
+# Idempotency is by on-disk file content, NOT `systemctl show ... LimitNOFILE`:
+# systemctl reports the merged unit definition, while the limit the running
+# user@.service actually enforces only changes after re-login. Keying off the
+# running value would re-prompt sudo on every re-run until the operator logs
+# out and back in; keying off the drop-in's content skips cleanly once written.
+section "Open-files limit"
+NOFILE_CONF="/etc/systemd/system/user@.service.d/nofile.conf"
+if [[ -f "$NOFILE_CONF" ]] && grep -qx 'LimitNOFILE=1048576' "$NOFILE_CONF"; then
+    ok "user@.service LimitNOFILE already raised ($NOFILE_CONF present)"
+elif [[ "$SUDO" = "MISSING" ]]; then
+    warn "Cannot raise user@.service LimitNOFILE without sudo; QuestDB may hit the fd ceiling."
+    warn "As root:  install -d -m0755 /etc/systemd/system/user@.service.d && printf '[Service]\\nLimitNOFILE=1048576\\n' > $NOFILE_CONF && systemctl daemon-reload"
+else
+    info "Writing $NOFILE_CONF (requires sudo)"
+    $SUDO install -d -m 0755 "$(dirname "$NOFILE_CONF")"
+    $SUDO tee "$NOFILE_CONF" >/dev/null <<EOF
+# Installed by signalk-universal-installer.
+# Rootless containers (QuestDB inside signalk-server et al.) inherit their
+# open-files limit from user@.service; the systemd default
+# (DefaultLimitNOFILE=524288) caps QuestDB below the 1048576 it needs and
+# risks WAL corruption. Raise the bound so the full limit can be granted.
+[Service]
+LimitNOFILE=1048576
+EOF
+    $SUDO systemctl daemon-reload
+    ok "Installed $NOFILE_CONF"
+    # As with delegation, daemon-reload doesn't re-apply LimitNOFILE to the
+    # already-running user@.service instance; a fresh user session (re-login
+    # or reboot) is needed before rootless containers see the raised ceiling.
+    USER_SERVICE_RELOGIN_HINT=1
+    USER_SERVICE_OVERRIDES+="  • $NOFILE_CONF (open-files limit 1048576)"$'\n'
 fi
 
 # 5. Groups
@@ -2034,11 +2088,11 @@ To use 'signalk' in this shell right now, run:  exec "${SHELL_NAME}" -l
 EOF
 fi
 
-if (( DELEGATE_RELOGIN_HINT )); then
+if (( USER_SERVICE_RELOGIN_HINT )); then
     cat <<EOF
 
-Cgroup delegation override installed at /etc/systemd/system/user@.service.d/delegate.conf.
-The change applies to NEW user-bus sessions — log out and back in (or reboot)
-for container memory/pids limits to actually enforce.
+The following systemd user@.service overrides were installed:
+${USER_SERVICE_OVERRIDES}These take effect on NEW user-bus sessions — log out and back in (or reboot)
+so a fresh user@.service starts and rootless containers pick up the changes.
 EOF
 fi

@@ -135,6 +135,12 @@ RestartSec=10
 # retry at all. Not raised further — the `systemctl restart` blocks up to this
 # long, so it's also a ceiling on how long the install can stall here.
 TimeoutStartSec=300
+# QuestDB (managed inside signalk-server) asks for 1048576 open files and
+# risks WAL corruption with less. This unit-level request is the effective
+# limit only because the installer raises the parent user@.service bounding
+# limit to match (user@.service.d/nofile.conf); without that drop-in systemd
+# silently clamps this to DefaultLimitNOFILE (524288).
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=default.target
