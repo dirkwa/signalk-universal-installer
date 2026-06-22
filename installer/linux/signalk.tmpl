@@ -771,10 +771,16 @@ cmd_bug_report() {
                     echo "=== $CTR_CMD logs --tail 200 ${u} ==="
                     # Same $timeout_cmd bound as the parallel capture above: a
                     # chatty engine container must not stall the fallback path
-                    # either. shellcheck disable=SC2086 — $timeout_cmd is empty
-                    # or two words on purpose.
+                    # either. Capture the rc rather than `|| true` so a real
+                    # timeout (124) is marked incomplete here too — without it a
+                    # timed-out fallback would read as a complete --tail 200.
+                    # $timeout_cmd is empty or two words, hence unquoted.
+                    fallback_rc=0
                     # shellcheck disable=SC2086
-                    $timeout_cmd "$CTR_CMD" logs --tail 200 "$u" 2>&1 || true
+                    $timeout_cmd "$CTR_CMD" logs --tail 200 "$u" 2>&1 || fallback_rc=$?
+                    if [[ "${fallback_rc:-0}" -eq 124 ]]; then
+                        echo "(log capture timed out after ${LOGS_TIMEOUT}s — truncated; this container is very chatty)"
+                    fi
                 fi
             } >>"$out"
         fi
