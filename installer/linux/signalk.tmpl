@@ -535,6 +535,16 @@ cmd_bug_report() {
     # brace group below is a plain re-bind. Brace groups don't open a
     # subshell, but `local` inside a redirected block reads oddly.
     local cfgfile=""
+    # Cap on every `podman logs` call in this command. The journald log driver
+    # makes `podman logs --tail N` scan the whole journal regardless of N, so a
+    # chatty container (QuestDB routinely hits 500k+ lines, ~15-20s) would
+    # otherwise dominate the bundle. Declared at function scope so BOTH the
+    # parallel per-container capture and the rootless-journal fallback below use
+    # the same bound; empty when `timeout` is absent (run direct). timeout is
+    # coreutils, already relied on at install.sh's `timeout 900 podman run`.
+    local LOGS_TIMEOUT=10
+    local timeout_cmd=""
+    command -v timeout >/dev/null 2>&1 && timeout_cmd="timeout $LOGS_TIMEOUT"
     mkdir -p "$bundle"
 
     echo "[i] Collecting diagnostics into $bundle"
@@ -639,34 +649,16 @@ cmd_bug_report() {
             echo "=== captured ${#SIGNALK_CTRS[@]} signalk-* container(s) via $CTR_CMD ==="
             printf '  %s\n' "${SIGNALK_CTRS[@]}"
         } >"$bundle/containers/INDEX.txt"
-        # The dominant cost of a bug-report on a real boat is one pathological
-        # container's logs. With the journald log driver, `podman logs --tail N`
-        # scans the whole journal stream to find the tail, so a chatty container
-        # (QuestDB routinely accumulates 500k+ lines) takes 15-20s ALONE while
-        # every other inspect/logs call is ~60-100ms. `--tail N` does NOT bound
-        # it (the scan happens regardless of N) and `--since` only helps for
-        # containers younger than the window, so neither is a reliable cap.
-        # Two changes bound it independent of container age and chattiness:
-        #
-        #   1. timeout per logs call — a single slow/wedged container can no
-        #      longer hold the whole bundle hostage; we keep whatever streamed
-        #      before the cutoff and append a marker rather than hang. (timeout
-        #      is coreutils, already relied on at install.sh's
-        #      `timeout 900 podman run`.) 10s captures a generous recent slice
-        #      while keeping the worst container well under the historical 15-20s.
-        #   2. fan out per container — each job writes ONLY to its own files
-        #      (${ctr}.inspect.json / ${ctr}.log), so there is no shared output
-        #      to interleave; with the timeout in place the whole per-container
-        #      phase is capped at ~LOGS_TIMEOUT, not the sum of every call.
-        #
-        # Each job is a subshell whose inner commands swallow their own failures
-        # (|| true / || echo), so one wedged container can't fail the others;
-        # `wait || true` keeps a non-zero child from tripping the dispatcher's
-        # `set -e`. No bare `wait` race: nothing else in this command is
-        # backgrounded before this point.
-        local LOGS_TIMEOUT=10
-        local timeout_cmd=""
-        command -v timeout >/dev/null 2>&1 && timeout_cmd="timeout $LOGS_TIMEOUT"
+        # Capture each container concurrently and under the shared $timeout_cmd
+        # bound (declared at function scope above). Fanning out is safe because
+        # every job writes ONLY to its own files (${ctr}.inspect.json /
+        # ${ctr}.log) — no shared output to interleave — so with the per-call
+        # timeout in place the whole phase is capped at ~LOGS_TIMEOUT, not the
+        # sum of every call. Each job is a subshell whose inner commands swallow
+        # their own failures (|| true / || echo / captured rc), so one wedged
+        # container can't fail the others; `wait || true` keeps a non-zero child
+        # from tripping the dispatcher's `set -e`. No bare `wait` race: nothing
+        # else in this command is backgrounded before this point.
         for ctr in "${SIGNALK_CTRS[@]}"; do
             [[ -n "$ctr" ]] || continue
             (
@@ -688,16 +680,18 @@ cmd_bug_report() {
                 # signature without ballooning the bundle for chatty containers
                 # (Grafana, QuestDB). $timeout_cmd is unquoted on purpose: it is
                 # either empty (timeout absent → run direct) or two words.
+                logs_rc=0
                 # shellcheck disable=SC2086
-                if ! $timeout_cmd "$CTR_CMD" logs --tail 500 "$ctr" \
-                    >"$bundle/containers/${ctr}.log" 2>&1; then
-                    # 124 = timeout fired; the file holds however much streamed
-                    # before the cutoff. Flag it so a truncated tail is not read
-                    # as the container's whole history.
-                    if [[ -n "$timeout_cmd" ]]; then
-                        echo "(log capture timed out after ${LOGS_TIMEOUT}s — truncated; this container is very chatty)" \
-                            >>"$bundle/containers/${ctr}.log"
-                    fi
+                $timeout_cmd "$CTR_CMD" logs --tail 500 "$ctr" \
+                    >"$bundle/containers/${ctr}.log" 2>&1 || logs_rc=$?
+                # Only exit 124 means `timeout` fired — the file then holds
+                # however much streamed before the cutoff, so flag it as a
+                # truncated tail. Any other non-zero is an ordinary logs
+                # failure (container gone, permission denied) whose own error
+                # text is already in the file; do not mislabel it as truncated.
+                if [[ "${logs_rc:-0}" -eq 124 ]]; then
+                    echo "(log capture timed out after ${LOGS_TIMEOUT}s — truncated; this container is very chatty)" \
+                        >>"$bundle/containers/${ctr}.log"
                 fi
             ) &
         done
@@ -775,7 +769,12 @@ cmd_bug_report() {
                 if [ -n "$CTR_CMD" ]; then
                     echo
                     echo "=== $CTR_CMD logs --tail 200 ${u} ==="
-                    "$CTR_CMD" logs --tail 200 "$u" 2>&1 || true
+                    # Same $timeout_cmd bound as the parallel capture above: a
+                    # chatty engine container must not stall the fallback path
+                    # either. shellcheck disable=SC2086 — $timeout_cmd is empty
+                    # or two words on purpose.
+                    # shellcheck disable=SC2086
+                    $timeout_cmd "$CTR_CMD" logs --tail 200 "$u" 2>&1 || true
                 fi
             } >>"$out"
         fi
