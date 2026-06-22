@@ -142,5 +142,27 @@ TimeoutStartSec=300
 # silently clamps this to DefaultLimitNOFILE (524288).
 LimitNOFILE=1048576
 
+# Make signalk-server the preferred OOM victim so memory pressure spares the
+# recovery surface (the doctor + updater consoles). On a low-RAM Pi a cold
+# first boot can pin RAM — observed signalk-server peaking ~1.1G and getting
+# OOM-killed (exit 137) while the doctor's probe/bug-report calls, proxied
+# THROUGH the dying server, returned a storm of 502s. signalk-server carries
+# Restart=always (above) and self-recovers in seconds; the doctor and updater
+# do not, and losing them is losing the recovery surface exactly when it is
+# needed. A HIGHER oom_score_adj means killed FIRST, so floating this unit
+# above its siblings (which stay at whatever the user manager hands down) lets
+# the kernel sacrifice the self-healing server instead of the recovery consoles.
+#
+# This is a plain systemd [Service] property, NOT a Quadlet [Container] key:
+# podman 5.4.2's Quadlet generator has no OOMScoreAdjust → --oom-score-adj
+# mapping, but systemd applies the [Service] value to the unit cgroup and the
+# conmon → crun → container PID 1 chain inherits it (verified: a unit showing
+# OOMScoreAdjust=N has its container payload at /proc/<pid>/oom_score_adj=N).
+# Positive-only by necessity: under rootless podman a process can only RAISE
+# its oom_score_adj, never lower it, so protecting the doctor/updater with a
+# negative score would be silently clamped back up — raising the server is the
+# only direction that actually reorders the kill preference.
+OOMScoreAdjust=500
+
 [Install]
 WantedBy=default.target
