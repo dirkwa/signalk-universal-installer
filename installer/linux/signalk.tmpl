@@ -535,6 +535,16 @@ cmd_bug_report() {
     # brace group below is a plain re-bind. Brace groups don't open a
     # subshell, but `local` inside a redirected block reads oddly.
     local cfgfile=""
+    # Cap on every `podman logs` call in this command. The journald log driver
+    # makes `podman logs --tail N` scan the whole journal regardless of N, so a
+    # chatty container (QuestDB routinely hits 500k+ lines, ~15-20s) would
+    # otherwise dominate the bundle. Declared at function scope so BOTH the
+    # parallel per-container capture and the rootless-journal fallback below use
+    # the same bound; empty when `timeout` is absent (run direct). timeout is
+    # coreutils, already relied on at install.sh's `timeout 900 podman run`.
+    local LOGS_TIMEOUT=10
+    local timeout_cmd=""
+    command -v timeout >/dev/null 2>&1 && timeout_cmd="timeout $LOGS_TIMEOUT"
     mkdir -p "$bundle"
 
     echo "[i] Collecting diagnostics into $bundle"
@@ -639,28 +649,53 @@ cmd_bug_report() {
             echo "=== captured ${#SIGNALK_CTRS[@]} signalk-* container(s) via $CTR_CMD ==="
             printf '  %s\n' "${SIGNALK_CTRS[@]}"
         } >"$bundle/containers/INDEX.txt"
+        # Capture each container concurrently and under the shared $timeout_cmd
+        # bound (declared at function scope above). Fanning out is safe because
+        # every job writes ONLY to its own files (${ctr}.inspect.json /
+        # ${ctr}.log) — no shared output to interleave — so with the per-call
+        # timeout in place the whole phase is capped at ~LOGS_TIMEOUT, not the
+        # sum of every call. Each job is a subshell whose inner commands swallow
+        # their own failures (|| true / || echo / captured rc), so one wedged
+        # container can't fail the others; `wait || true` keeps a non-zero child
+        # from tripping the dispatcher's `set -e`. No bare `wait` race: nothing
+        # else in this command is backgrounded before this point.
         for ctr in "${SIGNALK_CTRS[@]}"; do
             [[ -n "$ctr" ]] || continue
-            if command -v jq >/dev/null 2>&1; then
-                "$CTR_CMD" inspect "$ctr" 2>/dev/null \
-                    | jq 'map(.Config.Env |= (
-                            if . == null then null
-                            else map(sub("(?<k>^[^=]+)=.*"; "\(.k)=<redacted>"))
-                            end))' \
-                    >"$bundle/containers/${ctr}.inspect.json" 2>&1 \
-                    || echo "($CTR_CMD inspect or jq failed for $ctr)" \
+            (
+                if command -v jq >/dev/null 2>&1; then
+                    "$CTR_CMD" inspect "$ctr" 2>/dev/null \
+                        | jq 'map(.Config.Env |= (
+                                if . == null then null
+                                else map(sub("(?<k>^[^=]+)=.*"; "\(.k)=<redacted>"))
+                                end))' \
+                        >"$bundle/containers/${ctr}.inspect.json" 2>&1 \
+                        || echo "($CTR_CMD inspect or jq failed for $ctr)" \
+                            >"$bundle/containers/${ctr}.inspect.json"
+                else
+                    # No jq → fall back to a clear marker, do not dump raw env.
+                    echo "(jq not installed; skipping inspect dump to avoid leaking env values)" \
                         >"$bundle/containers/${ctr}.inspect.json"
-            else
-                # No jq → fall back to a clear marker, do not dump raw env.
-                echo "(jq not installed; skipping inspect dump to avoid leaking env values)" \
-                    >"$bundle/containers/${ctr}.inspect.json"
-            fi
-            # Bounded logs — 500 lines is enough for a recent failure
-            # signature without ballooning the bundle for chatty containers
-            # (Grafana, InfluxDB).
-            "$CTR_CMD" logs --tail 500 "$ctr" \
-                >"$bundle/containers/${ctr}.log" 2>&1 || true
+                fi
+                # Bounded logs — 500 lines is enough for a recent failure
+                # signature without ballooning the bundle for chatty containers
+                # (Grafana, QuestDB). $timeout_cmd is unquoted on purpose: it is
+                # either empty (timeout absent → run direct) or two words.
+                logs_rc=0
+                # shellcheck disable=SC2086
+                $timeout_cmd "$CTR_CMD" logs --tail 500 "$ctr" \
+                    >"$bundle/containers/${ctr}.log" 2>&1 || logs_rc=$?
+                # Only exit 124 means `timeout` fired — the file then holds
+                # however much streamed before the cutoff, so flag it as a
+                # truncated tail. Any other non-zero is an ordinary logs
+                # failure (container gone, permission denied) whose own error
+                # text is already in the file; do not mislabel it as truncated.
+                if [[ "${logs_rc:-0}" -eq 124 ]]; then
+                    echo "(log capture timed out after ${LOGS_TIMEOUT}s — truncated; this container is very chatty)" \
+                        >>"$bundle/containers/${ctr}.log"
+                fi
+            ) &
         done
+        wait || true
     fi
 
     # systemd-user state.
@@ -734,7 +769,18 @@ cmd_bug_report() {
                 if [ -n "$CTR_CMD" ]; then
                     echo
                     echo "=== $CTR_CMD logs --tail 200 ${u} ==="
-                    "$CTR_CMD" logs --tail 200 "$u" 2>&1 || true
+                    # Same $timeout_cmd bound as the parallel capture above: a
+                    # chatty engine container must not stall the fallback path
+                    # either. Capture the rc rather than `|| true` so a real
+                    # timeout (124) is marked incomplete here too — without it a
+                    # timed-out fallback would read as a complete --tail 200.
+                    # $timeout_cmd is empty or two words, hence unquoted.
+                    fallback_rc=0
+                    # shellcheck disable=SC2086
+                    $timeout_cmd "$CTR_CMD" logs --tail 200 "$u" 2>&1 || fallback_rc=$?
+                    if [[ "${fallback_rc:-0}" -eq 124 ]]; then
+                        echo "(log capture timed out after ${LOGS_TIMEOUT}s — truncated; this container is very chatty)"
+                    fi
                 fi
             } >>"$out"
         fi
