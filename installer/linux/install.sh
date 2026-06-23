@@ -703,35 +703,12 @@ fi
 # user-namespace mapping.
 podman system migrate >/dev/null 2>&1 || true
 
-# Realign the long-running rootless API service with the (possibly new) pause
-# process. `podman system migrate` above recreates the rootless pause process,
-# which owns the user namespace every container joins. But an ALREADY-RUNNING
-# `podman system service` (the socket-activated `--time=0` process that
-# `--remote`/dockerode clients talk to, started on a previous boot and never
-# cycled) keeps its OLD pause-namespace. Containers (re)started later in this
-# run join the NEW one — so the API service ends up in a sibling user
-# namespace it has no authority over, and every API call that must enter a
-# container's namespace (exec, getArchive/cp) fails with
-# `crun: open /proc/<pid>/ns/mnt: Permission denied`. The podman CLI still
-# works (it spawns fresh in the correct namespace), so the breakage is
-# invisible until a socket consumer — e.g. the doctor's drift scanner reading
-# package.json out of signalk-server via the API — reports a baffling
-# "Permission denied" while a shell `podman exec` on the same file succeeds.
-#
-# Restart ONLY podman.service, not podman.socket: cycling the service moves it
-# back into the freshly-migrated pause namespace, while leaving the socket
-# inode untouched so already-running containers keep their valid bind-mount of
-# %t/podman/podman.sock (the socket is bind-mounted as a FILE, so a socket
-# restart would swap the inode and strand every running consumer on a dead
-# socket until each is restarted). Verified: service-only restart realigns the
-# namespace, the socket inode is unchanged, and getArchive starts working.
-# Guarded on "already active": on a first-boot run the service isn't up yet
-# (the socket is enabled a few steps down), so there's nothing to realign.
-if systemctl --user is-active --quiet podman.service 2>/dev/null; then
-    info "Realigning podman API service with the migrated pause namespace"
-    systemctl --user restart podman.service >/dev/null 2>&1 \
-        || warn "Could not restart podman.service; the API user namespace may be stale (socket exec/cp may fail with 'Permission denied')"
-fi
+# NOTE: the rootless podman API service is realigned with the containers' pause
+# namespace LATE — after the final container start (search "Realigning podman
+# API service" below), NOT here. Doing it here is too early: starting the
+# keep-id containers further down recreates the pause process AFTER this point,
+# so an early realign is immediately undone and the socket service is left in a
+# sibling namespace it cannot enter. See that block's comment for the mechanism.
 
 # jq smooths a few optional steps (sslport / vessel-identity / security seeding,
 # admin-user lookup, the last-good snapshot) and `signalk bug-report`'s JSON
@@ -1652,6 +1629,39 @@ if wait_for_http "$SIGNALK_URL" 180; then
 else
     warn "signalk-server did not respond within 180s"
     warn "open ${DOCTOR_URL} or run ~/.local/bin/signalk-recovery doctor"
+fi
+
+# 15a. Realign the rootless podman API service with the containers' pause
+# namespace — done HERE, after the LAST container start above, deliberately.
+#
+# Rootless podman runs every container under a shared "pause process" whose
+# user namespace the containers join. `podman system migrate` (early in this
+# run) and starting a `--userns=keep-id` container (signalk-server, just above)
+# both (re)create that pause process — so the pause namespace is only final
+# once the last container is up. The socket-activated `podman system service`
+# (the API the doctor/updater dockerode clients talk to over the bind-mounted
+# podman.sock) keeps whatever namespace it had when IT last (re)started. If
+# that predates the final pause process, the service sits in a SIBLING user
+# namespace it has no authority over, and every API call that must enter a
+# container's mount namespace (exec, getArchive, cp) fails with
+# `crun: open /proc/<pid>/ns/mnt: Permission denied`. The podman CLI is
+# immune (it spawns fresh in the right namespace), so the break is invisible
+# until a socket consumer hits it — observed as the doctor's drift scan
+# reporting a baffling "Permission denied" reading package.json out of
+# signalk-server, while a shell `podman exec` on the same file worked.
+#
+# Restart ONLY podman.service (never podman.socket): cycling the service makes
+# it rejoin the now-final pause namespace, while the socket inode stays put so
+# the already-running containers keep their valid file bind-mount of the
+# socket (a podman.socket restart would swap the inode and strand every running
+# consumer on a dead socket). The socket-activated service respawns on the next
+# connection — the health checks below and the engines' own polling trigger it.
+# Guarded on "already active" so a first-boot run where the service never came
+# up is a clean no-op.
+if systemctl --user is-active --quiet podman.service 2>/dev/null; then
+    info "Realigning podman API service with the containers' pause namespace"
+    systemctl --user restart podman.service >/dev/null 2>&1 \
+        || warn "Could not restart podman.service; the API user namespace may be stale (socket exec/cp may fail with 'Permission denied')"
 fi
 
 # 15b. Provision a doctor-scoped admin token for signalk-server's
