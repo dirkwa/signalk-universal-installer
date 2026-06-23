@@ -703,6 +703,36 @@ fi
 # user-namespace mapping.
 podman system migrate >/dev/null 2>&1 || true
 
+# Realign the long-running rootless API service with the (possibly new) pause
+# process. `podman system migrate` above recreates the rootless pause process,
+# which owns the user namespace every container joins. But an ALREADY-RUNNING
+# `podman system service` (the socket-activated `--time=0` process that
+# `--remote`/dockerode clients talk to, started on a previous boot and never
+# cycled) keeps its OLD pause-namespace. Containers (re)started later in this
+# run join the NEW one — so the API service ends up in a sibling user
+# namespace it has no authority over, and every API call that must enter a
+# container's namespace (exec, getArchive/cp) fails with
+# `crun: open /proc/<pid>/ns/mnt: Permission denied`. The podman CLI still
+# works (it spawns fresh in the correct namespace), so the breakage is
+# invisible until a socket consumer — e.g. the doctor's drift scanner reading
+# package.json out of signalk-server via the API — reports a baffling
+# "Permission denied" while a shell `podman exec` on the same file succeeds.
+#
+# Restart ONLY podman.service, not podman.socket: cycling the service moves it
+# back into the freshly-migrated pause namespace, while leaving the socket
+# inode untouched so already-running containers keep their valid bind-mount of
+# %t/podman/podman.sock (the socket is bind-mounted as a FILE, so a socket
+# restart would swap the inode and strand every running consumer on a dead
+# socket until each is restarted). Verified: service-only restart realigns the
+# namespace, the socket inode is unchanged, and getArchive starts working.
+# Guarded on "already active": on a first-boot run the service isn't up yet
+# (the socket is enabled a few steps down), so there's nothing to realign.
+if systemctl --user is-active --quiet podman.service 2>/dev/null; then
+    info "Realigning podman API service with the migrated pause namespace"
+    systemctl --user restart podman.service >/dev/null 2>&1 \
+        || warn "Could not restart podman.service; the API user namespace may be stale (socket exec/cp may fail with 'Permission denied')"
+fi
+
 # jq smooths a few optional steps (sslport / vessel-identity / security seeding,
 # admin-user lookup, the last-good snapshot) and `signalk bug-report`'s JSON
 # handling — every consumer guards on `command -v jq` and degrades without it,
