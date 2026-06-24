@@ -1034,7 +1034,10 @@ fi
 # NOT shorten a slow-but-progressing pull — that is what the timeout bounds).
 for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
     info "pulling $img"
-    if ! timeout 900 podman pull --retry 3 --retry-delay 5s "$img"; then
+    pull_rc=0
+    timeout 900 podman pull --retry 3 --retry-delay 5s "$img" || pull_rc=$?
+    if [[ "$pull_rc" -eq 124 ]]; then
+        # `timeout` fired: the pull was still running at 900s, not a clean error.
         err "pulling $img did not finish within 900s."
         err "On a Pi this is usually a bloated rootless image store on slow SD"
         err "storage making layer commit crawl. Check and reclaim with:"
@@ -1042,6 +1045,11 @@ for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
         err "    podman image prune -a -f   # then re-run this installer"
         err "If the store is small, the registry path may be at fault — retry, or"
         err "    podman pull --log-level=debug $img   # to see where it stalls"
+        exit 1
+    elif [[ "$pull_rc" -ne 0 ]]; then
+        err "pulling $img failed (podman exit $pull_rc)."
+        err "Inspect the error above; retry, or for detail:"
+        err "    podman pull --log-level=debug $img"
         exit 1
     fi
 done
