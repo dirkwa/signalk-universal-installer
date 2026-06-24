@@ -1698,6 +1698,25 @@ if systemctl --user is-active --quiet podman.service 2>/dev/null; then
         || warn "Could not restart podman.service; the API user namespace may be stale (socket exec/cp may fail with 'Permission denied')"
 fi
 
+# 15a-bis. Reap superseded image layers now that the containers run the new ones.
+#
+# The pre-pull prune (step 9) clears dangling layers left by EARLIER installs,
+# but the layers this run supersedes only become dangling AFTER the containers
+# are recreated onto the freshly pulled images — which is now (the server +
+# peer restarts above have happened). When a rolling tag (:dirkwa / :latest)
+# moved, its prior digest is no longer referenced by any tag or running
+# container, so a dangling-only prune reclaims it here instead of leaving it to
+# accumulate until the next install's pre-pull sweep.
+#
+# Dangling-only (never `-a`): a prune that removed unused-but-TAGGED images
+# would delete a previous signalk-server version the operator deliberately kept
+# for rollback. First installs and no-change re-runs leave nothing dangling, so
+# this is a clean no-op there. Best-effort — never fail the install over GC.
+if [[ -n "$(podman images -f dangling=true -q 2>/dev/null)" ]]; then
+    info "Reclaiming image layers superseded by this install"
+    podman image prune -f >/dev/null 2>&1 || true
+fi
+
 # 15b. Provision a doctor-scoped admin token for signalk-server's
 # /skServer/diagnostics endpoint.
 #
