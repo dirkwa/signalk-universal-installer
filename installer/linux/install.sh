@@ -1015,9 +1015,35 @@ ok "wrote $UPDATER_DATA/hardware.json"
 
 # 9. Pull images
 section "Image pulls"
+# Reclaim dangling (<none>) layers before pulling. Every reinstall re-pulls the
+# rolling :dirkwa / :latest tags; when a tag's digest has moved, the prior
+# digest's layers are orphaned but never reclaimed (nothing else here prunes).
+# Across enough reinstalls the rootless store accumulates hundreds of dead
+# layers, and on slow SD/eMMC the per-layer commit + metadata rewrite that
+# `podman pull` does under the store lock crawls — the "Copying blob …" phase
+# appears to hang for many minutes. Dangling-only prune is safe: it never
+# touches an image a container references.
+if [[ -n "$(podman images -f dangling=true -q 2>/dev/null)" ]]; then
+    info "reclaiming dangling image layers from prior installs"
+    podman image prune -f >/dev/null 2>&1 || true
+fi
+# Bound each pull. A stalled pull (slow store, registry hiccup, network path)
+# otherwise hangs the installer forever — the bare `podman pull` had no timeout,
+# unlike the `timeout 900 podman run` plugin install below. `timeout` exits 124
+# on expiry; --retry/--retry-delay cover a transient registry failure (they do
+# NOT shorten a slow-but-progressing pull — that is what the timeout bounds).
 for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
     info "pulling $img"
-    podman pull "$img"
+    if ! timeout 900 podman pull --retry 3 --retry-delay 5s "$img"; then
+        err "pulling $img did not finish within 900s."
+        err "On a Pi this is usually a bloated rootless image store on slow SD"
+        err "storage making layer commit crawl. Check and reclaim with:"
+        err "    podman system df"
+        err "    podman image prune -a -f   # then re-run this installer"
+        err "If the store is small, the registry path may be at fault — retry, or"
+        err "    podman pull --log-level=debug $img   # to see where it stalls"
+        exit 1
+    fi
 done
 ok "all images pulled"
 
