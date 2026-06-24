@@ -618,6 +618,18 @@ cmd_bug_report() {
         podman images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Created}}' \
             2>&1 | grep -E 'signalk|dirkwa' || true
         echo
+        # Image-store size, not just the signalk/dirkwa rows. A rootless store
+        # bloated with hundreds of orphaned <none> layers (rolling tags re-pulled
+        # across reinstalls) makes `podman pull` crawl on slow SD/eMMC — the
+        # "Copying blob …" hang. The filtered list above hides that entirely:
+        # dangling layers carry no repo/tag, so they never match the grep, and a
+        # 200+-image store reads as "clean". Surface the totals so the bloat is
+        # visible in first-pass triage; `podman system df` (with reclaimable
+        # bytes) lives in storage-and-cgroup.txt for the full breakdown.
+        echo "=== image-store totals ==="
+        echo "all images (incl. <none>): $(podman images -aq 2>/dev/null | wc -l)"
+        echo "dangling <none> layers:    $(podman images -f dangling=true -q 2>/dev/null | wc -l)"
+        echo
         echo "=== docker --version (if shim) ==="
         docker --version 2>&1 || true
     } >"$bundle/runtime.txt" 2>&1
@@ -1006,6 +1018,18 @@ cmd_bug_report() {
         if [[ "$CTR_CMD" == "podman" ]]; then
             echo "=== podman system info --format json ==="
             podman system info --format json 2>&1 || true
+            echo
+            # Per-image sizes + reclaimable bytes. This is the decisive view for
+            # the "Copying blob … hangs" report: a store carrying hundreds of
+            # orphaned layers across reinstalls shows up here as a large
+            # reclaimable figure, where runtime.txt's filtered list cannot.
+            echo "=== podman system df -v ==="
+            podman system df -v 2>&1 || true
+            echo
+            # Raw on-disk store size, independent of podman's accounting (catches
+            # leftover/partial layer dirs an interrupted pull left behind).
+            echo "=== du -sh of the rootless store ==="
+            du -sh "${XDG_DATA_HOME:-$HOME/.local/share}/containers/storage" 2>&1 || true
         elif [[ "$CTR_CMD" == "docker" ]]; then
             echo "=== docker info --format '{{json .}}' ==="
             docker info --format '{{json .}}' 2>&1 || true
