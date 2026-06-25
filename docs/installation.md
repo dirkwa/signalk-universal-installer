@@ -32,7 +32,7 @@ The installer:
 10. `systemctl --user daemon-reload`, then starts (or restarts, on re-run) the doctor and updater services and asks the updater to start signalk-server via its REST API. Falls back to a direct `systemctl --user start` if the updater is unreachable, with a short warm-up retry to absorb a daemon-reload's transient socket downtime.
 11. Installs and auto-enables the bundled SignalK plugins (`signalk-container`, `signalk-updater`, `signalk-doctor`) into `~/.signalk/node_modules/` via the signalk-server container's bundled npm. Plugin config files are written **only** if absent — re-running the installer never overrides a user-disabled plugin.
 12. Installs the SSH-only recovery script at `~/.local/bin/signalk-recovery` (the safety net for when both engine containers are down).
-13. Installs the `signalk` command at `~/.local/bin/signalk` — a dispatcher for `health`, `recover`, `update`, `resetadmin`, `bug-report`, and `uninstall`. Run `signalk help` for usage. (`signalk update` calls the doctor's `/api/installer/refresh` endpoint to rewrite the host-resident scripts and Quadlet templates without restarting containers.) The installer also persists `~/.local/bin` on your PATH if it isn't already.
+13. Installs the `signalk` command at `~/.local/bin/signalk` — a dispatcher for `health`, `recover`, `update`, `resetadmin`, `bug-report`, `stop`, `start`, and `uninstall`. Run `signalk help` for usage. (`signalk update` calls the doctor's `/api/installer/refresh` endpoint to rewrite the host-resident scripts and Quadlet templates without restarting containers.) The installer also persists `~/.local/bin` on your PATH if it isn't already.
 
     The installer tees its own console output to `~/.signalk-updater/install.log` (truncated at the start of each run), and `signalk bug-report` copies that file into its bundle. So a failed install — including a pre-container failure where no container ever started to log to journald — leaves an on-disk trace you can attach to an issue. Set `SIGNALK_NO_INSTALL_LOG=1` to skip it (e.g. a read-only home).
 14. Drops a journald retention drop-in at `/etc/systemd/journald.conf.d/signalk.conf` (`SystemMaxUse=500M`, `MaxRetentionSec=14day`) via `sudo`. Idempotent: skipped silently if the drop-in already exists. On Pi this prevents the SD card from filling.
@@ -153,11 +153,15 @@ A boat PC should power on and serve the stack with **no one logged in**. That wo
 
 After a reboot — **with no one signed in** — give the machine ~30–60 s, then the stack is reachable at `http://<windows-host-ip>` from any device.
 
-The installer also drops a `signalk` command on your PATH (open a **new** terminal to use it) that forwards into the machine, so `signalk health`, `signalk version`, etc. work the same as on Linux. Three subcommands get Windows-aware handling because they can't run unchanged inside the VM:
+The installer also drops a `signalk` command on your PATH (open a **new** terminal to use it) that forwards into the machine, so `signalk health`, `signalk version`, etc. work the same as on Linux. Several subcommands get Windows-aware handling because they can't run unchanged inside the VM:
 
 - `signalk resetadmin [user]` — prompts for the new password **on Windows** (the VM has no terminal to prompt on) and applies it inside the machine.
 - `signalk bug-report` — generates the bundle inside the machine and copies the resulting `.tar.gz` out to your **Desktop**, so you have a file you can actually attach to an issue.
+- `signalk stop` — stops SignalK and keeps it stopped across reboots, **without uninstalling**: it stops the Podman machine (the whole VM goes down and frees RAM) and disables the boot task so a restart won't bring it back. Nothing is removed.
+- `signalk start` — resumes after `signalk stop`: re-enables the boot task and starts the machine again.
 - `signalk uninstall` — removes the stack inside the machine, then offers to remove the Podman machine itself (and with it **all** SignalK data — on Windows there is no `~/.signalk*` on the host; everything lives in the VM) plus the `signalk` command and its PATH entry.
+
+To **pause** SignalK for later (the common "I don't need it running right now" case), use `signalk stop` — not `uninstall`. Resume with `signalk start`, or just re-run the installer (it resumes a stopped stack).
 
 ### Windows troubleshooting
 
