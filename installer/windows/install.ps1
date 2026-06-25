@@ -988,6 +988,57 @@ function Quote-Bash {
 
 switch (`$sub) {
 
+  'stop' {
+    # Stop SignalK AND keep it stopped across reboots, without uninstalling. On
+    # Windows the on/off switch is the Podman MACHINE plus its boot task - not the
+    # in-VM systemd units: stop the machine (everything in it goes down, frees RAM)
+    # and DISABLE the S4U boot task so a reboot doesn't restart it. `signalk start`
+    # reverses both. Nothing is removed (machine, data, config, plugins preserved).
+    `$taskName = "SignalK Podman Machine (`$Machine)"
+    Write-Host '[i] Stopping SignalK and disabling auto-start at boot...'
+    # Surface a task-toggle failure: this shim runs non-elevated but the task was
+    # registered elevated, so Disable can be denied - if so, the stack would still
+    # come back at boot and we must NOT claim it won't.
+    `$taskOff = `$true
+    try { Disable-ScheduledTask -TaskName `$taskName -ErrorAction Stop | Out-Null }
+    catch { `$taskOff = `$false; Write-Host "[WARN] Could not disable the boot task (`$(`$_.Exception.Message)). It may still start at boot; disable 'SignalK Podman Machine' in Task Scheduler manually." }
+    # `podman machine stop` exits non-zero (125) if already stopped - treat that
+    # as success. Only a real stop failure warns.
+    `$stopOut = (& podman machine stop `$Machine 2>&1) | Out-String
+    if (`$LASTEXITCODE -ne 0 -and `$stopOut -notmatch 'already stopped|not running') {
+        Write-Host "[WARN] 'podman machine stop' reported: `$(`$stopOut.Trim())"
+    }
+    if (`$taskOff) {
+        Write-Host '[OK] SignalK stopped and will NOT start at boot. Resume with: signalk start'
+    } else {
+        Write-Host '[OK] SignalK stopped now, but auto-start at boot could NOT be disabled (see warning).'
+    }
+    Write-Host '     Nothing was removed - data, config and plugins are preserved.'
+    exit 0
+  }
+
+  'start' {
+    # Resume after `signalk stop`: re-enable the boot task and start the machine.
+    # Inside the VM, systemd brings the containers up on machine start (their
+    # Quadlets are never touched on the Windows path).
+    `$taskName = "SignalK Podman Machine (`$Machine)"
+    Write-Host '[i] Enabling auto-start and starting SignalK...'
+    `$taskOn = `$true
+    try { Enable-ScheduledTask -TaskName `$taskName -ErrorAction Stop | Out-Null }
+    catch { `$taskOn = `$false; Write-Host "[WARN] Could not re-enable the boot task (`$(`$_.Exception.Message)); enable 'SignalK Podman Machine' in Task Scheduler manually for start-at-boot." }
+    # `podman machine start` exits 125 if already running - treat as success.
+    `$startOut = (& podman machine start `$Machine 2>&1) | Out-String
+    if (`$LASTEXITCODE -ne 0 -and `$startOut -notmatch 'already running') {
+        Write-Host "[ERR] 'podman machine start' failed: `$(`$startOut.Trim())"; exit 1
+    }
+    if (`$taskOn) {
+        Write-Host '[OK] SignalK started and set to auto-start at boot. Check it with: signalk health'
+    } else {
+        Write-Host '[OK] SignalK started now, but auto-start at boot could NOT be enabled (see warning). Check it with: signalk health'
+    }
+    exit 0
+  }
+
   'socketcan' {
     # Pi CAN-HAT (GPIO/SPI socketcan) setup. Meaningless on Windows: the stack
     # runs in the Podman machine's VM, which has no CAN hardware, no SPI bus,

@@ -16,6 +16,11 @@
 #   signalk bug-report [--to <dir>]
 #                          bundle logs + state into <dir>/signalk-bug-report-*.tar.gz
 #                          (default: /tmp)
+#   signalk stop           stop SignalK (the signalk-server data plane) without
+#                          uninstalling; resume with 'signalk start'. Preserves
+#                          everything. (On Windows this also stops the whole VM
+#                          and won't restart at boot until 'signalk start'.)
+#   signalk start          start SignalK again after 'signalk stop'
 #   signalk uninstall      stop services + remove Quadlets (preserves data)
 #   signalk version        print installer version
 #   signalk help           show this help
@@ -423,6 +428,71 @@ cmd_resetadmin() {
     systemctl --user restart signalk-server
     echo "[OK] Done — log in at $(pub_url "${SIGNALK_URL%/signalk*}")/admin with username '${username}'."
     echo "     Existing API tokens (doctor, updater) remain valid: the secretKey was preserved."
+}
+
+# Drive a signalk-server lifecycle op through the updater's REST API, the
+# sanctioned control path (the installer/CLI never start/stop signalk-server
+# directly except as a documented fallback when the updater is unreachable).
+# The updater's /api/signalk/{start,stop,restart} owns the systemd lifecycle and
+# returns {ok:true,noop:true} when already in the target state, so this is
+# idempotent. Falls back to `systemctl --user` only on a genuine connect failure.
+# $1 = start|stop. Echoes a short result; returns non-zero on hard failure.
+_signalk_lifecycle() {
+    local op="$1"
+    local token_path="$HOME/.signalk-updater/token"
+    local token=""
+    [[ -f "$token_path" ]] && token=$(cat "$token_path")
+    local http
+    if [[ -n "$token" ]]; then
+        http=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+            -X POST -H "Authorization: Bearer $token" \
+            "${UPDATER_URL}/api/signalk/${op}" 2>/dev/null || echo "000")
+    else
+        http="000"
+    fi
+    case "$http" in
+        2??) return 0 ;;
+        000)
+            # Updater unreachable - documented fallback: act directly on the unit.
+            echo "[i] Updater API unreachable; using systemctl fallback for signalk-server."
+            systemctl --user "$op" signalk-server.service 2>/dev/null
+            return $?
+            ;;
+        *)
+            echo "[ERR] Updater returned HTTP $http for /api/signalk/${op}." >&2
+            return 1
+            ;;
+    esac
+}
+
+# Pause SignalK without uninstalling - stops signalk-server (the heavy data
+# plane) via the updater API. The lightweight updater + doctor stay running (the
+# doctor is the recovery surface, and the updater is how `signalk start` brings
+# the server back). Nothing is removed. On Linux this is a "stop now"; it does
+# NOT survive a reboot here (a durable pause is a future updater-owned flag) -
+# on Windows/macOS the `signalk` shim intercepts stop/start and stops the Podman
+# MACHINE + disables its boot task, which IS durable.
+cmd_stop() {
+    echo "Stopping SignalK (signalk-server)..."
+    if _signalk_lifecycle stop; then
+        echo "[OK] SignalK stopped. Nothing was removed - data, config and plugins are preserved."
+        echo "     Resume with: signalk start"
+    else
+        echo "[ERR] Could not stop signalk-server (see above)." >&2
+        exit 1
+    fi
+}
+
+# Resume after `signalk stop`: start signalk-server via the updater API.
+# Idempotent (the updater no-ops if already running).
+cmd_start() {
+    echo "Starting SignalK (signalk-server)..."
+    if _signalk_lifecycle start; then
+        echo "[OK] SignalK started. Check it with: signalk health"
+    else
+        echo "[ERR] Could not start signalk-server (see above)." >&2
+        exit 1
+    fi
 }
 
 cmd_uninstall() {
@@ -1360,6 +1430,8 @@ case "${1:-help}" in
     update)     cmd_update ;;
     resetadmin) shift; cmd_resetadmin "$@" ;;
     bug-report) shift; cmd_bug_report "$@" ;;
+    stop)       cmd_stop ;;
+    start)      cmd_start ;;
     uninstall)  cmd_uninstall ;;
     version|--version|-v) cmd_version ;;
     help|--help|-h) usage ;;
