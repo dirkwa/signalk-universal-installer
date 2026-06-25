@@ -70,6 +70,12 @@ To stay on the old ports on a one-liner install, set `SIGNALK_PRIVILEGED_PORTS=0
 
 The installer is idempotent. If a step fails, fix the issue (e.g. install missing apt deps, free a port) and re-run.
 
+### Pausing the stack (`signalk stop` / `signalk start`)
+
+To stop SignalK for a while **without uninstalling** — preserving all data, config, and plugins — use `signalk stop`, not `uninstall`. It stops `signalk-server` (the heavy data plane) and keeps it **down across reboots**; the lightweight updater and doctor consoles stay up so you can bring it back. `signalk start` resumes it and re-arms start-at-boot.
+
+The durable part (staying down across a reboot) is owned by the updater: `signalk stop` asks it to persist signalk-server's boot state, and `signalk start` restores it. The `signalk` CLI never changes that boot state itself. Because of this, durable pause needs a recent updater — if yours predates it, `signalk stop` will say so and ask you to update the updater first (Updater console → Dashboard → Self-update) rather than do a stop that silently comes back at the next boot. (If the updater is unreachable, `signalk stop` falls back to a plain stop and tells you it may not survive a reboot.)
+
 ### Migrating from the v1 (Keeper-based) installer
 
 ```bash
