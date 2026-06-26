@@ -1002,11 +1002,19 @@ switch (`$sub) {
     `$taskOff = `$true
     try { Disable-ScheduledTask -TaskName `$taskName -ErrorAction Stop | Out-Null }
     catch { `$taskOff = `$false; Write-Host "[WARN] Could not disable the boot task (`$(`$_.Exception.Message)). It may still start at boot; disable 'SignalK Podman Machine' in Task Scheduler manually." }
-    # `podman machine stop` exits non-zero (125) if already stopped - treat that
-    # as success. Only a real stop failure warns.
+    # `podman machine stop` exits 125 if already stopped - treat that as success.
+    # A real stop failure is a HARD error: the machine is still running, so we
+    # must NOT report '[OK] stopped'. (The boot task is already disabled above,
+    # which is fine - auto-start is off even though the machine is still up.)
     `$stopOut = (& podman machine stop `$Machine 2>&1) | Out-String
     if (`$LASTEXITCODE -ne 0 -and `$stopOut -notmatch 'already stopped|not running') {
-        Write-Host "[WARN] 'podman machine stop' reported: `$(`$stopOut.Trim())"
+        Write-Host "[ERR] 'podman machine stop' failed: `$(`$stopOut.Trim())"
+        if (`$taskOff) {
+            Write-Host '      SignalK is still running. Auto-start at boot was disabled; re-run after fixing the error.'
+        } else {
+            Write-Host '      SignalK is still running, and auto-start at boot may still be enabled; disable the task manually after fixing the error.'
+        }
+        exit 1
     }
     if (`$taskOff) {
         Write-Host '[OK] SignalK stopped and will NOT start at boot. Resume with: signalk start'
