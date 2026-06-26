@@ -16,11 +16,12 @@
 #   signalk bug-report [--to <dir>]
 #                          bundle logs + state into <dir>/signalk-bug-report-*.tar.gz
 #                          (default: /tmp)
-#   signalk stop           stop SignalK (the signalk-server data plane) without
-#                          uninstalling; resume with 'signalk start'. Preserves
-#                          everything. (On Windows this also stops the whole VM
-#                          and won't restart at boot until 'signalk start'.)
-#   signalk start          start SignalK again after 'signalk stop'
+#   signalk stop           stop signalk-server (the data plane) without
+#                          uninstalling; the updater + doctor consoles stay up.
+#                          Preserves all data/config/plugins and stays down
+#                          across reboots until 'signalk start'. (On Windows this
+#                          stops the whole VM instead.)
+#   signalk start          start signalk-server again after 'signalk stop'
 #   signalk uninstall      stop services + remove Quadlets (preserves data)
 #   signalk version        print installer version
 #   signalk help           show this help
@@ -430,18 +431,34 @@ cmd_resetadmin() {
     echo "     Existing API tokens (doctor, updater) remain valid: the secretKey was preserved."
 }
 
-# Drive a signalk-server lifecycle op through the updater's REST API, the
-# sanctioned control path (the installer/CLI never start/stop signalk-server
+# Drive a DURABLE signalk-server lifecycle op through the updater's REST API,
+# the sanctioned control path (the installer/CLI never start/stop signalk-server
 # directly except as a documented fallback when the updater is unreachable).
-# The updater's /api/signalk/{start,stop,restart} owns the systemd lifecycle and
-# returns {ok:true,noop:true} when already in the target state, so this is
-# idempotent. Falls back to `systemctl --user` only on a genuine connect failure.
-# $1 = start|stop. Echoes a short result; returns non-zero on hard failure.
+#
+# /api/signalk/{pause,resume} is durable: besides stopping/starting the unit
+# now, the updater rewrites signalk-server.container's `[Install] WantedBy=` so
+# the server stays down (or comes back) across a reboot. The CLI itself must NOT
+# edit that Quadlet (and `disable` on a Quadlet-generated unit isn't durable
+# anyway), which is exactly why durability lives behind this endpoint.
+#
+# $1 = pause|resume (the updater op). $2 = the systemctl verb (stop|start) for
+# the unreachable-updater fallback. Echoes a short result; returns non-zero on
+# hard failure. Exit codes the callers care about:
+#   0   = durable op applied via the updater (survives reboot)
+#   3   = updater UNREACHABLE; acted on the unit directly via systemctl as the
+#         documented fallback - it took effect NOW but is NOT durable (only the
+#         updater rewrites the Quadlet). Distinct from 0 so the caller doesn't
+#         claim durability it didn't get.
+#   2   = updater reachable but TOO OLD (no pause/resume route) - we refuse and
+#         tell the user to update the updater, rather than silently doing a
+#         non-durable stop and lying about durability
+#   1   = any other hard failure
 _signalk_lifecycle() {
     local op="$1"
+    local fallback_verb="$2"
     local token_path="$HOME/.signalk-updater/token"
     local token=""
-    [[ -f "$token_path" ]] && token=$(cat "$token_path")
+    [[ -f "$token_path" ]] && token=$(<"$token_path")
     local http
     if [[ -n "$token" ]]; then
         http=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
@@ -452,11 +469,28 @@ _signalk_lifecycle() {
     fi
     case "$http" in
         2??) return 0 ;;
+        404)
+            # Updater is reachable but predates pause/resume. Durability is
+            # owned by the updater, so an old one cannot deliver it. Refuse
+            # (require-new-updater) instead of a non-durable stop that would
+            # silently come back at the next boot.
+            echo "[ERR] This signalk-updater is too old to '${op}' durably (no /api/signalk/${op})." >&2
+            echo "      Update the updater first: open the Updater console, Dashboard tab," >&2
+            echo "      and click Self-update (or update the whole stack), then retry." >&2
+            return 2
+            ;;
         000)
-            # Updater unreachable - documented fallback: act directly on the unit.
-            echo "[i] Updater API unreachable; using systemctl fallback for signalk-server."
-            systemctl --user "$op" signalk-server.service 2>/dev/null
-            return $?
+            # Updater unreachable - documented fallback: act directly on the
+            # unit. This stops/starts it NOW but is NOT durable (only the
+            # updater rewrites the Quadlet). Signal that to the caller (rc 3) so
+            # it reports the non-durable truth rather than claiming a reboot will
+            # respect this.
+            echo "[i] Updater API unreachable; using systemctl fallback for signalk-server." >&2
+            if systemctl --user "$fallback_verb" signalk-server.service 2>/dev/null; then
+                return 3
+            fi
+            echo "[ERR] systemctl --user $fallback_verb signalk-server.service failed." >&2
+            return 1
             ;;
         *)
             echo "[ERR] Updater returned HTTP $http for /api/signalk/${op}." >&2
@@ -466,33 +500,62 @@ _signalk_lifecycle() {
 }
 
 # Pause SignalK without uninstalling - stops signalk-server (the heavy data
-# plane) via the updater API. The lightweight updater + doctor stay running (the
-# doctor is the recovery surface, and the updater is how `signalk start` brings
-# the server back). Nothing is removed. On Linux this is a "stop now"; it does
-# NOT survive a reboot here (a durable pause is a future updater-owned flag) -
-# on Windows/macOS the `signalk` shim intercepts stop/start and stops the Podman
-# MACHINE + disables its boot task, which IS durable.
+# plane) AND keeps it down across reboots, via the updater's durable pause. The
+# lightweight updater + doctor stay running (the doctor is the recovery surface,
+# and the updater is how `signalk start` brings the server back). Nothing is
+# removed. On Windows/macOS the `signalk` shim instead stops the whole Podman
+# MACHINE + disables its boot task - same durable outcome by a different lever.
 cmd_stop() {
     echo "Stopping SignalK (signalk-server)..."
-    if _signalk_lifecycle stop; then
-        echo "[OK] SignalK stopped. Nothing was removed - data, config and plugins are preserved."
-        echo "     Resume with: signalk start"
-    else
-        echo "[ERR] Could not stop signalk-server (see above)." >&2
-        exit 1
-    fi
+    # Capture the status via `|| rc=$?` so `set -e` (set at the top of this
+    # script) does not abort on the deliberate non-zero returns (2 = updater too
+    # old, 3 = non-durable fallback) before the case can handle them.
+    local rc=0
+    _signalk_lifecycle pause stop || rc=$?
+    case "$rc" in
+        0)
+            echo "[OK] SignalK stopped and will stay down across reboots."
+            echo "     Nothing was removed - data, config and plugins are preserved."
+            echo "     Resume with: signalk start"
+            ;;
+        3)
+            # Non-durable fallback (updater was unreachable). Do NOT claim it
+            # survives a reboot.
+            echo "[OK] SignalK stopped NOW, but this may NOT survive a reboot (the updater was"
+            echo "     unreachable, so boot-start could not be disabled). Re-run 'signalk stop'"
+            echo "     once the updater is back to make it durable. Resume now with: signalk start"
+            ;;
+        2) exit 1 ;; # message already printed by _signalk_lifecycle
+        *)
+            echo "[ERR] Could not stop signalk-server (see above)." >&2
+            exit 1
+            ;;
+    esac
 }
 
-# Resume after `signalk stop`: start signalk-server via the updater API.
-# Idempotent (the updater no-ops if already running).
+# Resume after `signalk stop`: start signalk-server via the updater's durable
+# resume, which also re-arms boot-start. Idempotent (the updater no-ops if
+# already running and restores WantedBy only if it was removed).
 cmd_start() {
     echo "Starting SignalK (signalk-server)..."
-    if _signalk_lifecycle start; then
-        echo "[OK] SignalK started. Check it with: signalk health"
-    else
-        echo "[ERR] Could not start signalk-server (see above)." >&2
-        exit 1
-    fi
+    # `|| rc=$?` so `set -e` does not abort on the non-zero returns before the
+    # case runs (see cmd_stop).
+    local rc=0
+    _signalk_lifecycle resume start || rc=$?
+    case "$rc" in
+        0) echo "[OK] SignalK started and will auto-start at boot. Check it with: signalk health" ;;
+        3)
+            # Non-durable fallback (updater was unreachable): started now, but
+            # boot-start may not be re-armed.
+            echo "[OK] SignalK started NOW, but auto-start at boot may not be re-armed (the"
+            echo "     updater was unreachable). Re-run 'signalk start' once it is back."
+            ;;
+        2) exit 1 ;; # message already printed by _signalk_lifecycle
+        *)
+            echo "[ERR] Could not start signalk-server (see above)." >&2
+            exit 1
+            ;;
+    esac
 }
 
 cmd_uninstall() {
