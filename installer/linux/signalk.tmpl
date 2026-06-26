@@ -16,11 +16,12 @@
 #   signalk bug-report [--to <dir>]
 #                          bundle logs + state into <dir>/signalk-bug-report-*.tar.gz
 #                          (default: /tmp)
-#   signalk stop           stop SignalK (the signalk-server data plane) without
-#                          uninstalling; resume with 'signalk start'. Preserves
-#                          everything and stays down across reboots until
-#                          'signalk start'. (On Windows this also stops the VM.)
-#   signalk start          start SignalK again after 'signalk stop'
+#   signalk stop           stop signalk-server (the data plane) without
+#                          uninstalling; the updater + doctor consoles stay up.
+#                          Preserves all data/config/plugins and stays down
+#                          across reboots until 'signalk start'. (On Windows this
+#                          stops the whole VM instead.)
+#   signalk start          start signalk-server again after 'signalk stop'
 #   signalk uninstall      stop services + remove Quadlets (preserves data)
 #   signalk version        print installer version
 #   signalk help           show this help
@@ -506,8 +507,12 @@ _signalk_lifecycle() {
 # MACHINE + disables its boot task - same durable outcome by a different lever.
 cmd_stop() {
     echo "Stopping SignalK (signalk-server)..."
-    _signalk_lifecycle pause stop
-    case "$?" in
+    # Capture the status via `|| rc=$?` so `set -e` (set at the top of this
+    # script) does not abort on the deliberate non-zero returns (2 = updater too
+    # old, 3 = non-durable fallback) before the case can handle them.
+    local rc=0
+    _signalk_lifecycle pause stop || rc=$?
+    case "$rc" in
         0)
             echo "[OK] SignalK stopped and will stay down across reboots."
             echo "     Nothing was removed - data, config and plugins are preserved."
@@ -533,8 +538,11 @@ cmd_stop() {
 # already running and restores WantedBy only if it was removed).
 cmd_start() {
     echo "Starting SignalK (signalk-server)..."
-    _signalk_lifecycle resume start
-    case "$?" in
+    # `|| rc=$?` so `set -e` does not abort on the non-zero returns before the
+    # case runs (see cmd_stop).
+    local rc=0
+    _signalk_lifecycle resume start || rc=$?
+    case "$rc" in
         0) echo "[OK] SignalK started and will auto-start at boot. Check it with: signalk health" ;;
         3)
             # Non-durable fallback (updater was unreachable): started now, but
