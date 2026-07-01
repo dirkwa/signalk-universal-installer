@@ -49,6 +49,20 @@ hardware_block() {
         # CAN/BLE/GPIO require jq.
         grep -oE '"byId":"[^"]+"' "$HW_FILE" | sed 's/.*"byId":"\(.*\)"$/AddDevice=\1/'
     fi
+
+    # Host avahi socket (mDNS .local resolution). The signalk-server image ships
+    # libnss-mdns (the NSS module) but NOT avahi-daemon, so getaddrinfo('x.local')
+    # inside the container resolves via the HOST's avahi over this socket. This
+    # works because the Quadlet runs the container with UserNS=keep-id:uid=1000,
+    # so the socket's peer credentials match the host user. Mounted ONLY when the
+    # host actually runs avahi (the socket exists) — a Volume= with a missing
+    # source makes the unit fail to start (statfs ENOENT, exit 125). Probed at
+    # render time, so it tracks the host: re-running the installer or a later
+    # updater re-render adds/drops it as avahi appears/disappears. ro: the
+    # container only queries; it never writes the host's avahi socket.
+    if [ -S /run/avahi-daemon/socket ]; then
+        echo "Volume=/run/avahi-daemon/socket:/run/avahi-daemon/socket:ro"
+    fi
 }
 
 # Stream the template, replacing the HARDWARE block.
