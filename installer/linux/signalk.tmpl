@@ -810,16 +810,19 @@ cmd_bug_report() {
                 if command -v jq >/dev/null 2>&1; then
                     # Env values are redacted EXCEPT, on the two engine
                     # containers only, the installer-owned health/base
-                    # URLs: there those keys never hold secrets (they are
-                    # host.containers.internal addresses templated by the
-                    # installer) and they are exactly what is needed to
-                    # diagnose a broken container-to-host probe path — the
-                    # 2026-07-12 field report had them redacted and the
-                    # updater's failing /signalk probe could not be traced
-                    # to its target URL. Other signalk-* containers
-                    # (grafana, questdb, user-added) get the blanket
-                    # redaction: a same-named key there is not
-                    # installer-owned and could carry credentials.
+                    # URLs — they are exactly what is needed to diagnose a
+                    # broken container-to-host probe path (the 2026-07-12
+                    # field report had them redacted and the updater's
+                    # failing /signalk probe could not be traced to its
+                    # target URL). The preserved values are still
+                    # sanitized, not trusted by key name: only
+                    # scheme://host[:port]/path survives; userinfo, query
+                    # and fragment are stripped, and a value that is not
+                    # URL-shaped falls back to full redaction (a
+                    # hand-edited Quadlet could put credentials there).
+                    # Other signalk-* containers (grafana, questdb,
+                    # user-added) get the blanket redaction: a same-named
+                    # key there is not installer-owned.
                     allow_urls=false
                     case "$ctr" in
                         signalk-updater-server|signalk-doctor-server) allow_urls=true ;;
@@ -828,8 +831,8 @@ cmd_bug_report() {
                         | jq --argjson allow "$allow_urls" 'map(.Config.Env |= (
                                 if . == null then null
                                 else map(
-                                    if $allow and test("^(SIGNALK_HEALTH_URL|SIGNALK_URL|SIGNALK_HTTPS_URL|DOCTOR_HEALTH_URL)=")
-                                    then .
+                                    if $allow and test("^(SIGNALK_HEALTH_URL|SIGNALK_URL|SIGNALK_HTTPS_URL|DOCTOR_HEALTH_URL)=[A-Za-z][A-Za-z0-9+.-]*://")
+                                    then sub("^(?<k>[^=]+)=(?<sch>[A-Za-z][A-Za-z0-9+.-]*://)([^/?#]*@)?(?<hp>[^?#@]*).*$"; "\(.k)=\(.sch)\(.hp)")
                                     else sub("(?<k>^[^=]+)=.*"; "\(.k)=<redacted>")
                                     end)
                                 end))' \
@@ -1019,18 +1022,26 @@ cmd_bug_report() {
                 ["SIGNALK_HEALTH_URL", process.env.SIGNALK_HEALTH_URL],
                 ["DOCTOR_HEALTH_URL", process.env.DOCTOR_HEALTH_URL],
             ];
+            // Never echo the raw value: a hand-edited Quadlet could carry
+            // credentials or query tokens in these URLs. Keep only
+            // scheme://host[:port]/path for the report.
+            const shown = (raw) => {
+                try { const u = new URL(raw); return `${u.origin}${u.pathname}`; }
+                catch { return "(unparseable URL)"; }
+            };
             (async () => {
                 for (const [key, url] of urls) {
                     if (!url) { console.log(`${key}: (not set)`); continue; }
+                    const label = shown(url);
                     const started = Date.now();
                     try {
                         const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
-                        console.log(`${key}: ${url} -> HTTP ${res.status} in ${Date.now() - started}ms`);
+                        console.log(`${key}: ${label} -> HTTP ${res.status} in ${Date.now() - started}ms`);
                     } catch (err) {
                         const code =
                             (err && err.cause && err.cause.code) ||
                             (err && err.code) || (err && err.name) || String(err);
-                        console.log(`${key}: ${url} -> FAILED (${code}) after ${Date.now() - started}ms`);
+                        console.log(`${key}: ${label} -> FAILED (${code}) after ${Date.now() - started}ms`);
                     }
                 }
             })();
