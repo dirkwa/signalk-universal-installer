@@ -1007,9 +1007,9 @@ cmd_bug_report() {
     # in the bundle could show it). NODE_TLS_REJECT_UNAUTHORIZED=0
     # mirrors the engine's own probe, which accepts signalk-server's
     # self-signed cert behind the SSL plugin's :80 -> :443 redirect.
-    # Per-URL fetch timeout is 4s so the worst case (both URLs
-    # blackholed, plus node startup) stays under the shared
-    # $timeout_cmd bound of ${LOGS_TIMEOUT}s.
+    # The probes run concurrently, so the worst case (every URL
+    # blackholed, plus node startup) is one 4s fetch timeout — well
+    # under the shared $timeout_cmd bound of ${LOGS_TIMEOUT}s.
     if [[ -n "$CTR_CMD" ]] \
         && "$CTR_CMD" ps --format '{{.Names}}' 2>/dev/null | grep -qx 'signalk-updater-server'; then
         # SC2086: $timeout_cmd is empty or two words, unquoted on purpose.
@@ -1036,24 +1036,29 @@ cmd_bug_report() {
                     return `${u.origin}${u.pathname}`;
                 } catch { return "(unparseable URL)"; }
             };
-            (async () => {
-                for (const [key, url] of urls) {
-                    if (!url) { console.log(`${key}: (not set)`); continue; }
-                    const label = shown(url);
-                    const started = Date.now();
-                    try {
-                        const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
-                        console.log(`${key}: ${label} -> HTTP ${res.status} in ${Date.now() - started}ms`);
-                    } catch (err) {
-                        // errno codes and error names are stable, URL-free
-                        // identifiers; never fall back to stringifying the
-                        // error itself, which can embed the raw URL.
-                        const code =
-                            (err && err.cause && err.cause.code) ||
-                            (err && err.code) || (err && err.name) || "unknown-error";
-                        console.log(`${key}: ${label} -> FAILED (${code}) after ${Date.now() - started}ms`);
-                    }
+            const probe = async ([key, url]) => {
+                if (!url) return `${key}: (not set)`;
+                const label = shown(url);
+                const started = Date.now();
+                try {
+                    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+                    return `${key}: ${label} -> HTTP ${res.status} in ${Date.now() - started}ms`;
+                } catch (err) {
+                    // errno codes and error names are stable, URL-free
+                    // identifiers; never fall back to stringifying the
+                    // error itself, which can embed the raw URL.
+                    const code =
+                        (err && err.cause && err.cause.code) ||
+                        (err && err.code) || (err && err.name) || "unknown-error";
+                    return `${key}: ${label} -> FAILED (${code}) after ${Date.now() - started}ms`;
                 }
+            };
+            (async () => {
+                // Concurrent, so N blackholed URLs cost one 4s timeout,
+                // not N; results print in fixed order regardless of
+                // completion order.
+                const lines = await Promise.all(urls.map(probe));
+                for (const line of lines) console.log(line);
             })();
         ' >"$bundle/in-container-probes.txt" 2>&1 \
             || echo "(exec probe failed; see any output above)" >>"$bundle/in-container-probes.txt"
