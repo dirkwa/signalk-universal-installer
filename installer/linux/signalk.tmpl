@@ -831,8 +831,8 @@ cmd_bug_report() {
                         | jq --argjson allow "$allow_urls" 'map(.Config.Env |= (
                                 if . == null then null
                                 else map(
-                                    if $allow and test("^(SIGNALK_HEALTH_URL|SIGNALK_URL|SIGNALK_HTTPS_URL|DOCTOR_HEALTH_URL)=[A-Za-z][A-Za-z0-9+.-]*://")
-                                    then sub("^(?<k>[^=]+)=(?<sch>[A-Za-z][A-Za-z0-9+.-]*://)([^/?#]*@)?(?<hp>[^?#@]*).*$"; "\(.k)=\(.sch)\(.hp)")
+                                    if $allow and test("^(SIGNALK_HEALTH_URL|SIGNALK_URL|SIGNALK_HTTPS_URL|DOCTOR_HEALTH_URL)=https?://([^/?#@]*@)?[^:/?#@]")
+                                    then sub("^(?<k>[^=]+)=(?<sch>https?://)([^/?#]*@)?(?<hp>[^?#@]*).*$"; "\(.k)=\(.sch)\(.hp)")
                                     else sub("(?<k>^[^=]+)=.*"; "\(.k)=<redacted>")
                                     end)
                                 end))' \
@@ -1024,10 +1024,17 @@ cmd_bug_report() {
             ];
             // Never echo the raw value: a hand-edited Quadlet could carry
             // credentials or query tokens in these URLs. Keep only
-            // scheme://host[:port]/path for the report.
+            // scheme://host[:port]/path for the report, and only for
+            // http(s) targets with a real host — anything else is shown
+            // as a placeholder.
             const shown = (raw) => {
-                try { const u = new URL(raw); return `${u.origin}${u.pathname}`; }
-                catch { return "(unparseable URL)"; }
+                try {
+                    const u = new URL(raw);
+                    if ((u.protocol !== "http:" && u.protocol !== "https:") || !u.hostname) {
+                        return "(non-http URL)";
+                    }
+                    return `${u.origin}${u.pathname}`;
+                } catch { return "(unparseable URL)"; }
             };
             (async () => {
                 for (const [key, url] of urls) {
@@ -1038,9 +1045,12 @@ cmd_bug_report() {
                         const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
                         console.log(`${key}: ${label} -> HTTP ${res.status} in ${Date.now() - started}ms`);
                     } catch (err) {
+                        // errno codes and error names are stable, URL-free
+                        // identifiers; never fall back to stringifying the
+                        // error itself, which can embed the raw URL.
                         const code =
                             (err && err.cause && err.cause.code) ||
-                            (err && err.code) || (err && err.name) || String(err);
+                            (err && err.code) || (err && err.name) || "unknown-error";
                         console.log(`${key}: ${label} -> FAILED (${code}) after ${Date.now() - started}ms`);
                     }
                 }
@@ -1450,9 +1460,10 @@ cmd_bug_report() {
     echo "NEVER included; settings.json is included with pipedProviders' options"
     echo "redacted. Container env values are redacted in inspect dumps (keys"
     echo "preserved; only the installer-owned SIGNALK_*URL / DOCTOR_HEALTH_URL"
-    echo "probe targets on the updater/doctor containers keep their values). The"
-    echo "hardware enumeration (ip -br addr)"
-    echo "and dmesg output may"
+    echo "probe targets on the updater/doctor containers keep a sanitized value —"
+    echo "scheme/host/port/path only, with any userinfo, query string, or fragment"
+    echo "stripped, and non-http(s) values fully redacted). The hardware"
+    echo "enumeration (ip -br addr) and dmesg output may"
     echo "contain IP/MAC addresses and filesystem paths — review the tarball before"
     echo "sharing on a public issue tracker."
 
