@@ -808,10 +808,33 @@ cmd_bug_report() {
             [[ -n "$ctr" ]] || continue
             (
                 if command -v jq >/dev/null 2>&1; then
+                    # Env values are redacted EXCEPT, on the two engine
+                    # containers only, the installer-owned health/base
+                    # URLs — they are exactly what is needed to diagnose a
+                    # broken container-to-host probe path (the 2026-07-12
+                    # field report had them redacted and the updater's
+                    # failing /signalk probe could not be traced to its
+                    # target URL). The preserved values are still
+                    # sanitized, not trusted by key name: only
+                    # scheme://host[:port]/path survives; userinfo, query
+                    # and fragment are stripped, and a value that is not
+                    # URL-shaped falls back to full redaction (a
+                    # hand-edited Quadlet could put credentials there).
+                    # Other signalk-* containers (grafana, questdb,
+                    # user-added) get the blanket redaction: a same-named
+                    # key there is not installer-owned.
+                    allow_urls=false
+                    case "$ctr" in
+                        signalk-updater-server|signalk-doctor-server) allow_urls=true ;;
+                    esac
                     "$CTR_CMD" inspect "$ctr" 2>/dev/null \
-                        | jq 'map(.Config.Env |= (
+                        | jq --argjson allow "$allow_urls" 'map(.Config.Env |= (
                                 if . == null then null
-                                else map(sub("(?<k>^[^=]+)=.*"; "\(.k)=<redacted>"))
+                                else map(
+                                    if $allow and test("^(SIGNALK_HEALTH_URL|SIGNALK_URL|SIGNALK_HTTPS_URL|DOCTOR_HEALTH_URL)=https?://([^/?#@]*@)?[^:/?#@]")
+                                    then sub("^(?<k>[^=]+)=(?<sch>https?://)([^/?#]*@)?(?<hp>[^?#@]*).*$"; "\(.k)=\(.sch)\(.hp)")
+                                    else sub("(?<k>^[^=]+)=.*"; "\(.k)=<redacted>")
+                                    end)
                                 end))' \
                         >"$bundle/containers/${ctr}.inspect.json" 2>&1 \
                         || echo "($CTR_CMD inspect or jq failed for $ctr)" \
@@ -975,6 +998,74 @@ cmd_bug_report() {
             echo
         done
     } >"$bundle/console-health.txt" 2>&1
+
+    # In-container reachability — probe the health URLs from INSIDE the
+    # updater container. The updater reaches its siblings through pasta's
+    # host.containers.internal mapping, a path that can be broken while
+    # every host-side curl above succeeds (2026-07-12 field report: the
+    # updater's /signalk probe hung on every /api/state poll and nothing
+    # in the bundle could show it). NODE_TLS_REJECT_UNAUTHORIZED=0
+    # mirrors the engine's own probe, which accepts signalk-server's
+    # self-signed cert behind the SSL plugin's :80 -> :443 redirect.
+    # The probes run concurrently, so the worst case (every URL
+    # blackholed, plus node startup) is one 4s fetch timeout — well
+    # under the shared $timeout_cmd bound of ${LOGS_TIMEOUT}s.
+    if [[ -n "$CTR_CMD" ]] \
+        && "$CTR_CMD" ps --format '{{.Names}}' 2>/dev/null | grep -qx 'signalk-updater-server'; then
+        # SC2086: $timeout_cmd is empty or two words, unquoted on purpose.
+        # SC2016: the ${...} inside the single-quoted -e script are JS
+        # template literals evaluated by node, not shell expansions.
+        # shellcheck disable=SC2086,SC2016
+        $timeout_cmd "$CTR_CMD" exec -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
+            signalk-updater-server node -e '
+            const urls = [
+                ["SIGNALK_HEALTH_URL", process.env.SIGNALK_HEALTH_URL],
+                ["DOCTOR_HEALTH_URL", process.env.DOCTOR_HEALTH_URL],
+            ];
+            // Never echo the raw value: a hand-edited Quadlet could carry
+            // credentials or query tokens in these URLs. Keep only
+            // scheme://host[:port]/path for the report, and only for
+            // http(s) targets with a real host — anything else is shown
+            // as a placeholder.
+            const shown = (raw) => {
+                try {
+                    const u = new URL(raw);
+                    if ((u.protocol !== "http:" && u.protocol !== "https:") || !u.hostname) {
+                        return "(non-http URL)";
+                    }
+                    return `${u.origin}${u.pathname}`;
+                } catch { return "(unparseable URL)"; }
+            };
+            const probe = async ([key, url]) => {
+                if (!url) return `${key}: (not set)`;
+                const label = shown(url);
+                const started = Date.now();
+                try {
+                    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+                    return `${key}: ${label} -> HTTP ${res.status} in ${Date.now() - started}ms`;
+                } catch (err) {
+                    // errno codes and error names are stable, URL-free
+                    // identifiers; never fall back to stringifying the
+                    // error itself, which can embed the raw URL.
+                    const code =
+                        (err && err.cause && err.cause.code) ||
+                        (err && err.code) || (err && err.name) || "unknown-error";
+                    return `${key}: ${label} -> FAILED (${code}) after ${Date.now() - started}ms`;
+                }
+            };
+            (async () => {
+                // Concurrent, so N blackholed URLs cost one 4s timeout,
+                // not N; results print in fixed order regardless of
+                // completion order.
+                const lines = await Promise.all(urls.map(probe));
+                for (const line of lines) console.log(line);
+            })();
+        ' >"$bundle/in-container-probes.txt" 2>&1 \
+            || echo "(exec probe failed; see any output above)" >>"$bundle/in-container-probes.txt"
+    else
+        echo "(signalk-updater-server not running; in-container probe skipped)" \
+            >"$bundle/in-container-probes.txt"
+    fi
 
     # Doctor + updater deep snapshots — the data needed to debug an
     # image switch (operator-intent tag vs. running tag vs. reported
@@ -1373,7 +1464,11 @@ cmd_bug_report() {
     echo "SignalK plugin configuration bodies (which routinely hold secrets) are also"
     echo "NEVER included; settings.json is included with pipedProviders' options"
     echo "redacted. Container env values are redacted in inspect dumps (keys"
-    echo "preserved). The hardware enumeration (ip -br addr) and dmesg output may"
+    echo "preserved; only the installer-owned SIGNALK_*URL / DOCTOR_HEALTH_URL"
+    echo "probe targets on the updater/doctor containers keep a sanitized value —"
+    echo "scheme/host/port/path only, with any userinfo, query string, or fragment"
+    echo "stripped, and non-http(s) values fully redacted). The hardware"
+    echo "enumeration (ip -br addr) and dmesg output may"
     echo "contain IP/MAC addresses and filesystem paths — review the tarball before"
     echo "sharing on a public issue tracker."
 
