@@ -64,7 +64,7 @@ To reach the IDE **without any SSH forward** (fully headless), bind the
 forwarder to a reachable address:
 
 ```bash
-signalk devpod up --ide-option BIND_ADDRESS=<vpn-or-lan-ip>:10800
+signalk devpod up --ide-option BIND_ADDRESS=100.64.0.10:10800   # e.g. your tailscale IP
 ```
 
 The option sticks to the workspace. The IDE runs **without
@@ -86,9 +86,10 @@ The `VERSION` pin matters: devpod's default openvscode is too old
 later, delete `~/.openvscode-server` inside the container and re-run —
 note this also resets browser-IDE settings and extensions, which live
 under that directory).
-The IDE serves on localhost:10800 on the box; reach it from your desktop
-with any SSH port forward (`ssh -L 10800:localhost:10800 <user>@<box>`,
-or the Ports panel of an existing VS Code Remote-SSH window), then browse
+Without `BIND_ADDRESS` (the default), the IDE serves on localhost:10800
+on the box only; reach it from your desktop with any SSH port forward
+(`ssh -L 10800:localhost:10800 <user>@<box>`, or the Ports panel of an
+existing VS Code Remote-SSH window), then browse
 `http://localhost:10800/?folder=/workspaces/signalk-universal-installer`.
 Extensions there come from Open VSX (Claude Code is available).
 

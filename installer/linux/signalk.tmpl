@@ -29,7 +29,7 @@
 #                          IDE on :10800). Installs the pinned devpod CLI to
 #                          ~/.local/bin on first use; docs/devcontainer.md
 #                          Headless box without SSH forward: append
-#                          --ide-option BIND_ADDRESS=<vpn-or-lan-ip>:10800
+#                          --ide-option BIND_ADDRESS=100.64.0.10:10800   # e.g. your tailscale IP
 #                          (IDE is UNAUTHENTICATED — prefer a VPN address)
 #   signalk uninstall      stop services + remove Quadlets (preserves data)
 #   signalk version        print installer version
@@ -1809,7 +1809,7 @@ cmd_devpod() {
             echo "[i] Browser IDE will serve on http://localhost:10800 — keep this command running,"
             echo "    it is the tunnel. First run downloads the dev image (a few minutes)."
             echo "[i] Remote access without an SSH forward: re-run with"
-            echo "      --ide-option BIND_ADDRESS=<vpn-or-lan-ip>:10800"
+            echo "      --ide-option BIND_ADDRESS=100.64.0.10:10800   # e.g. your tailscale IP"
             echo "    The IDE is UNAUTHENTICATED — prefer a VPN (tailscale) address over 0.0.0.0."
             exec "$bin" up "$DEVPOD_SOURCE" \
                 --ide openvscode --ide-option VERSION="$DEVPOD_OPENVSCODE_VERSION" "$@"
