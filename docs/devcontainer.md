@@ -72,6 +72,14 @@ authentication** — anyone who reaches the port gets a terminal in the
 container. Bind a VPN address (e.g. tailscale) rather than `0.0.0.0`
 unless the network is fully trusted.
 
+Caveat: over plain `http://<ip>` the browser treats the IDE as an
+**insecure context** — the workbench loads, but webview-based extension
+panels (the Claude Code window, for one) stay blank. `http://localhost`
+is exempt, HTTPS always works. The clean fleet answer is
+`tailscale serve --bg 10800` on the box: an HTTPS URL on your tailnet,
+secure context included, no LAN exposure — and the missing IDE
+authentication stops mattering.
+
 The `VERSION` pin matters: devpod's default openvscode is too old
 (v1.84) for current extensions such as Claude Code — set it on the FIRST
 `up` (an already-provisioned IDE keeps its installed version; to upgrade
