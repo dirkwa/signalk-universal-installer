@@ -78,7 +78,11 @@ panels (the Claude Code window, for one) stay blank. `http://localhost`
 is exempt, HTTPS always works. The clean fleet answer is
 `tailscale serve --bg 10800` on the box: an HTTPS URL on your tailnet,
 secure context included, no LAN exposure — and the missing IDE
-authentication stops mattering.
+authentication stops mattering. To keep using the plain IP instead,
+allowlist that exact origin in the browser (Chrome/Edge:
+`chrome://flags/#unsafely-treat-insecure-origin-as-secure`, add
+`http://<box-ip>:10800`, relaunch) — a per-browser, per-machine setting;
+Firefox has no equivalent.
 
 The `VERSION` pin matters: devpod's default openvscode is too old
 (v1.84) for current extensions such as Claude Code — set it on the FIRST
