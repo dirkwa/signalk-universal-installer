@@ -68,6 +68,13 @@ connection fails. Two fixes:
 - Or install DevPod Desktop on the desktop itself with an SSH provider
   pointing at the box; devpod then manages the local alias for you.
 
+Troubleshooting: if the tunnel fails with
+`.devpod-internal/0/NOTES.md: permission denied`, the box runs a rootless
+container runtime and devpod's workspace chown locked the agent out of its
+own feature staging. `host-prepare.sh` self-heals this on the next connect;
+the manual cure on the box is
+`podman unshare chown -R 0:0 <workspace-content>/.devcontainer/.devpod-internal`.
+
 After the build:
 
 | What                  | Where / How                              |

@@ -27,4 +27,24 @@ else
   echo "host-prepare: no podman/systemctl on host — sibling-container plugin dev will be unavailable"
 fi
 
+# devpod-on-rootless-docker self-heal: devpod stages feature files under
+# .devcontainer/.devpod-internal/ and its container-setup chown hands the
+# whole workspace — staging included — to subordinate uids. The devpod
+# agent (running as the host user) then cannot rewrite its own staging on
+# the next connect, and every tunnel dies with
+# ".devpod-internal/0/NOTES.md: permission denied". initializeCommand runs
+# before that step, so reclaim the staging tree here. Best-effort: no-op
+# when absent, already ours, or podman is unavailable.
+staging=".devcontainer/.devpod-internal"
+if [ -d "${staging}" ] \
+    && [ -n "$(find "${staging}" ! -writable -print -quit 2>/dev/null)" ] \
+    && command -v podman >/dev/null 2>&1; then
+  if podman unshare chown -R 0:0 "${staging}" 2>/dev/null; then
+    echo "host-prepare: reclaimed ${staging} (rootless-runtime chown side effect)"
+  else
+    echo "host-prepare: ${staging} not writable — devpod tunnel may fail;"
+    echo "  manual fix: podman unshare chown -R 0:0 ${staging}"
+  fi
+fi
+
 exit 0
