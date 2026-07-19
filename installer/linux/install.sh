@@ -216,6 +216,9 @@ DOCTOR_IMAGE=${DOCTOR_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-doctor-server:latest}
 # digest that was verified end-to-end, so a fresh install can never pull
 # unreviewed third-party code. Env override for CI, mirrors, or a
 # deliberate bump (which is a repo change, updating this pin).
+# KEEP IN SYNC with DEFAULT_PROXY_IMAGE in signalk-bluetooth.tmpl (the
+# helper renders the same template from the doctor's staged payload) —
+# scripts/test/check-proxy-image-sync.sh enforces the match.
 PROXY_IMAGE=${PROXY_IMAGE:-ghcr.io/yichenshen/dbus-auth-proxy@sha256:b1458d7822f6bcfa8d70ea2ab15d4371ce723932c1728ca8a34624da047cf07e}
 
 QUADLET_DIR="${HOME}/.config/containers/systemd"
