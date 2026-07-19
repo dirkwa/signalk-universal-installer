@@ -11,7 +11,8 @@
       "type": "node",
       "request": "launch",
       "program": "${workspaceFolder}/dev/signalk-server/bin/signalk-server",
-      "args": ["-c", "/home/node/.signalk"],
+      // Same config dir the devcontainer sets for dev/dev.sh.
+      "args": ["-c", "${env:SIGNALK_NODE_CONFIG_DIR}"],
       "cwd": "${workspaceFolder}/dev/signalk-server",
       "env": { "PORT": "4000" },
       "console": "integratedTerminal",
@@ -44,7 +45,8 @@
       "type": "node",
       "request": "launch",
       "program": "/home/node/signalk/node_modules/signalk-server/bin/signalk-server",
-      "args": ["-c", "/home/node/.signalk"],
+      // Same config dir the devcontainer sets for dev/dev.sh.
+      "args": ["-c", "${env:SIGNALK_NODE_CONFIG_DIR}"],
       "cwd": "/home/node/signalk/node_modules/signalk-server",
       "env": { "PORT": "4000" },
       "console": "integratedTerminal",
