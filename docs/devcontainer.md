@@ -41,7 +41,7 @@ Caveat for **rootless docker + a local folder** as the workspace source:
 devpod chowns the workspace to the container user, which lands on subuids
 on the host and makes your checkout unwritable outside the container.
 Prefer the git-URL form there (devpod keeps its own clone), or restore
-with `podman unshare chown -R 0:0 <repo>` afterwards.
+with `podman unshare chown -R 0:0 <repo>` afterward.
 
 ### Connecting from another machine
 
@@ -54,7 +54,7 @@ connection fails. Two fixes:
 - One-time SSH chain on the desktop (`~/.ssh/config` /
   `C:\Users\<you>\.ssh\config`; needs key-based auth to the box):
 
-  ```
+  ```text
   Host signalk-universal-installer.devpod
     User node
     StrictHostKeyChecking no
@@ -111,7 +111,7 @@ works again — the symlink problem of the containerized production setup does
 not exist here. After code changes run `dev/dev.sh restart` (Node caches
 modules; toggling the plugin in the admin UI is not enough).
 
-To verify against a production install afterwards: `npm pack` the plugin and
+To verify against a production install afterward: `npm pack` the plugin and
 install the tarball there, or add a bind mount for the plugin directory in
 the USER ADDITIONS block of the signalk-server Quadlet.
 
