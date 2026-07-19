@@ -38,6 +38,17 @@ HW_FILE="${HOME}/.signalk-updater/hardware.json"
 QUADLET_DIR="${HOME}/.config/containers/systemd"
 SERVER_QUADLET="$QUADLET_DIR/signalk-server.container"
 PROXY_QUADLET="$QUADLET_DIR/signalk-dbus-proxy.container"
+# The doctor's /api/installer/refresh (run by `signalk update`) stages
+# fresh Quadlet templates here without applying them. When the proxy
+# quadlet predates this feature, `enable` installs it from this payload
+# so `signalk update` + `signalk bluetooth enable` works end-to-end
+# without re-running the bash installer.
+PROXY_PAYLOAD="${HOME}/.signalk-doctor/installer-payload/signalk-dbus-proxy.container.template"
+# Default proxy image for payload installs. KEEP IN SYNC with
+# PROXY_IMAGE in installer/linux/install.sh — same pinned digest, same
+# rationale (third-party sidecar, no mutable :latest), same env
+# override for mirrors/CI.
+DEFAULT_PROXY_IMAGE="ghcr.io/yichenshen/dbus-auth-proxy@sha256:b1458d7822f6bcfa8d70ea2ab15d4371ce723932c1728ca8a34624da047cf07e"
 # The named-volume mount rendered into the HARDWARE block. Must match the
 # bluetooth clause in render-server-quadlet.sh — both sides of the
 # contract are grep'd by scripts/test/check-render-quadlet.sh.
@@ -152,8 +163,11 @@ cmd_status() {
     section "Passthrough chain"
     if [[ -f "$PROXY_QUADLET" ]]; then
         ok "proxy quadlet installed"
+    elif [[ -f "$PROXY_PAYLOAD" ]]; then
+        info "proxy quadlet not installed yet — a staged template is available;"
+        info "'signalk bluetooth enable' will install it"
     else
-        warn "proxy quadlet missing — re-run the installer one-liner to fetch it"
+        warn "proxy quadlet missing — run 'signalk update' or re-run the installer"
     fi
     local proxy_state
     proxy_state=$(systemctl --user is-active signalk-dbus-proxy.service 2>/dev/null || true)
@@ -203,16 +217,51 @@ cmd_status() {
     fi
 }
 
+# The doctor stages payload templates without applying them, so this
+# helper is the component that turns a staged template into a live unit.
+# The write must be atomic (mktemp + mv): systemd's generator may scan
+# the quadlet dir at any moment, and a half-written unit file would
+# parse as garbage rather than fail cleanly.
+install_proxy_quadlet_from_payload() {
+    local image tmp
+    image="${PROXY_IMAGE:-$DEFAULT_PROXY_IMAGE}"
+    info "installing signalk-dbus-proxy quadlet from staged installer payload"
+    tmp=$(mktemp "$QUADLET_DIR/.signalk-dbus-proxy.container.XXXXXX")
+    # `|` separator: the image reference contains `/`.
+    if ! sed -e "s|__PROXY_IMAGE__|${image}|g" "$PROXY_PAYLOAD" >"$tmp"; then
+        rm -f "$tmp"
+        err "failed to render $PROXY_PAYLOAD"
+        exit 1
+    fi
+    # A payload staged by an older doctor could predate the placeholder
+    # or carry a new one this helper doesn't know; an unsubstituted
+    # __…__ would reach systemd as a literal image name and fail pull.
+    if grep -q '__[A-Z_]*__' "$tmp"; then
+        rm -f "$tmp"
+        err "staged template contains unsubstituted placeholders —"
+        err "run 'signalk update' to refresh it, or re-run the installer."
+        exit 1
+    fi
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$PROXY_QUADLET"
+    ok "signalk-dbus-proxy quadlet installed from payload"
+}
+
 cmd_enable() {
     [[ -S /run/dbus/system_bus_socket ]] || {
         err "no /run/dbus/system_bus_socket on the host — install dbus/bluez first"
         exit 1
     }
-    [[ -f "$PROXY_QUADLET" ]] || {
-        err "signalk-dbus-proxy quadlet not installed — re-run the installer"
-        err "one-liner once (it fetches and writes the proxy unit), then retry."
-        exit 1
-    }
+    if [[ ! -f "$PROXY_QUADLET" ]]; then
+        if [[ -f "$PROXY_PAYLOAD" ]]; then
+            install_proxy_quadlet_from_payload
+        else
+            err "signalk-dbus-proxy quadlet not installed and no staged template"
+            err "found. Run 'signalk update' (stages it via the doctor) and retry,"
+            err "or re-run the installer one-liner once."
+            exit 1
+        fi
+    fi
     [[ -f "$SERVER_QUADLET" ]] || { err "no $SERVER_QUADLET — is the stack installed?"; exit 1; }
 
     # The proxy is a hard prerequisite: with the mount added but no

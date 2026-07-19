@@ -51,6 +51,8 @@ signalk bluetooth disable   # unmount + restart
 
 `enable`/`disable` edit only the bluetooth line of the managed HARDWARE block (and migrate away any legacy direct `/run/dbus` bind mount from older installs). The host needs `bluez` running; the container needs no bluez of its own.
 
+On installs that predate the proxy, `signalk update` alone is enough: it stages the proxy Quadlet template in the doctor's installer payload, and `signalk bluetooth enable` installs it from there (substituting the pinned proxy image) — no re-run of the bash installer required.
+
 ## Platform notes
 
 ### Raspberry Pi (3 / 4 / 5)
