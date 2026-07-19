@@ -3,6 +3,7 @@
 #
 #   dev.sh start     start server on $PORT (default 4000) with ~/.signalk config
 #   dev.sh demo      start server with bundled sample NMEA0183 data
+#   dev.sh demo-fg   demo server in the FOREGROUND (Playwright webServer)
 #   dev.sh stop      stop the dev server
 #   dev.sh restart   stop + start (picks up plugin code changes!)
 #   dev.sh logs      tail the server log
@@ -16,8 +17,10 @@ set -euo pipefail
 DEV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${SIGNALK_NODE_CONFIG_DIR:-$HOME/.signalk}"
 PORT="${PORT:-4000}"
-PIDFILE="/tmp/signalk-dev.pid"
-LOGFILE="/tmp/signalk-dev.log"
+# Port-scoped state: a second instance on another port gets its own files
+# and can never signal this one.
+PIDFILE="/tmp/signalk-dev-${PORT}.pid"
+LOGFILE="/tmp/signalk-dev-${PORT}.log"
 
 if [ -x "${DEV_DIR}/signalk-server/bin/signalk-server" ]; then
   SERVER_ROOT="${DEV_DIR}/signalk-server"
@@ -27,8 +30,23 @@ else
   SERVER_FLAVOR="image-baked server (production parity)"
 fi
 
+# Only treat the recorded pid as ours if it is alive AND still a
+# signalk-server process — guards against pid reuse after a crash.
 is_running() {
-  [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null
+  [ -f "${PIDFILE}" ] || return 1
+  pid="$(cat "${PIDFILE}")"
+  [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null || return 1
+  grep -qa "signalk-server" "/proc/${pid}/cmdline" 2>/dev/null
+}
+
+# Refuse to start when something else already answers on ${PORT} —
+# otherwise verify_up would happily attribute a foreign listener to us.
+ensure_port_free() {
+  if curl -sf -o /dev/null "http://localhost:${PORT}/signalk" 2>/dev/null; then
+    echo "Port ${PORT} is already serving a SignalK instance that is not managed by this script." >&2
+    echo "Stop it first, or use PORT=<other> $0 ..." >&2
+    exit 1
+  fi
 }
 
 # launch <cmd...>: run the server detached from ${SERVER_ROOT}, record its
@@ -62,22 +80,34 @@ start() {
     echo "Dev server already running (pid $(cat "${PIDFILE}"), port ${PORT})"
     return 0
   fi
+  ensure_port_free
   echo "Starting SignalK dev server on port ${PORT} — ${SERVER_FLAVOR}..."
   launch env PORT="${PORT}" ./bin/signalk-server -c "${CONFIG_DIR}"
   verify_up
 }
 
+# Demo mode notes: direct invocation instead of bin/nmea-from-file (npm
+# strips the exec bit from undeclared bin/ scripts). -s always resolves
+# relative to the config dir, so unset SIGNALK_NODE_CONFIG_DIR: the config
+# dir then defaults to the server root — sample settings and samples/
+# resolve, and demo state stays out of the persistent dev config.
 demo() {
   if is_running; then stop; fi
+  ensure_port_free
   echo "Starting SignalK dev server with sample NMEA data on port ${PORT} — ${SERVER_FLAVOR}..."
-  # Direct invocation instead of bin/nmea-from-file (npm strips the exec
-  # bit from undeclared bin/ scripts). -s always resolves relative to the
-  # config dir, so unset SIGNALK_NODE_CONFIG_DIR: the config dir then
-  # defaults to the server root — sample settings and samples/ resolve,
-  # and demo state stays out of the persistent dev config.
   launch env -u SIGNALK_NODE_CONFIG_DIR PORT="${PORT}" ./bin/signalk-server \
     -s settings/volare-file-settings.json
   verify_up
+}
+
+# Foreground variant for supervisors that own the process lifecycle
+# (Playwright's webServer): no pidfile, no log redirect, exec so the
+# supervisor signals the server itself, not a wrapper shell.
+demo_fg() {
+  ensure_port_free
+  cd "${SERVER_ROOT}"
+  exec env -u SIGNALK_NODE_CONFIG_DIR PORT="${PORT}" ./bin/signalk-server \
+    -s settings/volare-file-settings.json
 }
 
 stop() {
@@ -101,6 +131,7 @@ stop() {
 case "${1:-}" in
   start)   start ;;
   demo)    demo ;;
+  demo-fg) demo_fg ;;
   stop)    stop ;;
   restart) stop; start ;;
   logs)    tail -f "${LOGFILE}" ;;
