@@ -1,0 +1,80 @@
+[Unit]
+Description=SignalK DBus Auth Proxy (rootless system-bus bridge for BLE plugins)
+# Bridges the HOST system D-Bus into the rootless stack. Rationale: D-Bus
+# EXTERNAL auth compares the uid the CLIENT writes into its AUTH line
+# against the kernel's SO_PEERCRED. From inside the rootless signalk-server
+# container a dbus client (node-ble / dbus-next / dbus-native — anything a
+# BLE plugin pulls in) sends its in-container uid, while the host daemon
+# sees the connection's host-side uid. On any host where those differ the
+# daemon never answers OK, times out after 30s, and the client dies with
+# "Tried to write a message to a closed stream" — a bind-mounted
+# /run/dbus alone can never work there. This proxy (see
+# github.com/yichenshen/dbus-auth-proxy) exposes its own system_bus_socket
+# in the named volume below, rewrites the AUTH EXTERNAL uid to its own,
+# and forwards to the real host bus.
+#
+# There is no user-session unit to order against for the SYSTEM bus
+# (dbus.service in the user manager is the SESSION bus). The installer
+# only writes this quadlet when /run/dbus/system_bus_socket exists, and
+# the condition below re-checks at every start so a host that later
+# loses its system bus skips the unit (condition-failed, not a
+# crash-restart loop).
+ConditionPathExists=/run/dbus/system_bus_socket
+# Crash-loop guard for genuine failures (bad image, volume trouble):
+# same shape as the engine quadlets. In [Unit] — systemd silently
+# ignores these keys in [Service].
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Suppress Quadlet's implicit network-readiness dependency — same
+# rationale as in signalk-server.container.template: podman 5.x injects a
+# network-wait shim into every generated user unit; this unit only touches
+# unix sockets and needs no network at all.
+[Quadlet]
+DefaultDependencies=false
+
+[Container]
+Image=__PROXY_IMAGE__
+ContainerName=signalk-dbus-proxy
+
+# Named volume that receives the proxy's rewritten system_bus_socket.
+# render-server-quadlet.sh mounts this same volume at /run/dbus inside
+# signalk-server when bluetooth is enabled, so in-container dbus clients
+# find the socket at the standard path — served by the proxy, not the
+# host daemon directly.
+Volume=signalk-dbus-socket:/run/dbus-auth-proxy:rw
+
+# The real host system bus the proxy forwards to. ro: connecting to a
+# unix socket works on a read-only bind mount (the old direct-mount
+# passthrough used ro for the same socket); the proxy never creates
+# files under the host's /run/dbus.
+Volume=/run/dbus:/run/dbus:ro
+
+# BARE keep-id (identity mapping), deliberately NOT keep-id:uid=1000 like
+# signalk-server: the proxy's whole job is uid translation. It must RUN
+# as the invoking user's own uid so the uid it rewrites into AUTH
+# EXTERNAL matches what the host daemon's SO_PEERCRED reports.
+# keep-id:uid=1000 would hardcode 1000 and silently re-break every host
+# where the SignalK user is 1001+ (the uid-skew case described in the
+# server quadlet).
+UserNS=keep-id
+
+# SELinux hosts: the server container must connect() to the socket the
+# proxy creates in the shared volume; label isolation would block that.
+# No-op on AppArmor (Debian/Ubuntu/Armbian) hosts.
+SecurityLabelDisable=true
+
+# The proxy doesn't trap SIGTERM (observed: full 10s grace then
+# SIGKILL on every stop). 5s keeps stops snappy without risking data —
+# the only state is a socket in the named volume.
+StopTimeout=5
+
+Label=io.signalk.managed-by=installer
+Label=io.signalk.role=dbus-proxy
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

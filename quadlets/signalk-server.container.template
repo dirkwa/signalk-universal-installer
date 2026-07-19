@@ -9,6 +9,14 @@ Description=SignalK Server
 # cycles.
 Wants=podman.socket signalk-updater-server.service signalk-doctor-server.service
 After=podman.socket signalk-updater-server.service signalk-doctor-server.service
+# When bluetooth passthrough is enabled the HARDWARE block mounts the
+# signalk-dbus-proxy sidecar's socket volume; start the proxy first so
+# the socket exists before BLE plugins connect at server startup. Both
+# directives are no-ops when the proxy quadlet isn't installed (systemd
+# ignores Wants/After on units it cannot find), so this is safe to keep
+# unconditional — the HARDWARE block itself is what gates the feature.
+Wants=signalk-dbus-proxy.service
+After=signalk-dbus-proxy.service
 # Crashloop guard. Belongs in [Unit] — systemd silently ignores these
 # keys when placed in [Service], which is how they got dropped on the
 # 0.5.x installs (journal logged `Unknown key 'StartLimitIntervalSec'

@@ -6,7 +6,9 @@
 set -euo pipefail
 
 QUADLET_DIR="${HOME}/.config/containers/systemd"
-UNITS=(signalk-server signalk-updater-server signalk-doctor-server)
+# signalk-dbus-proxy is conditional (only on hosts with a system D-Bus);
+# all loops below tolerate a missing unit/quadlet/container.
+UNITS=(signalk-server signalk-updater-server signalk-doctor-server signalk-dbus-proxy)
 
 echo "Stopping signalk-* units..."
 for u in "${UNITS[@]}"; do
@@ -24,6 +26,10 @@ for u in "${UNITS[@]}"; do
         podman rm -f "$u" 2>/dev/null || true
     fi
 done
+
+# The dbus proxy's socket volume holds no data worth preserving —
+# it only ever contains the proxy's unix socket.
+podman volume rm signalk-dbus-socket 2>/dev/null || true
 
 systemctl --user daemon-reload || true
 
