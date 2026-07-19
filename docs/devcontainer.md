@@ -164,6 +164,9 @@ VM as described in AGENTS.md.
   feature (CLI + VS Code extension). It loads the root `CLAUDE.md`
   (→ AGENTS.md workflow conventions) and the workspace context in
   `dev/CLAUDE.md` automatically.
+  Skills come from the sailingnaturali/claude-skills plugin marketplace
+  declared in `.claude/settings.json` — the six plugins install
+  automatically when a user trusts the workspace.
   Auth: run `claude` once, or forward `ANTHROPIC_API_KEY` from the host.
 - **Memory**: `CLAUDE.md`/`AGENTS.md` are the committed project memory;
   Claude Code's *auto memory* (per-project notes under `~/.claude`) is
