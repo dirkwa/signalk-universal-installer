@@ -640,7 +640,8 @@ cmd_uninstall() {
     echo
     echo "To purge ALL data, run:"
     echo "  rm -rf ~/.signalk ~/.signalk-updater ~/.signalk-doctor ~/.signalk-backup"
-    echo "  rm -f  ~/.local/bin/signalk ~/.local/bin/signalk-recovery"
+    echo "  rm -f  ~/.local/bin/signalk ~/.local/bin/signalk-recovery \\"
+    echo "         ~/.local/bin/signalk-socketcan ~/.local/bin/signalk-bluetooth"
     echo "Done."
 }
 

@@ -55,21 +55,40 @@ quadlet_has_volume() {
     grep -qxF "$VOLUME_LINE" "$SERVER_QUADLET" 2>/dev/null
 }
 
+# Same snapshot convention as the installer's snapshot_existing(): the
+# doctor's recovery flow restores last-known-good Quadlets from
+# ~/.signalk-doctor/snapshots/, so every mutation of a managed Quadlet
+# must leave a timestamped copy there first. Best-effort — a missing
+# snapshots dir (partial install) must not block the edit itself.
+snapshot_quadlet() {
+    local name=$1
+    [[ -f "$QUADLET_DIR/$name" ]] || return 0
+    local ts
+    ts=$(date -u +"%Y%m%dT%H%M%SZ")
+    mkdir -p "${HOME}/.signalk-doctor/snapshots" 2>/dev/null || true
+    cp -p "$QUADLET_DIR/$name" \
+        "${HOME}/.signalk-doctor/snapshots/${ts}-${name}" 2>/dev/null \
+        || warn "could not snapshot $name (continuing)"
+}
+
 # Rewrite the server Quadlet's HARDWARE block: ensure (or remove) the
 # proxy volume line, always dropping the legacy direct mount. Surgical on
-# purpose — only the bluetooth line is touched, so serial/CAN/GPIO lines
-# the installer or updater rendered stay exactly as written.
+# purpose — only the bluetooth line is touched, and only INSIDE the
+# managed block: an identical-looking Volume= line in USER ADDITIONS (or
+# anywhere else the operator owns) is never removed.
 edit_quadlet() {  # $1 = add|remove
     local mode=$1 tmp
+    snapshot_quadlet signalk-server.container
     tmp=$(mktemp "$QUADLET_DIR/.signalk-server.container.XXXXXX")
     awk -v vol="$VOLUME_LINE" -v mode="$mode" -v legacy="$LEGACY_LINE_RE" '
-        $0 ~ legacy { next }
-        $0 == vol   { next }
         /^# === BEGIN HARDWARE/ {
+            in_hw = 1
             print
             if (mode == "add") print vol
             next
         }
+        /^# === END HARDWARE/ { in_hw = 0; print; next }
+        in_hw && ($0 ~ legacy || $0 == vol) { next }
         { print }
     ' "$SERVER_QUADLET" >"$tmp"
     chmod 0644 "$tmp"
@@ -206,6 +225,21 @@ cmd_enable() {
         err "leaving the server quadlet unchanged."
         exit 1
     fi
+    # A running unit is not yet a usable socket: wait for the proxy to
+    # register system_bus_socket in the shared volume before wiring the
+    # server to it, so enable can never report success while BLE clients
+    # would still hit ENOENT on an empty volume.
+    local waited=0
+    until podman exec signalk-dbus-proxy test -S /run/dbus-auth-proxy/system_bus_socket 2>/dev/null; do
+        waited=$((waited + 1))
+        if [[ "$waited" -ge 10 ]]; then
+            err "proxy is running but produced no system_bus_socket within 10s —"
+            err "check 'podman logs signalk-dbus-proxy'. Leaving the server quadlet unchanged."
+            exit 1
+        fi
+        sleep 1
+    done
+    ok "proxy socket present in volume signalk-dbus-socket"
 
     set_hw_flag true
     edit_quadlet add

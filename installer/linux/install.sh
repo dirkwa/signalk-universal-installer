@@ -1324,6 +1324,7 @@ if [[ -S /run/dbus/system_bus_socket ]]; then
     atomic_write "$QUADLET_DIR/signalk-dbus-proxy.container" "$PROXY_QUADLET"
 elif [[ -f "$QUADLET_DIR/signalk-dbus-proxy.container" ]]; then
     warn "host system D-Bus socket gone — removing stale signalk-dbus-proxy quadlet"
+    snapshot_existing signalk-dbus-proxy.container
     rm -f "$QUADLET_DIR/signalk-dbus-proxy.container"
 fi
 
