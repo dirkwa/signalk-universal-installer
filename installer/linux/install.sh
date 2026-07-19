@@ -654,13 +654,15 @@ fi
 # 3. Install podman if absent
 section "Podman"
 if ! command -v podman >/dev/null 2>&1; then
-    # passt is explicit, not left to podman's dependency pull: on Debian it
-    # is only a Recommends of podman, and Armbian ships with
-    # APT::Install-Recommends off — podman installs fine but the pasta
-    # binary is missing and every pasta-networked container (updater,
-    # doctor) fails to start.
-    info "Installing podman + passt + uidmap + slirp4netns (requires sudo)"
-    if ! pkg_install podman passt uidmap slirp4netns; then
+    # passt and aardvark-dns are explicit, not left to podman's dependency
+    # pull: on Debian both are only a Recommends (of podman and netavark
+    # respectively), and Armbian ships with APT::Install-Recommends off —
+    # podman installs fine but the pasta binary is missing and every
+    # pasta-networked container (updater, doctor) fails to start, and
+    # without aardvark-dns every container on a user-defined network
+    # (grafana, questdb) has a dead nameserver.
+    info "Installing podman + passt + uidmap + slirp4netns + aardvark-dns (requires sudo)"
+    if ! pkg_install podman passt uidmap slirp4netns aardvark-dns; then
         err "Could not install podman. Install it manually and re-run."
         exit 1
     fi
@@ -681,6 +683,33 @@ if ! command -v pasta >/dev/null 2>&1; then
         warn "pasta still not found — updater/doctor containers may fail"
         warn "to start. Install it manually (e.g. apt-get install passt)"
         warn "if they do."
+    fi
+fi
+
+# Same Recommends gap for aardvark-dns: netavark only Recommends it, so
+# Armbian-style hosts end up with user-defined networks whose containers
+# get the bridge gateway as nameserver and nothing listening on :53 —
+# every DNS lookup inside grafana/questdb-style containers fails with
+# "connection refused". Ask podman where it resolved the helper (covers
+# custom helper_binaries_dir); the binary is not on PATH, so fall back to
+# the packaged locations rather than command -v.
+# Warn-not-fatal: the core stack (host/pasta networking) works without it.
+have_aardvark_dns() {
+    local p
+    p="$(podman info --format '{{.Host.NetworkBackendInfo.DNS.Path}}' 2>/dev/null || true)"
+    if [[ -n "$p" && -x "$p" ]]; then
+        return 0
+    fi
+    [[ -x /usr/lib/podman/aardvark-dns || -x /usr/libexec/podman/aardvark-dns ]] \
+        || command -v aardvark-dns >/dev/null 2>&1
+}
+if ! have_aardvark_dns; then
+    info "Installing aardvark-dns (DNS for user-defined container networks, requires sudo)"
+    pkg_install aardvark-dns || true
+    if ! have_aardvark_dns; then
+        warn "aardvark-dns still not found — containers on user-defined"
+        warn "networks (e.g. grafana/questdb) cannot resolve DNS. Install"
+        warn "it manually (e.g. apt-get install aardvark-dns) if they fail."
     fi
 fi
 

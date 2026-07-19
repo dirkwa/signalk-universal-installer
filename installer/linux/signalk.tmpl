@@ -1458,6 +1458,38 @@ cmd_bug_report() {
             echo "(pasta NOT found — pasta-networked containers cannot start)"
         fi
         echo
+        echo "=== aardvark-dns (DNS on user-defined container networks) ==="
+        # Same Recommends gap as passt, one layer down: netavark only
+        # Recommends aardvark-dns, so on recommends-off hosts containers on
+        # user-defined networks (grafana, questdb) get the bridge gateway
+        # as nameserver with nothing listening on :53 — every lookup fails
+        # with "connection refused" (2026-07 Orange Pi field report). Ask
+        # podman where it resolved the helper (covers custom
+        # helper_binaries_dir); not on PATH, so fall back to the packaged
+        # locations.
+        aardvark_bin=""
+        if command -v podman >/dev/null 2>&1; then
+            aardvark_bin="$(podman info --format '{{.Host.NetworkBackendInfo.DNS.Path}}' 2>/dev/null || true)"
+        fi
+        if [[ -z "$aardvark_bin" || ! -x "$aardvark_bin" ]]; then
+            aardvark_bin=""
+            for c in /usr/lib/podman/aardvark-dns /usr/libexec/podman/aardvark-dns; do
+                if [[ -x "$c" ]]; then
+                    aardvark_bin="$c"
+                    break
+                fi
+            done
+        fi
+        if [[ -z "$aardvark_bin" ]]; then
+            aardvark_bin="$(command -v aardvark-dns 2>/dev/null || true)"
+        fi
+        if [[ -n "$aardvark_bin" ]]; then
+            echo "$aardvark_bin"
+            "$aardvark_bin" --version 2>&1 | head -1 || true
+        else
+            echo "(aardvark-dns NOT found — DNS is dead on user-defined networks)"
+        fi
+        echo
         echo "=== canboatjs native canSocket addon (server image) ==="
         # canbus-canboatjs needs canboatjs's compiled SocketCAN addon. Its
         # install script is `node-gyp rebuild || echo ...`, so a build skip
