@@ -1,0 +1,9 @@
+node_modules/
+signalk-server/
+plugins/*
+!plugins/.gitkeep
+test-results/
+playwright-report/
+
+CLAUDE.local.md
+companions/

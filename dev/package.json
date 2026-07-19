@@ -1,0 +1,16 @@
+{
+  "name": "signalk-installer-dev-workspace",
+  "private": true,
+  "description": "Dev workspace for the signalk-universal-installer devcontainer: server checkout, plugin linking and Playwright e2e tests.",
+  "scripts": {
+    "start": "./dev.sh start",
+    "demo": "./dev.sh demo",
+    "stop": "./dev.sh stop",
+    "restart": "./dev.sh restart",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}
