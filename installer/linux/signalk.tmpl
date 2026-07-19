@@ -1783,13 +1783,20 @@ cmd_devpod() {
         chmod +x "$bin"
     fi
 
-    # Podman-only hosts (the installer's default runtime): point the
-    # docker provider at podman. Hosts with a real docker keep their setup.
-    if ! command -v docker >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then
-        "$bin" provider add docker -o DOCKER_PATH="$(command -v podman)" >/dev/null 2>&1 \
-            || "$bin" provider set-options docker -o DOCKER_PATH="$(command -v podman)" >/dev/null 2>&1 \
-            || true
+    # A fresh devpod install has NO provider at all and `up` dies with
+    # "no default provider found" — ensure one exists AND is selected.
+    # "docker" is only devpod's provider NAME: with DOCKER_PATH=podman
+    # everything runs through podman — the runtime the installer already
+    # manages; no second runtime is installed. podman is preferred
+    # whenever present; a plain docker only serves podman-less dev boxes.
+    # An EXISTING provider is never repointed (`add` fails harmlessly
+    # then) — changing its runtime would strand existing workspaces.
+    if command -v podman >/dev/null 2>&1; then
+        "$bin" provider add docker -o DOCKER_PATH="$(command -v podman)" >/dev/null 2>&1 || true
+    elif command -v docker >/dev/null 2>&1; then
+        "$bin" provider add docker >/dev/null 2>&1 || true
     fi
+    "$bin" provider use docker >/dev/null 2>&1 || true
     # devpod exits after ~90 idle seconds by default, taking the browser
     # IDE's port forward with it — disable once; harmless if repeated.
     "$bin" context set-options -o EXIT_AFTER_TIMEOUT=false >/dev/null 2>&1 || true
