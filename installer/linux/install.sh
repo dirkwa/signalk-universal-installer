@@ -1384,6 +1384,24 @@ fi
 
 ok "Quadlets written to $QUADLET_DIR"
 
+# Stage the doctor's refresh payload from the tree we already fetched: the
+# same raw templates + detect-hardware.sh that the doctor's
+# /api/installer/refresh pulls from Pages into
+# ~/.signalk-doctor/installer-payload. Staging them at install time means
+# `signalk bluetooth enable` can render the dbus-proxy quadlet right after
+# a fresh install (no `signalk update` round-trip first), and the doctor's
+# first refresh after an install reports "unchanged" instead of a
+# confusing "updated" for artifacts the installer just laid down live.
+# Modes match the refresh writer (0755 script, 0644 templates).
+PAYLOAD_DIR="$DOCTOR_DATA/installer-payload"
+mkdir -p "$PAYLOAD_DIR"
+install -m 0755 "$HERE/detect-hardware.sh" "$PAYLOAD_DIR/detect-hardware.sh"
+for t in signalk-server signalk-updater-server signalk-doctor-server signalk-dbus-proxy; do
+    install -m 0644 "$HERE/../../quadlets/${t}.container.template" \
+        "$PAYLOAD_DIR/${t}.container.template"
+done
+ok "doctor refresh payload staged in $PAYLOAD_DIR"
+
 # 11. daemon-reload
 section "systemd-user daemon-reload"
 systemctl --user daemon-reload
