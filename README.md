@@ -46,6 +46,17 @@ Then open:
 
 See [docs/installation.md](docs/installation.md) for the full per-platform walkthrough, and [docs/recovery.md](docs/recovery.md) for the recovery playbook.
 
+## Development
+
+One command gives you a complete, isolated dev environment — the stack's own pre-built signalk-server on port 4000 (clear of a production install), plugin linking, shellcheck, Playwright e2e, and AI tooling:
+
+```bash
+devpod up github.com/dirkwa/signalk-universal-installer
+# or: clone + VS Code → "Reopen in Container"
+```
+
+See [docs/devcontainer.md](docs/devcontainer.md) for plugin/server/installer workflows, NMEA 2000 access, and troubleshooting.
+
 ## Known limitations
 
 - **Hardware device toggling requires re-running the installer.** The `POST /api/hardware/apply` endpoint and on-disk `~/.signalk-updater/hardware.json` work end-to-end; the Updater Console doesn't expose a Hardware tab, so toggling individual devices on or off means editing `hardware.json` directly (or re-running `curl … | bash`, which re-runs detection and is idempotent on identical input).
