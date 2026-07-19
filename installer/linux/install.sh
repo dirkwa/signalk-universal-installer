@@ -72,6 +72,13 @@ export PUBLISH_HOST
 
 set -euo pipefail
 
+# Login shells set USER, but `podman exec`, cron, and some systemd contexts
+# don't — with `set -u` the first $USER dereference then aborts the run.
+# id -un answers from the kernel. Exported so preflight.sh (subprocess)
+# inherits it; preflight keeps its own guard for standalone invocation.
+USER="${USER:-$(id -un)}"
+export USER
+
 # Resolve own location. When invoked as `curl ... | bash`, BASH_SOURCE[0]
 # is empty and we're running from stdin — none of the adjacent lib/
 # scripts or sibling Quadlet templates are on disk. In that case, fetch

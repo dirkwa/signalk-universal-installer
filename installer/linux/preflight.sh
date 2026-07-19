@@ -10,6 +10,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$HERE/lib/distro.sh"
 
+# Login shells set USER, but `podman exec`, cron, and some systemd contexts
+# don't — with `set -u` the first ${USER} dereference then kills the whole
+# preflight ("USER: unbound variable"). id -un answers from the kernel.
+USER="${USER:-$(id -un)}"
+
 detect_os
 
 REQUIRED_RAM_MB=${REQUIRED_RAM_MB:-2048}
