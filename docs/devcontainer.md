@@ -60,6 +60,18 @@ one command — `signalk devpod up` — which also installs the pinned devpod
 CLI to `~/.local/bin` on first use, points it at podman where no docker
 exists, and disables the idle timeout below.
 
+To reach the IDE **without any SSH forward** (fully headless), bind the
+forwarder to a reachable address:
+
+```bash
+signalk devpod up --ide-option BIND_ADDRESS=<vpn-or-lan-ip>:10800
+```
+
+The option sticks to the workspace. The IDE runs **without
+authentication** — anyone who reaches the port gets a terminal in the
+container. Bind a VPN address (e.g. tailscale) rather than `0.0.0.0`
+unless the network is fully trusted.
+
 The `VERSION` pin matters: devpod's default openvscode is too old
 (v1.84) for current extensions such as Claude Code — set it on the FIRST
 `up` (an already-provisioned IDE keeps its installed version; to upgrade
