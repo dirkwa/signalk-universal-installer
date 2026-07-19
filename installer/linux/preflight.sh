@@ -429,6 +429,28 @@ check_podman() {
     fi
 }
 
+# aardvark-dns serves DNS on user-defined container networks (netavark
+# hands containers the bridge gateway as nameserver; aardvark-dns is what
+# answers there). On Debian it is only a Recommends of netavark, and
+# Armbian ships with APT::Install-Recommends off, so podman can be fully
+# functional while every lookup inside grafana/questdb-style containers
+# fails with "connection refused". Ask podman where it resolved the
+# helper (covers custom helper_binaries_dir); the binary is not on PATH,
+# so fall back to the packaged locations.
+check_aardvark_dns() {
+    local p=""
+    if command -v podman >/dev/null 2>&1; then
+        p="$(podman info --format '{{.Host.NetworkBackendInfo.DNS.Path}}' 2>/dev/null || true)"
+    fi
+    if [[ -n "$p" && -x "$p" ]] \
+        || [[ -x /usr/lib/podman/aardvark-dns || -x /usr/libexec/podman/aardvark-dns ]] \
+        || command -v aardvark-dns >/dev/null 2>&1; then
+        ok "aardvark-dns present (DNS for user-defined container networks)"
+    else
+        warn "aardvark-dns missing — installer will install it (container DNS on user-defined networks)"
+    fi
+}
+
 check_subid() {
     if [[ ! -f /etc/subuid ]] || ! grep -q "^${USER}:" /etc/subuid; then
         warn "User $USER lacks subuid mapping — installer will run: sudo usermod --add-subuids 100000-165535"
@@ -610,6 +632,7 @@ main() {
     check_cgroups_v2
     check_user_slice_delegation
     check_podman
+    check_aardvark_dns
     check_subid
     check_linger
     check_storage_fs
