@@ -43,30 +43,50 @@ on the host and makes your checkout unwritable outside the container.
 Prefer the git-URL form there (devpod keeps its own clone), or restore
 with `podman unshare chown -R 0:0 <repo>` afterward.
 
-### Connecting from another machine
+### Working from another machine (headless box)
 
-`devpod up` writes the SSH alias `signalk-universal-installer.devpod` into
-`~/.ssh/config` **on the machine where it runs**. If your editor runs
-elsewhere (e.g. Windows VS Code, devpod on a Linux box), "Starting
-VSCode..." opens a Remote-SSH target your desktop cannot resolve and the
-connection fails. Two fixes:
+When devpod runs on a headless box (Pi, VM, boat computer) and your editor
+runs elsewhere, the default `--ide vscode` flow breaks: devpod writes its
+SSH alias only into `~/.ssh/config` **on the box**, so your desktop cannot
+resolve it. Use the **browser IDE** instead — no desktop tooling at all:
 
-- One-time SSH chain on the desktop (`~/.ssh/config` /
-  `C:\Users\<you>\.ssh\config`; needs key-based auth to the box):
+```bash
+devpod up github.com/dirkwa/signalk-universal-installer \
+  --ide openvscode --ide-option VERSION=v1.109.5
+```
 
-  ```text
-  Host signalk-universal-installer.devpod
-    User node
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null   # Windows: NUL
-    ProxyCommand ssh <user>@<box> "/usr/local/bin/devpod ssh --stdio --context default --user node signalk-universal-installer"
-  ```
+The `VERSION` pin matters: devpod's default openvscode is too old
+(v1.84) for current extensions such as Claude Code — set it on the FIRST
+`up` (an already-provisioned IDE keeps its installed version; to upgrade
+later, delete `~/.openvscode-server` inside the container and re-run —
+note this also resets browser-IDE settings and extensions, which live
+under that directory).
+The IDE serves on localhost:10800 on the box; reach it from your desktop
+with any SSH port forward (`ssh -L 10800:localhost:10800 <user>@<box>`,
+or the Ports panel of an existing VS Code Remote-SSH window), then browse
+`http://localhost:10800/?folder=/workspaces/signalk-universal-installer`.
+Extensions there come from Open VSX (Claude Code is available).
 
-  Then connect with Remote-SSH and answer **Linux** at the platform
-  prompt — it asks about the container, not your desktop.
+Alternatives for a native desktop VS Code:
 
-- Or install DevPod Desktop on the desktop itself with an SSH provider
-  pointing at the box; devpod then manages the local alias for you.
+- **DevPod Desktop on the desktop** with an SSH provider pointing at the
+  box — devpod then manages the desktop-side alias itself. This is the
+  supported client for remote boxes.
+- **Attach to the running container** from an existing VS Code Remote-SSH
+  window to the box: install the "Dev Containers" extension, then
+  F1 → "Dev Containers: Attach to Running Container…" and open
+  `/workspaces/signalk-universal-installer`.
+- A hand-rolled SSH chain on the desktop (`ProxyCommand ssh <user>@<box>
+  "/usr/local/bin/devpod ssh --stdio --context default --user node
+  signalk-universal-installer"`, user `node`, answer **Linux** at the
+  platform prompt) also works but is the most fragile option.
+
+Troubleshooting: if a devpod tunnel fails with
+`.devpod-internal/0/NOTES.md: permission denied`, the box runs a rootless
+container runtime and devpod's workspace chown locked the agent out of its
+own feature staging. `host-prepare.sh` self-heals this on the next connect;
+the manual cure on the box is
+`podman unshare chown -R 0:0 <workspace-content>/.devcontainer/.devpod-internal`.
 
 After the build:
 
