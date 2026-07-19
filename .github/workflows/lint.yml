@@ -24,13 +24,15 @@ jobs:
               echo "::error file=$f::bash -n syntax error"
               fail=1
             fi
-          done < <(find installer scripts -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.tmpl' \) -print0)
+          done < <(find installer scripts .devcontainer dev -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.tmpl' \) \
+            -not -path '.devcontainer/.devpod-internal/*' -not -path 'dev/signalk-server/*' -not -path 'dev/plugins/*' -not -path 'dev/companions/*' -not -path '*/node_modules/*' -print0)
           exit "$fail"
 
       - name: shellcheck
         run: |
           set -euo pipefail
-          find installer scripts -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.tmpl' \) -print0 |
+          find installer scripts .devcontainer dev -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.tmpl' \) \
+            -not -path '.devcontainer/.devpod-internal/*' -not -path 'dev/signalk-server/*' -not -path 'dev/plugins/*' -not -path 'dev/companions/*' -not -path '*/node_modules/*' -print0 |
             xargs -0 shellcheck
 
       - name: installer fetch-list manifest
