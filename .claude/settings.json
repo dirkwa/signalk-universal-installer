@@ -1,0 +1,15 @@
+{
+  "extraKnownMarketplaces": {
+    "sailingnaturali": {
+      "source": { "source": "github", "repo": "sailingnaturali/claude-skills" }
+    }
+  },
+  "enabledPlugins": {
+    "signalk-plugin@sailingnaturali": true,
+    "signalk-registry@sailingnaturali": true,
+    "npm-oidc-publish@sailingnaturali": true,
+    "oss-branch-protection@sailingnaturali": true,
+    "debug-mcp-agent@sailingnaturali": true,
+    "record-web-gif@sailingnaturali": true
+  }
+}
