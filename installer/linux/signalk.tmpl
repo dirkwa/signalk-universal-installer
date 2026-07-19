@@ -6,6 +6,7 @@
 #   signalk health         show stack health (containers, services, URLs)
 #   signalk recover [...]  delegate to ~/.local/bin/signalk-recovery
 #   signalk socketcan [..] Pi CAN-HAT detection + setup recipe
+#   signalk bluetooth [..] BLE / D-Bus passthrough (status | enable | disable)
 #   signalk update         refresh installer scripts + Quadlet templates via doctor
 #   signalk resetadmin [user]
 #                          reset (or create) an admin user's password for the
@@ -55,7 +56,11 @@ DOCTOR_URL=${DOCTOR_URL:-http://127.0.0.1:3004}
 SIGNALK_URL=${SIGNALK_URL:-http://127.0.0.1:$(sk_http_port)/signalk}
 DOCTOR_DATA="${DOCTOR_DATA:-${HOME}/.signalk-doctor}"
 QUADLET_DIR="${HOME}/.config/containers/systemd"
-UNITS=(signalk-server signalk-updater-server signalk-doctor-server)
+# signalk-dbus-proxy is conditional (written only on hosts with a system
+# D-Bus); every UNITS consumer below tolerates a missing unit (`|| true`
+# stops, journal/status captures, quadlet rm -f), so listing it
+# unconditionally is safe and keeps uninstall + bug-report complete.
+UNITS=(signalk-server signalk-updater-server signalk-doctor-server signalk-dbus-proxy)
 
 # Turn an internal probe URL (always http://127.0.0.1:<port>...) into the URL
 # we PRINT for the operator to open. Two transforms:
@@ -95,7 +100,10 @@ usage() {
     local help
     help=$(sed -n '2,${/^#/!q;p}' "$0" | sed 's/^# \{0,1\}//')
     if [[ "${SIGNALK_WINDOWS_SHIM:-0}" == "1" ]]; then
-        printf '%s\n' "$help" | grep -v 'signalk socketcan'
+        # bluetooth is filtered for the same reason as socketcan: host
+        # bluez/D-Bus passthrough has no equivalent inside the Podman
+        # machine VM.
+        printf '%s\n' "$help" | grep -v -e 'signalk socketcan' -e 'signalk bluetooth'
     else
         printf '%s\n' "$help"
     fi
@@ -184,6 +192,18 @@ cmd_socketcan() {
         exit 1
     fi
     exec "$HOME/.local/bin/signalk-socketcan" "$@"
+}
+
+cmd_bluetooth() {
+    # Thin delegate into the sibling helper installed by
+    # install-bluetooth-script.sh — same pattern as cmd_socketcan.
+    if [[ ! -x "$HOME/.local/bin/signalk-bluetooth" ]]; then
+        echo "[ERR] ~/.local/bin/signalk-bluetooth is missing." >&2
+        echo "  Run 'signalk update' to refresh installer artifacts, or re-run" >&2
+        echo "  the bash bootstrap one-liner." >&2
+        exit 1
+    fi
+    exec "$HOME/.local/bin/signalk-bluetooth" "$@"
 }
 
 cmd_update() {
@@ -576,6 +596,10 @@ cmd_uninstall() {
         fi
     done
 
+    # The dbus proxy's socket volume holds no data worth preserving —
+    # it only ever contains the proxy's unix socket.
+    podman volume rm signalk-dbus-socket 2>/dev/null || true
+
     # Remove the legacy podman API service override. Older installers wrote
     # it (--time=0 keep-alive) carrying --log-level=info, which fans out
     # dpkg-query on every API burst and storms the load. The current stack
@@ -616,7 +640,8 @@ cmd_uninstall() {
     echo
     echo "To purge ALL data, run:"
     echo "  rm -rf ~/.signalk ~/.signalk-updater ~/.signalk-doctor ~/.signalk-backup"
-    echo "  rm -f  ~/.local/bin/signalk ~/.local/bin/signalk-recovery"
+    echo "  rm -f  ~/.local/bin/signalk ~/.local/bin/signalk-recovery \\"
+    echo "         ~/.local/bin/signalk-socketcan ~/.local/bin/signalk-bluetooth"
     echo "Done."
 }
 
@@ -1658,6 +1683,7 @@ case "${1:-help}" in
     health)     cmd_health ;;
     recover)    shift; cmd_recover "$@" ;;
     socketcan)  shift; cmd_socketcan "$@" ;;
+    bluetooth)  shift; cmd_bluetooth "$@" ;;
     update)     cmd_update ;;
     resetadmin) shift; cmd_resetadmin "$@" ;;
     bug-report) shift; cmd_bug_report "$@" ;;

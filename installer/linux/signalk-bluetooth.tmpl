@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# signalk-bluetooth — BLE / D-Bus passthrough helper for the containerized
+# SignalK stack. Installed to ~/.local/bin/signalk-bluetooth by
+# install-bluetooth-script.sh and invoked via `signalk bluetooth`.
+#
+# Why this exists: BLE plugins (bt-sensors and anything node-ble /
+# dbus-next / dbus-native based) talk to the HOST's bluez over the system
+# D-Bus. Inside the rootless signalk-server container that needs two
+# things a stock install doesn't have:
+#   1. a reachable system_bus_socket — provided NOT by bind-mounting the
+#      host's /run/dbus (D-Bus EXTERNAL auth fails across the user
+#      namespace on any host whose SignalK user isn't uid 1000: the
+#      client-sent uid never matches SO_PEERCRED, the daemon times out,
+#      the plugin dies with "Tried to write a message to a closed
+#      stream") but by the signalk-dbus-proxy sidecar, which rewrites
+#      the AUTH EXTERNAL uid in transit and exposes a working socket in
+#      the named volume `signalk-dbus-socket`;
+#   2. the Volume= line mounting that named volume at /run/dbus inside
+#      signalk-server (rendered into the Quadlet's HARDWARE block).
+# `enable` wires both up; `disable` unwires; `status` shows every link
+# of the chain plus which installed modules would dial D-Bus at all.
+
+set -euo pipefail
+
+C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+C_BLUE=$'\033[0;34m'; C_GREEN=$'\033[0;32m'
+C_YELLOW=$'\033[0;33m'; C_RED=$'\033[0;31m'
+if [[ ! -t 1 ]]; then
+    C_RESET=""; C_BOLD=""; C_BLUE=""; C_GREEN=""; C_YELLOW=""; C_RED=""
+fi
+info()    { printf '%s[i]%s %s\n' "$C_BLUE"   "$C_RESET" "$*"; }
+ok()      { printf '%s[OK]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn()    { printf '%s[!]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+err()     { printf '%s[ERR]%s %s\n' "$C_RED"  "$C_RESET" "$*" >&2; }
+section() { printf '\n%s== %s ==%s\n' "$C_BOLD" "$*" "$C_RESET"; }
+
+HW_FILE="${HOME}/.signalk-updater/hardware.json"
+QUADLET_DIR="${HOME}/.config/containers/systemd"
+SERVER_QUADLET="$QUADLET_DIR/signalk-server.container"
+PROXY_QUADLET="$QUADLET_DIR/signalk-dbus-proxy.container"
+# The named-volume mount rendered into the HARDWARE block. Must match the
+# bluetooth clause in render-server-quadlet.sh — both sides of the
+# contract are grep'd by scripts/test/check-render-quadlet.sh.
+VOLUME_LINE="Volume=signalk-dbus-socket:/run/dbus:rw"
+# Pre-proxy installs rendered a direct bind mount that cannot
+# authenticate across the userns; enable/disable migrate it away on sight.
+LEGACY_LINE_RE='^Volume=/run/dbus:/run/dbus'
+
+server_running() {
+    command -v podman >/dev/null 2>&1 \
+        && [[ "$(podman inspect --format '{{.State.Running}}' signalk-server 2>/dev/null)" == "true" ]]
+}
+
+quadlet_has_volume() {
+    grep -qxF "$VOLUME_LINE" "$SERVER_QUADLET" 2>/dev/null
+}
+
+# Same snapshot convention as the installer's snapshot_existing(): the
+# doctor's recovery flow restores last-known-good Quadlets from
+# ~/.signalk-doctor/snapshots/, so every mutation of a managed Quadlet
+# must leave a timestamped copy there first. Best-effort — a missing
+# snapshots dir (partial install) must not block the edit itself.
+snapshot_quadlet() {
+    local name=$1
+    [[ -f "$QUADLET_DIR/$name" ]] || return 0
+    local ts
+    ts=$(date -u +"%Y%m%dT%H%M%SZ")
+    mkdir -p "${HOME}/.signalk-doctor/snapshots" 2>/dev/null || true
+    cp -p "$QUADLET_DIR/$name" \
+        "${HOME}/.signalk-doctor/snapshots/${ts}-${name}" 2>/dev/null \
+        || warn "could not snapshot $name (continuing)"
+}
+
+# Rewrite the server Quadlet's HARDWARE block: ensure (or remove) the
+# proxy volume line, always dropping the legacy direct mount. Surgical on
+# purpose — only the bluetooth line is touched, and only INSIDE the
+# managed block: an identical-looking Volume= line in USER ADDITIONS (or
+# anywhere else the operator owns) is never removed.
+edit_quadlet() {  # $1 = add|remove
+    local mode=$1 tmp
+    snapshot_quadlet signalk-server.container
+    tmp=$(mktemp "$QUADLET_DIR/.signalk-server.container.XXXXXX")
+    awk -v vol="$VOLUME_LINE" -v mode="$mode" -v legacy="$LEGACY_LINE_RE" '
+        /^# === BEGIN HARDWARE/ {
+            in_hw = 1
+            print
+            if (mode == "add") print vol
+            next
+        }
+        /^# === END HARDWARE/ { in_hw = 0; print; next }
+        in_hw && ($0 ~ legacy || $0 == vol) { next }
+        { print }
+    ' "$SERVER_QUADLET" >"$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$SERVER_QUADLET"
+}
+
+# Restart the data plane the way install.sh does: prefer the updater's
+# authenticated REST API (it owns the server lifecycle), fall back to
+# systemctl when the updater is unreachable or lacks the endpoint —
+# the same fallback posture install.sh uses.
+restart_server() {
+    local token
+    token=$(cat "${HOME}/.signalk-updater/token" 2>/dev/null || echo "")
+    if [[ -n "$token" ]] && curl -fsS -X POST \
+        -H "Authorization: Bearer $token" \
+        "${UPDATER_URL:-http://127.0.0.1:3003}/api/signalk/restart" >/dev/null 2>&1; then
+        ok "updater restarted signalk-server"
+        return 0
+    fi
+    info "updater REST restart unavailable — using systemctl"
+    systemctl --user restart signalk-server.service
+}
+
+set_hw_flag() {  # $1 = true|false
+    if ! command -v jq >/dev/null 2>&1; then
+        warn "jq not installed — hardware.json not updated (the Quadlet edit"
+        warn "still applies; the updater's hardware view may show stale state)"
+        return 0
+    fi
+    [[ -s "$HW_FILE" ]] || { warn "no $HW_FILE — skipping flag update"; return 0; }
+    local tmp
+    tmp=$(mktemp "${HW_FILE}.XXXXXX")
+    if jq ".bluetooth.enabled = $1" "$HW_FILE" >"$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$HW_FILE"
+    else
+        rm -f "$tmp"
+        warn "could not update $HW_FILE"
+    fi
+}
+
+cmd_status() {
+    section "Host"
+    if [[ -S /run/dbus/system_bus_socket ]]; then
+        ok "system D-Bus socket present"
+    else
+        err "no /run/dbus/system_bus_socket — BLE passthrough impossible on this host"
+    fi
+    local bt_state
+    bt_state=$(systemctl is-active bluetooth 2>/dev/null || true)
+    if [[ "$bt_state" == "active" ]]; then
+        ok "bluez (bluetooth.service) active"
+    else
+        warn "bluez not active (state=${bt_state:-unknown}) — install/start bluez on the host"
+    fi
+    if compgen -G "/sys/class/bluetooth/hci*" >/dev/null 2>&1; then
+        ok "adapter(s): $(find /sys/class/bluetooth -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null)"
+    else
+        warn "no bluetooth adapter visible in /sys/class/bluetooth"
+    fi
+
+    section "Passthrough chain"
+    if [[ -f "$PROXY_QUADLET" ]]; then
+        ok "proxy quadlet installed"
+    else
+        warn "proxy quadlet missing — re-run the installer one-liner to fetch it"
+    fi
+    local proxy_state
+    proxy_state=$(systemctl --user is-active signalk-dbus-proxy.service 2>/dev/null || true)
+    if [[ "$proxy_state" == "active" ]]; then
+        ok "signalk-dbus-proxy running"
+    else
+        info "signalk-dbus-proxy not running (state=${proxy_state:-unknown})"
+    fi
+    if quadlet_has_volume; then
+        ok "server quadlet mounts the proxy socket volume"
+    elif grep -qE "$LEGACY_LINE_RE" "$SERVER_QUADLET" 2>/dev/null; then
+        warn "server quadlet still has the legacy direct /run/dbus mount —"
+        warn "run 'signalk bluetooth enable' to migrate to the auth proxy"
+    else
+        info "bluetooth passthrough disabled in server quadlet"
+    fi
+    if server_running; then
+        if podman exec signalk-server test -S /run/dbus/system_bus_socket 2>/dev/null; then
+            ok "socket reachable inside signalk-server"
+        else
+            info "no D-Bus socket inside signalk-server (expected while disabled)"
+        fi
+    else
+        info "(signalk-server not running — skipping in-container check)"
+    fi
+
+    section "D-Bus consumers in the plugin tree"
+    # Which installed modules would dial the system bus at all. Presence
+    # is not activity — an installed-but-disabled plugin is inert — but
+    # this names the module behind any "connect ENOENT
+    # /var/run/dbus/system_bus_socket" in the server log.
+    if server_running; then
+        local consumers
+        consumers=$(podman exec signalk-server sh -c \
+            "grep -rls system_bus_socket /home/node/.signalk/node_modules /home/node/.signalk/red/node_modules 2>/dev/null" \
+            | sed 's|.*/node_modules/||' \
+            | awk -F/ '{print ($1 ~ /^@/) ? $1"/"$2 : $1}' | sort -u || true)
+        if [[ -n "$consumers" ]]; then
+            while IFS= read -r m; do
+                [[ -n "$m" ]] && printf '    %s\n' "$m"
+            done <<<"$consumers"
+        else
+            info "none found"
+        fi
+    else
+        info "(signalk-server not running — skipping module scan)"
+    fi
+}
+
+cmd_enable() {
+    [[ -S /run/dbus/system_bus_socket ]] || {
+        err "no /run/dbus/system_bus_socket on the host — install dbus/bluez first"
+        exit 1
+    }
+    [[ -f "$PROXY_QUADLET" ]] || {
+        err "signalk-dbus-proxy quadlet not installed — re-run the installer"
+        err "one-liner once (it fetches and writes the proxy unit), then retry."
+        exit 1
+    }
+    [[ -f "$SERVER_QUADLET" ]] || { err "no $SERVER_QUADLET — is the stack installed?"; exit 1; }
+
+    # The proxy is a hard prerequisite: with the mount added but no
+    # proxy socket in the volume, BLE plugins fail with the same ENOENT
+    # this feature exists to fix. Prove it starts before touching the
+    # server at all.
+    systemctl --user daemon-reload
+    if ! systemctl --user start signalk-dbus-proxy.service; then
+        err "signalk-dbus-proxy failed to start — check 'podman logs signalk-dbus-proxy'"
+        err "leaving the server quadlet unchanged."
+        exit 1
+    fi
+    # A running unit is not yet a usable socket: wait for the proxy to
+    # register system_bus_socket in the shared volume before wiring the
+    # server to it, so enable can never report success while BLE clients
+    # would still hit ENOENT on an empty volume.
+    local waited=0
+    until podman exec signalk-dbus-proxy test -S /run/dbus-auth-proxy/system_bus_socket 2>/dev/null; do
+        waited=$((waited + 1))
+        if [[ "$waited" -ge 10 ]]; then
+            err "proxy is running but produced no system_bus_socket within 10s —"
+            err "check 'podman logs signalk-dbus-proxy'. Leaving the server quadlet unchanged."
+            exit 1
+        fi
+        sleep 1
+    done
+    ok "proxy socket present in volume signalk-dbus-socket"
+
+    set_hw_flag true
+    edit_quadlet add
+    ok "server quadlet now mounts the proxy socket volume"
+    systemctl --user daemon-reload
+    info "restarting signalk-server to pick up the mount (brief outage)"
+    restart_server
+    ok "bluetooth passthrough enabled"
+    info "BLE plugins reach the host bluez via the auth proxy now."
+}
+
+cmd_disable() {
+    [[ -f "$SERVER_QUADLET" ]] || { err "no $SERVER_QUADLET — is the stack installed?"; exit 1; }
+    set_hw_flag false
+    edit_quadlet remove
+    ok "proxy socket mount removed from server quadlet"
+    systemctl --user daemon-reload
+    info "restarting signalk-server (brief outage)"
+    restart_server
+    # Leave the proxy unit installed (cheap, and re-enable stays one
+    # command) but stop the running instance — nothing consumes it now.
+    systemctl --user stop signalk-dbus-proxy.service 2>/dev/null || true
+    ok "bluetooth passthrough disabled"
+}
+
+usage() {
+    cat <<'EOF'
+signalk bluetooth — BLE / D-Bus passthrough for the containerized stack
+
+  signalk bluetooth status    show host bluez, proxy chain, and which
+                              installed modules would dial D-Bus (default)
+  signalk bluetooth enable    mount the auth-proxy socket into
+                              signalk-server and restart it
+  signalk bluetooth disable   remove the mount and restart
+
+The passthrough uses the signalk-dbus-proxy sidecar (AUTH EXTERNAL uid
+rewriting) — a plain /run/dbus bind mount cannot authenticate from a
+rootless container on hosts where the user isn't uid 1000.
+EOF
+}
+
+case "${1:-status}" in
+    status)  cmd_status ;;
+    enable)  cmd_enable ;;
+    disable) cmd_disable ;;
+    help|-h|--help) usage ;;
+    *) err "unknown subcommand: $1"; usage; exit 2 ;;
+esac

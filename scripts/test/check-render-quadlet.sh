@@ -78,12 +78,49 @@ else
     fail=1
 fi
 
-# 3. Disabled hardware is excluded.
-if grep -qE 'can0|/run/dbus|/dev/gpiomem' <<<"$out"; then
+# 3. Disabled hardware is excluded. BLE renders as the proxy's named
+#    socket volume (signalk-dbus-socket), never a direct /run/dbus bind
+#    mount — both patterns must stay absent while disabled.
+if grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem' <<<"$out"; then
     echo "  [MISS] disabled hardware leaked into output"
     fail=1
 else
     echo "  [OK]   disabled CAN/BLE/GPIO correctly excluded"
+fi
+
+# 4. Enabled bluetooth must render the auth-proxy's named socket volume.
+#    A direct /run/dbus bind mount would regress the userns fix: D-Bus
+#    EXTERNAL auth can never complete from the rootless container on
+#    hosts whose user isn't uid 1000, so the legacy line coming back
+#    means BLE silently breaks for exactly the installs that need the
+#    proxy. stderr is captured like check #1 — the original regression
+#    printed jq errors on stderr while exiting 0.
+if command -v jq >/dev/null 2>&1; then
+    jq '.bluetooth.enabled = true' "$tmp/hardware.json" >"$tmp/hardware-ble.json"
+    err_ble="$tmp/stderr-ble.log"
+    out_ble=$(bash "$RENDER" "$tmp/hardware-ble.json" "$TEMPLATE" 2>"$err_ble") || {
+        echo "  [MISS] render (bluetooth enabled) exited non-zero"
+        fail=1
+    }
+    if [[ -s "$err_ble" ]]; then
+        echo "  [MISS] render (bluetooth enabled) wrote to stderr:"
+        sed 's/^/         /' "$err_ble"
+        fail=1
+    fi
+    if grep -qxF 'Volume=signalk-dbus-socket:/run/dbus:rw' <<<"$out_ble"; then
+        echo "  [OK]   enabled bluetooth emits the proxy socket volume"
+    else
+        echo "  [MISS] enabled bluetooth did not emit the proxy socket volume"
+        fail=1
+    fi
+    if grep -qE '^Volume=/run/dbus:/run/dbus' <<<"$out_ble"; then
+        echo "  [MISS] legacy direct /run/dbus bind mount re-appeared"
+        fail=1
+    else
+        echo "  [OK]   no legacy direct /run/dbus bind mount"
+    fi
+else
+    echo "  [SKIP] jq not available — enabled-bluetooth render not checked"
 fi
 
 if (( fail )); then

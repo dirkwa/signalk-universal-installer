@@ -29,6 +29,15 @@ fi
 # Build the AddDevice/Volume block from hardware.json. We use jq if present
 # (best); otherwise fall back to a sed-based extractor that handles the
 # narrow shape detect-hardware.sh emits.
+# Bluetooth note: the volume is the signalk-dbus-proxy sidecar's named
+# socket volume, NOT a bind mount of the host's /run/dbus. A direct bind
+# mount cannot work under rootless podman on hosts where the SignalK user
+# isn't uid 1000: D-Bus EXTERNAL auth compares the uid the in-container
+# client sends (its container uid) against the kernel's SO_PEERCRED (the
+# host-side uid), the mismatch never authenticates, and the client dies
+# 30s later with "Tried to write a message to a closed stream". The proxy
+# rewrites the AUTH uid in transit — see
+# quadlets/signalk-dbus-proxy.container.template for the full mechanism.
 hardware_block() {
     if command -v jq >/dev/null 2>&1; then
         # Each clause is parenthesized so its `|` pipeline stays local to
@@ -40,7 +49,7 @@ hardware_block() {
           [
             ((.serial // [])[] | select(.enabled == true) | "AddDevice=" + .byId),
             ((.can // [])[] | select(.enabled == true) | "AddDevice=/dev/" + .interface),
-            ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=/run/dbus:/run/dbus:ro"),
+            ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=signalk-dbus-socket:/run/dbus:rw"),
             ((.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem")
           ] | .[]
         ' "$HW_FILE"

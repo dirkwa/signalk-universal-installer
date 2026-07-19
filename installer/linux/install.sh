@@ -88,9 +88,11 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/install-recovery-script.sh \
         installer/linux/install-signalk-command.sh \
         installer/linux/install-socketcan-script.sh \
+        installer/linux/install-bluetooth-script.sh \
         installer/linux/signalk.tmpl \
         installer/linux/signalk-recovery.tmpl \
         installer/linux/signalk-socketcan.tmpl \
+        installer/linux/signalk-bluetooth.tmpl \
         installer/linux/legacy-cleanup.sh \
         installer/linux/lib/colors.sh \
         installer/linux/lib/distro.sh \
@@ -98,7 +100,8 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/lib/ghcr.sh \
         quadlets/signalk-server.container.template \
         quadlets/signalk-updater-server.container.template \
-        quadlets/signalk-doctor-server.container.template; do
+        quadlets/signalk-doctor-server.container.template \
+        quadlets/signalk-dbus-proxy.container.template; do
         mkdir -p "$TMP/$(dirname "$f")"
         if ! curl -fsSL "${INSTALLER_BASE_URL}/${f}" -o "$TMP/$f"; then
             echo "[ERR] Failed to fetch ${INSTALLER_BASE_URL}/${f}" >&2
@@ -205,6 +208,15 @@ SK_IMAGE=${SK_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-server:dirkwa}
 # DOCTOR_IMAGE env overrides still work for CI.
 UPDATER_IMAGE=${UPDATER_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-updater-server:latest}
 DOCTOR_IMAGE=${DOCTOR_IMAGE:-ghcr.io/${REPO_OWNER}/signalk-doctor-server:latest}
+# Third-party sidecar that bridges the host system D-Bus into the rootless
+# stack for BLE plugins (AUTH EXTERNAL uid rewriting — see
+# quadlets/signalk-dbus-proxy.container.template). Unlike our own engine
+# images this is NOT ours, so it does not get the ":latest = channel"
+# treatment: the default is pinned to the multi-arch (amd64+arm64) index
+# digest that was verified end-to-end, so a fresh install can never pull
+# unreviewed third-party code. Env override for CI, mirrors, or a
+# deliberate bump (which is a repo change, updating this pin).
+PROXY_IMAGE=${PROXY_IMAGE:-ghcr.io/yichenshen/dbus-auth-proxy@sha256:b1458d7822f6bcfa8d70ea2ab15d4371ce723932c1728ca8a34624da047cf07e}
 
 QUADLET_DIR="${HOME}/.config/containers/systemd"
 UPDATER_DATA="${HOME}/.signalk-updater"
@@ -1062,8 +1074,28 @@ ok "snapshots dir and last-good.json present"
 
 # 8. Hardware detection
 section "Hardware detection"
-"$HERE/detect-hardware.sh" >"$UPDATER_DATA/hardware.json"
-ok "wrote $UPDATER_DATA/hardware.json"
+# Fresh detection clobbers operator toggles: detect-hardware.sh always
+# emits enabled=false. A re-run of the installer (the documented way to
+# refresh templates) used to silently switch off bluetooth/gpio
+# passthrough and drop the socketcan candidate. Carry those fields over
+# from the previous hardware.json. Per-device serial/can enabled flags
+# are NOT carried (the device set itself may have changed; the updater's
+# hardware apply flow owns those).
+HW_FRESH=$("$HERE/detect-hardware.sh")
+if command -v jq >/dev/null 2>&1 && [[ -s "$UPDATER_DATA/hardware.json" ]]; then
+    HW_MERGED=$(jq -s '
+        .[0] as $old
+        | .[1]
+        | .bluetooth.enabled = ($old.bluetooth.enabled // false)
+        | .gpio.enabled = ($old.gpio.enabled // false)
+        | if $old.socketcanCandidate != null
+          then .socketcanCandidate = $old.socketcanCandidate
+          else . end
+    ' "$UPDATER_DATA/hardware.json" <(printf '%s' "$HW_FRESH") 2>/dev/null) \
+        && [[ -n "$HW_MERGED" ]] && HW_FRESH="$HW_MERGED"
+fi
+printf '%s\n' "$HW_FRESH" >"$UPDATER_DATA/hardware.json"
+ok "wrote $UPDATER_DATA/hardware.json (operator toggles preserved)"
 
 # 9. Pull images
 section "Image pulls"
@@ -1306,6 +1338,25 @@ DOCTOR_QUADLET=$(sed \
     "$HERE/../../quadlets/signalk-doctor-server.container.template")
 atomic_write "$QUADLET_DIR/signalk-doctor-server.container" "$DOCTOR_QUADLET"
 
+# DBus auth proxy sidecar — only where the host actually runs a system
+# bus (the quadlet bind-mounts /run/dbus; writing it on a busless host
+# would give a unit that fail-loops on start). Written unconditionally
+# when the bus exists — even with bluetooth disabled — so the updater's
+# hardware-apply toggle can enable BLE later without needing the
+# installer tree present. Removed again if the host lost its bus so a
+# stale unit can't crash-loop.
+if [[ -S /run/dbus/system_bus_socket ]]; then
+    snapshot_existing signalk-dbus-proxy.container
+    PROXY_QUADLET=$(sed \
+        -e "s|__PROXY_IMAGE__|${PROXY_IMAGE}|g" \
+        "$HERE/../../quadlets/signalk-dbus-proxy.container.template")
+    atomic_write "$QUADLET_DIR/signalk-dbus-proxy.container" "$PROXY_QUADLET"
+elif [[ -f "$QUADLET_DIR/signalk-dbus-proxy.container" ]]; then
+    warn "host system D-Bus socket gone — removing stale signalk-dbus-proxy quadlet"
+    snapshot_existing signalk-dbus-proxy.container
+    rm -f "$QUADLET_DIR/signalk-dbus-proxy.container"
+fi
+
 ok "Quadlets written to $QUADLET_DIR"
 
 # 11. daemon-reload
@@ -1330,6 +1381,7 @@ section "Host CLI tools"
 bash "$HERE/install-recovery-script.sh"
 INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
 bash "$HERE/install-socketcan-script.sh"
+bash "$HERE/install-bluetooth-script.sh"
 
 # 11b. signalk-server drift apply
 # Re-runs of the installer may change PORT, the image tag (operator picks
@@ -1411,6 +1463,11 @@ restart_peer_unit() {
 }
 restart_peer_unit signalk-doctor-server.service || true
 restart_peer_unit signalk-updater-server.service || true
+# The dbus proxy is best-effort: it only exists where the host has a
+# system bus, and only matters once bluetooth passthrough is enabled.
+if [[ -f "$QUADLET_DIR/signalk-dbus-proxy.container" ]]; then
+    restart_peer_unit signalk-dbus-proxy.service || true
+fi
 
 # 13. Wait for health (first-boot tolerant per R1.3)
 section "Health checks"
@@ -2056,8 +2113,11 @@ if [[ "$VERIFY_MODE" = "1" ]]; then
         fi
     done
 
-    # Three services active
-    for u in signalk-server signalk-updater-server signalk-doctor-server; do
+    # Three services active (+ the dbus proxy where installed)
+    verify_units=(signalk-server signalk-updater-server signalk-doctor-server)
+    [[ -f "$QUADLET_DIR/signalk-dbus-proxy.container" ]] \
+        && verify_units+=(signalk-dbus-proxy)
+    for u in "${verify_units[@]}"; do
         active=$(systemctl --user is-active "${u}.service" 2>/dev/null || true)
         if [[ "$active" = "active" ]]; then
             verify_check "${u}.service" "ok"
