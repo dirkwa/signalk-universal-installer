@@ -1444,6 +1444,47 @@ cmd_bug_report() {
         else
             echo "(dmesg restricted to root on this host — try 'sudo dmesg' manually)"
         fi
+        echo
+        echo "=== pasta / passt (rootless networking backend) ==="
+        # podman >= 5 defaults rootless networking to pasta, but on Debian
+        # passt is only a Recommends of podman and Armbian ships with APT
+        # recommends off — podman looks healthy while every pasta-networked
+        # container (updater, doctor) fails to start (2026-07 Orange Pi
+        # field report).
+        if command -v pasta >/dev/null 2>&1; then
+            command -v pasta
+            pasta --version 2>&1 | head -1 || true
+        else
+            echo "(pasta NOT found — pasta-networked containers cannot start)"
+        fi
+        echo
+        echo "=== canboatjs native canSocket addon (server image) ==="
+        # canbus-canboatjs needs canboatjs's compiled SocketCAN addon. Its
+        # install script is `node-gyp rebuild || echo ...`, so a build skip
+        # (npm >= 12 script-approval gate, 2026-07 images) is silent and
+        # every host-side CAN check still passes. This probe separates
+        # "CAN host config broken" from "server image broken".
+        if [[ -n "$CTR_CMD" ]] \
+            && "$CTR_CMD" ps --format '{{.Names}}' 2>/dev/null | grep -qx 'signalk-server'; then
+            # Only exit status 1 proves the file is absent; any other
+            # status is the exec/timeout failing and is reported as
+            # inconclusive rather than MISSING.
+            addon_rc=0
+            # SC2086: $timeout_cmd is empty or two words, unquoted on purpose.
+            # shellcheck disable=SC2086
+            $timeout_cmd "$CTR_CMD" exec signalk-server test -f \
+                /home/node/signalk/node_modules/@canboat/canboatjs/build/Release/canSocket.node \
+                2>/dev/null || addon_rc=$?
+            if [[ "$addon_rc" -eq 0 ]]; then
+                echo "present"
+            elif [[ "$addon_rc" -eq 1 ]]; then
+                echo "MISSING — canbus-canboatjs connections cannot open can0"
+            else
+                echo "(probe inconclusive: exec exit ${addon_rc})"
+            fi
+        else
+            echo "(signalk-server not running; probe skipped)"
+        fi
     } >"$bundle/host-extra.txt" 2>&1
 
     # Tar it up.
