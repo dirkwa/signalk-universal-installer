@@ -67,6 +67,15 @@ or the Ports panel of an existing VS Code Remote-SSH window), then browse
 `http://localhost:10800/?folder=/workspaces/signalk-universal-installer`.
 Extensions there come from Open VSX (Claude Code is available).
 
+The `devpod up` process IS the tunnel — keep that terminal open. By
+default devpod also kills itself after ~90 idle seconds, which drops the
+forward mid-session and leaves the browser loading forever; disable that
+once per box:
+
+```bash
+devpod context set-options -o EXIT_AFTER_TIMEOUT=false
+```
+
 Alternatives for a native desktop VS Code:
 
 - **DevPod Desktop on the desktop** with an SSH provider pointing at the
@@ -81,12 +90,19 @@ Alternatives for a native desktop VS Code:
   signalk-universal-installer"`, user `node`, answer **Linux** at the
   platform prompt) also works but is the most fragile option.
 
-Troubleshooting: if a devpod tunnel fails with
-`.devpod-internal/0/NOTES.md: permission denied`, the box runs a rootless
-container runtime and devpod's workspace chown locked the agent out of its
-own feature staging. `host-prepare.sh` self-heals this on the next connect;
-the manual cure on the box is
-`podman unshare chown -R 0:0 <workspace-content>/.devcontainer/.devpod-internal`.
+Troubleshooting:
+
+- Tunnel fails with `.devpod-internal/0/NOTES.md: permission denied`: the
+  box runs a rootless container runtime and devpod's workspace chown
+  locked the agent out of its own feature staging. `host-prepare.sh`
+  self-heals this on the next connect; the manual cure on the box is
+  `podman unshare chown -R 0:0 <workspace-content>/.devcontainer/.devpod-internal`.
+- `error unset system credential helper exit status 5` in the `up` log is
+  cosmetic devpod noise (it unsets a git config key that was never set).
+- Browser IDE ignores the seeded dark theme: the browser caches the last
+  active theme per site from earlier sessions. Pick it once
+  (Ctrl+K Ctrl+T → "Default Dark Modern") or clear site data for the
+  10800 origin; fresh browsers pick up the server-side default directly.
 
 After the build:
 
