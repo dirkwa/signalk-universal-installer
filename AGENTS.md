@@ -18,6 +18,18 @@ The installer is a **one-shot bootstrapper**. After it finishes, systemd and the
 | [signalk-updater](https://github.com/dirkwa/signalk-updater) | Thin-shell plugin inside signalk-server. |
 | [signalk-doctor](https://github.com/dirkwa/signalk-doctor) | Thin-shell plugin inside signalk-server. |
 
+## Devcontainer
+
+A one-command development environment (pre-built server from the stack's own
+`ghcr.io/dirkwa/signalk-server:dirkwa` image, plugin linking, shellcheck,
+CodeRabbit CLI, Claude Code, Playwright e2e) lives under `.devcontainer/`
+with its workspace in `dev/`. It runs the dev signalk-server on **port 4000**
+and never touches a production install (production map: 80/3000 server, 3003
+updater, 3004 doctor). `dev/` and `.devcontainer/` are dev-only and NOT
+published by GitHub Pages. See docs/devcontainer.md; workspace-specific agent
+context is in `dev/CLAUDE.md`. The pre-PR checklist tooling (shellcheck,
+`cr review`) is available inside the container.
+
 ## Workflow Conventions
 
 This repo is maintained by Dirk Wahrheit. Workflow is deliberate; AI tools should follow it strictly.
@@ -41,7 +53,7 @@ This repo is maintained by Dirk Wahrheit. Workflow is deliberate; AI tools shoul
 
 Before pushing or opening a PR:
 
-1. `shellcheck installer/**/*.sh scripts/*.sh` — lints all shell.
+1. `shellcheck installer/**/*.sh scripts/*.sh .devcontainer/*.sh dev/*.sh` — lints all shell.
 2. `bash -n` on every script to catch syntax errors.
 3. Manual smoke: run the script on a clean VM or in a container, verify the documented behavior.
 4. `cr review --plain | tee /tmp/cr-review-<branch>.txt` — local CodeRabbit pass. Commit first, then review.
