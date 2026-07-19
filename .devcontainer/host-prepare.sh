@@ -4,7 +4,9 @@
 # without podman (or macOS/Windows via WSL) still gets a working
 # devcontainer — only sibling-container plugin dev is unavailable there,
 # which .devcontainer/post-start.sh reports from inside.
-set -u
+# Strict mode per repo convention; every fallible step below is guarded so
+# the script still never aborts devcontainer creation.
+set -euo pipefail
 
 # The devcontainer bind-mounts this DIRECTORY (not the socket file), so the
 # mount succeeds even when no socket exists yet. If podman is present, try

@@ -1,6 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const PORT = process.env.PORT ?? '4000';
+// e2e runs against its OWN demo server on a dedicated port (default 4100),
+// never against the developer's instance on 4000: reusing an arbitrary
+// running server means the bundled sample NMEA feed may be missing and the
+// suite outcome depends on unrelated state. Override with E2E_PORT.
+const PORT = process.env.E2E_PORT ?? '4100';
 
 export default defineConfig({
   testDir: './e2e',
@@ -18,11 +22,12 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-  // Starts the dev server with sample data if it isn't already running.
+  // demo-fg keeps the server in the foreground (exec, no daemonizing), so
+  // Playwright supervises the real server process and tears it down cleanly.
   webServer: {
-    command: './dev.sh demo',
+    command: `PORT=${PORT} ./dev.sh demo-fg`,
     url: `http://localhost:${PORT}/signalk`,
-    reuseExistingServer: true,
+    reuseExistingServer: false,
     timeout: 60_000,
   },
 });

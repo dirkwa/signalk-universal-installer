@@ -51,7 +51,7 @@ with `podman unshare chown -R 0:0 <repo>` afterwards. After the build:
 | e2e tests (Chromium)  | `cd dev && npm run test:e2e`             |
 | AI pair programming   | `claude` (terminal or VS Code panel)     |
 | AI code review        | `cr review --plain`                      |
-| Shell lint            | `shellcheck installer/**/*.sh scripts/*.sh` |
+| Shell lint            | `shellcheck installer/**/*.sh scripts/*.sh .devcontainer/*.sh dev/*.sh` |
 
 Dev config, installed plugins and security settings persist in the named
 volume `signalk-devpod` (mounted at `/home/node/.signalk`); Claude Code
@@ -182,7 +182,9 @@ VM as described in AGENTS.md.
 ## e2e testing
 
 Playwright + Chromium (with system deps) are pre-installed in the image.
-`cd dev && npm run test:e2e` starts the demo server automatically if needed
-and runs the smoke tests in `dev/e2e/`. The Playwright version is pinned in
-two places that must stay in sync: `.devcontainer/Dockerfile` (baked
-browser) and `dev/package.json` (`@playwright/test`).
+`cd dev && npm run test:e2e` starts its own foreground demo server on a
+dedicated port (4100, override with `E2E_PORT`) and runs the smoke tests
+in `dev/e2e/` — your dev instance on 4000 is neither reused nor touched.
+The Playwright version is pinned in two places that must stay in sync:
+`.devcontainer/Dockerfile` (baked browser) and `dev/package.json`
+(`@playwright/test`).
