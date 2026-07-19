@@ -451,6 +451,20 @@ check_aardvark_dns() {
     fi
 }
 
+# netavark's firewall driver execs the nft binary when it wires a container
+# network. nftables is only a Recommends of netavark on Debian, and Armbian
+# ships with APT::Install-Recommends off — podman looks healthy while every
+# bridge-networked container fails to start with "netavark: unable to
+# execute nft: No such file or directory". nft lives in /usr/sbin, which
+# user shells often drop from PATH, so probe the packaged locations too.
+check_nftables() {
+    if command -v nft >/dev/null 2>&1 || [[ -x /usr/sbin/nft || -x /sbin/nft ]]; then
+        ok "nftables present (netavark firewall backend)"
+    else
+        warn "nftables missing — installer will install it (netavark firewall for container networks)"
+    fi
+}
+
 check_subid() {
     if [[ ! -f /etc/subuid ]] || ! grep -q "^${USER}:" /etc/subuid; then
         warn "User $USER lacks subuid mapping — installer will run: sudo usermod --add-subuids 100000-165535"
@@ -633,6 +647,7 @@ main() {
     check_user_slice_delegation
     check_podman
     check_aardvark_dns
+    check_nftables
     check_subid
     check_linger
     check_storage_fs

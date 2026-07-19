@@ -654,15 +654,16 @@ fi
 # 3. Install podman if absent
 section "Podman"
 if ! command -v podman >/dev/null 2>&1; then
-    # passt and aardvark-dns are explicit, not left to podman's dependency
-    # pull: on Debian both are only a Recommends (of podman and netavark
-    # respectively), and Armbian ships with APT::Install-Recommends off —
+    # passt, aardvark-dns and nftables are explicit, not left to podman's
+    # dependency pull: on Debian all three are only a Recommends (of podman
+    # and netavark), and Armbian ships with APT::Install-Recommends off —
     # podman installs fine but the pasta binary is missing and every
-    # pasta-networked container (updater, doctor) fails to start, and
-    # without aardvark-dns every container on a user-defined network
-    # (grafana, questdb) has a dead nameserver.
-    info "Installing podman + passt + uidmap + slirp4netns + aardvark-dns (requires sudo)"
-    if ! pkg_install podman passt uidmap slirp4netns aardvark-dns; then
+    # pasta-networked container (updater, doctor) fails to start, without
+    # aardvark-dns every container on a user-defined network (grafana,
+    # questdb) has a dead nameserver, and without nftables netavark cannot
+    # exec nft, so bridge-networked containers fail to start at all.
+    info "Installing podman + passt + uidmap + slirp4netns + aardvark-dns + nftables (requires sudo)"
+    if ! pkg_install podman passt uidmap slirp4netns aardvark-dns nftables; then
         err "Could not install podman. Install it manually and re-run."
         exit 1
     fi
@@ -710,6 +711,27 @@ if ! have_aardvark_dns; then
         warn "aardvark-dns still not found — containers on user-defined"
         warn "networks (e.g. grafana/questdb) cannot resolve DNS. Install"
         warn "it manually (e.g. apt-get install aardvark-dns) if they fail."
+    fi
+fi
+
+# And the same Recommends gap once more for nftables: netavark's firewall
+# driver execs the nft binary when it wires a container network, but
+# nftables is only a Recommends of netavark — on recommends-off hosts
+# (Armbian) every bridge-networked container (grafana, questdb, backup)
+# fails to start with "netavark: unable to execute nft: No such file or
+# directory" (issue #171 field report). nft lives in /usr/sbin, which
+# user shells often drop from PATH, so probe the packaged locations too.
+# Warn-not-fatal: the core stack (host/pasta networking) works without it.
+have_nft() {
+    command -v nft >/dev/null 2>&1 || [[ -x /usr/sbin/nft || -x /sbin/nft ]]
+}
+if ! have_nft; then
+    info "Installing nftables (netavark firewall backend, requires sudo)"
+    pkg_install nftables || true
+    if ! have_nft; then
+        warn "nft still not found — containers on bridge networks (e.g."
+        warn "grafana/questdb) cannot start. Install it manually (e.g."
+        warn "apt-get install nftables) if they fail."
     fi
 fi
 
