@@ -39,7 +39,11 @@ staging=".devcontainer/.devpod-internal"
 if [ -d "${staging}" ] \
     && [ -n "$(find "${staging}" ! -writable -print -quit 2>/dev/null)" ] \
     && command -v podman >/dev/null 2>&1; then
-  if podman unshare chown -R 0:0 "${staging}" 2>/dev/null; then
+  podman unshare chown -R 0:0 "${staging}" 2>/dev/null || true
+  # Re-probe rather than trusting the chown exit code: the tree can stay
+  # unwritable (mode bits, ACLs, read-only mount) even after a "successful"
+  # chown, and the manual-fix hint must not be skipped in that case.
+  if [ -z "$(find "${staging}" ! -writable -print -quit 2>/dev/null)" ]; then
     echo "host-prepare: reclaimed ${staging} (rootless-runtime chown side effect)"
   else
     echo "host-prepare: ${staging} not writable — devpod tunnel may fail;"

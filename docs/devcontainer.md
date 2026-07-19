@@ -58,7 +58,9 @@ devpod up github.com/dirkwa/signalk-universal-installer \
 The `VERSION` pin matters: devpod's default openvscode is too old
 (v1.84) for current extensions such as Claude Code — set it on the FIRST
 `up` (an already-provisioned IDE keeps its installed version; to upgrade
-later, delete `~/.openvscode-server` inside the container and re-run).
+later, delete `~/.openvscode-server` inside the container and re-run —
+note this also resets browser-IDE settings and extensions, which live
+under that directory).
 The IDE serves on localhost:10800 on the box; reach it from your desktop
 with any SSH port forward (`ssh -L 10800:localhost:10800 <user>@<box>`,
 or the Ports panel of an existing VS Code Remote-SSH window), then browse

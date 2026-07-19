@@ -34,6 +34,8 @@ if [ ! -f "${OVS_USER_DIR}/settings.json" ]; then
   if printf '{\n  "workbench.colorTheme": "Default Dark Modern"\n}\n' \
       > "${OVS_USER_DIR}/settings.json" 2>/dev/null; then
     echo "==> Seeded dark theme for the browser IDE"
+  else
+    echo "==> INFO: could not seed the browser-IDE theme (non-fatal, defaults apply)"
   fi
 fi
 
