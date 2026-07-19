@@ -4,3 +4,5 @@ node_modules/
 .DS_Store
 cr-review*.txt
 .scratch/
+CLAUDE.local.md
+.devcontainer/.devpod-internal/
