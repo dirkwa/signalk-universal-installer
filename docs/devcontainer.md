@@ -60,15 +60,36 @@ one command — `signalk devpod up` — which also installs the pinned devpod
 CLI to `~/.local/bin` on first use, points it at podman where no docker
 exists, and disables the idle timeout below.
 
+To reach the IDE **without any SSH forward** (fully headless), bind the
+forwarder to a reachable address:
+
+```bash
+signalk devpod up --ide-option BIND_ADDRESS=100.64.0.10:10800   # e.g. your tailscale IP
+```
+
+The option sticks to the workspace. The IDE runs **without
+authentication** — anyone who reaches the port gets a terminal in the
+container. Bind a VPN address (e.g. tailscale) rather than `0.0.0.0`
+unless the network is fully trusted.
+
+Caveat: over plain `http://<ip>` the browser treats the IDE as an
+**insecure context** — the workbench loads, but webview-based extension
+panels (the Claude Code window, for one) stay blank. `http://localhost`
+is exempt, HTTPS always works. The clean fleet answer is
+`tailscale serve --bg 10800` on the box: an HTTPS URL on your tailnet,
+secure context included, no LAN exposure — and the missing IDE
+authentication stops mattering.
+
 The `VERSION` pin matters: devpod's default openvscode is too old
 (v1.84) for current extensions such as Claude Code — set it on the FIRST
 `up` (an already-provisioned IDE keeps its installed version; to upgrade
 later, delete `~/.openvscode-server` inside the container and re-run —
 note this also resets browser-IDE settings and extensions, which live
 under that directory).
-The IDE serves on localhost:10800 on the box; reach it from your desktop
-with any SSH port forward (`ssh -L 10800:localhost:10800 <user>@<box>`,
-or the Ports panel of an existing VS Code Remote-SSH window), then browse
+Without `BIND_ADDRESS` (the default), the IDE serves on localhost:10800
+on the box only; reach it from your desktop with any SSH port forward
+(`ssh -L 10800:localhost:10800 <user>@<box>`, or the Ports panel of an
+existing VS Code Remote-SSH window), then browse
 `http://localhost:10800/?folder=/workspaces/signalk-universal-installer`.
 Extensions there come from Open VSX (Claude Code is available).
 
