@@ -1,0 +1,99 @@
+{
+  "name": "signalk-dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  // Runs on the HOST before build: best-effort enables the host's podman
+  // socket and guarantees its mount-source dir exists (never fails).
+  "initializeCommand": "bash .devcontainer/host-prepare.sh",
+  "mounts": [
+    // Persistent SignalK dev config — survives container rebuilds. Named
+    // VOLUMES (not home-dir binds) on purpose: a volume inherits the
+    // image's node ownership, so it is writable under rootful docker,
+    // rootless docker AND podman alike (a rootless bind mount appears
+    // root-owned inside and breaks the node user). Deliberately separate
+    // from the production ~/.signalk on the host, which is never touched.
+    "source=signalk-devpod,target=/home/node/.signalk,type=volume",
+    // Persist Claude Code state across rebuilds: login/credentials AND
+    // per-project auto memory (~/.claude/projects/<project>/memory/).
+    "source=signalk-devpod-claude,target=/home/node/.claude,type=volume",
+    // Host's rootless podman socket DIRECTORY (probe-and-fallback): a
+    // directory mount never fails container creation when the socket is
+    // missing, and enabling podman.socket on the host later makes it
+    // appear inside the running container — no rebuild needed. host-prepare
+    // guarantees the source dir exists; post-start probes and prints an
+    // INFO when the socket is absent. Sibling containers spawned by
+    // signalk-container-based plugins land on the host, as in production.
+    // On macOS/Windows XDG_RUNTIME_DIR is unset and this degrades to an
+    // empty /tmp/podman dir — everything except sibling-container plugin
+    // dev still works.
+    "source=${localEnv:XDG_RUNTIME_DIR:/tmp}/podman,target=/run/host-podman,type=bind"
+  ],
+
+  // v2 stack port map: 80 or 3000 (signalk-server), 3003 (updater
+  // console), 3004 (doctor console). The dev instance uses 4000 so it
+  // can run side by side with a production install on the same host.
+  "forwardPorts": [4000],
+  "portsAttributes": {
+    "4000": { "label": "SignalK Dev Server", "onAutoForward": "notify" }
+  },
+
+  "containerEnv": {
+    "PORT": "4000",
+    "SIGNALK_NODE_CONFIG_DIR": "/home/node/.signalk",
+    // Container runtime access for signalk-container-based plugins.
+    // Points at the host socket dir mounted above; the image's
+    // containers.conf is repointed to the same path at build time.
+    "CONTAINER_RUNTIME": "podman",
+    "CONTAINER_HOST": "unix:///run/host-podman/podman.sock",
+    "DOCKER_HOST": "unix:///run/host-podman/podman.sock",
+    // Forward API keys from the host if present (never commit keys!)
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "CODERABBIT_API_KEY": "${localEnv:CODERABBIT_API_KEY}"
+  },
+
+  "features": {
+    // Official Anthropic feature: installs Claude Code CLI + VS Code extension.
+    // The :1.0 tag pins the install script; the CLI itself auto-updates.
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+
+  // ── NMEA 2000 hardware access (optional) ──────────────────────────────
+  // Network gateways (YDWG-02, W2K-1, or a TCP feed from the production
+  // instance) need nothing here — just add the connection in the admin UI.
+  //
+  // USB gateway (Actisense NGT-1 etc.). NOTE: a serial device is exclusive —
+  // production and dev cannot open it at the same time:
+  // "runArgs": ["--device=/dev/ttyUSB0", "--group-add=keep-groups"],
+  //
+  // Direct socketcan (CAN hat on a Pi). socketcan is bound to the network
+  // namespace, so host networking is required. Multiple readers are fine on
+  // CAN; sending is also fine (each instance claims its own N2K address):
+  // "runArgs": ["--network=host"],
+  //
+  // If the devcontainer itself runs under rootless podman and the host
+  // socket probe reports permission errors, map the container user onto
+  // the host user owning the socket:
+  // "runArgs": ["--userns=keep-id"],
+  // ──────────────────────────────────────────────────────────────────────
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postStartCommand": "bash .devcontainer/post-start.sh",
+
+  "remoteUser": "node",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-playwright.playwright"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}

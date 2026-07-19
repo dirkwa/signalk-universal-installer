@@ -1,0 +1,54 @@
+{
+  // Debug configs for the devcontainer dev workspace.
+  // Stop the background instance first: dev/dev.sh stop
+  // (or start the container with SK_DEV_AUTOSTART=0).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Requires a source checkout at dev/signalk-server (see
+      // docs/devcontainer.md, "Developing the server").
+      "name": "SignalK Dev Server (source checkout)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/dev/signalk-server/bin/signalk-server",
+      "args": ["-c", "/home/node/.signalk"],
+      "cwd": "${workspaceFolder}/dev/signalk-server",
+      "env": { "PORT": "4000" },
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"],
+      // Breakpoints hit in server code AND in plugins linked from
+      // dev/plugins/ — they run in the same Node process.
+      "outFiles": [
+        "${workspaceFolder}/dev/signalk-server/**/*.js",
+        "!**/node_modules/**"
+      ]
+    },
+    {
+      // Same checkout, fed with the bundled sample NMEA log. -s resolves
+      // relative to the config dir, so blank out SIGNALK_NODE_CONFIG_DIR:
+      // the config dir then defaults to the server root.
+      "name": "SignalK Dev Server (source checkout) + sample NMEA data",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/dev/signalk-server/bin/signalk-server",
+      "args": ["-s", "settings/volare-file-settings.json"],
+      "cwd": "${workspaceFolder}/dev/signalk-server",
+      "env": { "PORT": "4000", "SIGNALK_NODE_CONFIG_DIR": "" },
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      // No checkout needed: debugs the pre-built server baked into the
+      // image — breakpoints in plugins linked from dev/plugins/ work.
+      "name": "SignalK Dev Server (image-baked)",
+      "type": "node",
+      "request": "launch",
+      "program": "/home/node/signalk/node_modules/signalk-server/bin/signalk-server",
+      "args": ["-c", "/home/node/.signalk"],
+      "cwd": "/home/node/signalk/node_modules/signalk-server",
+      "env": { "PORT": "4000" },
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}

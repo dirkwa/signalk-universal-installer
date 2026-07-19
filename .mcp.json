@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.76",
+        "--browser", "chromium",
+        "--executable-path", "/usr/local/bin/chromium-baked"
+      ],
+      "env": {
+        "PLAYWRIGHT_BROWSERS_PATH": "/opt/playwright"
+      }
+    }
+  }
+}
