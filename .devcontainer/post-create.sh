@@ -56,6 +56,17 @@ done
 # ── 4. e2e test dependencies ────────────────────────────────────────────
 ( cd "${DEV_DIR}" && npm install )
 
+# ── 5. Claude Code binary sanity ────────────────────────────────────────
+# If the feature's npm postinstall was script-gated anyway, /usr/bin/claude
+# is an error stub. We cannot fix it as the node user (module dir is
+# root-owned) — detect and print the remediation instead of failing later
+# in a confusing place (broken plugin installs, missing skills).
+if command -v claude >/dev/null 2>&1 && ! claude --version >/dev/null 2>&1; then
+  echo "==> WARNING: claude native binary missing (npm script gate)."
+  echo "    Fix from the HOST:  docker exec -u root <container> \\"
+  echo "      node /usr/lib/node_modules/@anthropic-ai/claude-code/install.cjs"
+fi
+
 echo ""
 echo "==> Setup complete."
 echo "    Start dev server:   dev/dev.sh start    (http://localhost:4000)"

@@ -15,6 +15,14 @@ CMD ["/bin/sh"]
 
 USER root
 
+# npm >= 12 gates dependency lifecycle scripts (same trap as canboatjs in
+# the server image). The Claude Code devcontainer FEATURE builds on top of
+# this image as root and npm-installs @anthropic-ai/claude-code globally —
+# without this approval its postinstall is silently skipped and /usr/bin/
+# claude stays an error stub ("claude native binary not installed"),
+# which also breaks plugin/marketplace installs from .claude/settings.json.
+RUN printf 'allow-scripts[]=@anthropic-ai/claude-code\n' >> /root/.npmrc
+
 # ── Tools on top of the server image ────────────────────────────────────
 # shellcheck: required by the repo's pre-PR checklist (AGENTS.md).
 # can-utils/socat: N2K and serial debugging (git, jq, curl already in base).
