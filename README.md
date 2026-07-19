@@ -53,6 +53,8 @@ One command gives you a complete, isolated dev environment — the stack's own p
 ```bash
 devpod up github.com/dirkwa/signalk-universal-installer
 # or: clone + VS Code → "Reopen in Container"
+# or, on a box the installer already provisioned (installs devpod itself):
+signalk devpod up
 ```
 
 See [docs/devcontainer.md](docs/devcontainer.md) for plugin/server/installer workflows, NMEA 2000 access, and troubleshooting.

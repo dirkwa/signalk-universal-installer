@@ -24,6 +24,10 @@
 #                          across reboots until 'signalk start'. (On Windows this
 #                          stops the whole VM instead.)
 #   signalk start          start signalk-server again after 'signalk stop'
+#   signalk devpod [up|ssh|stop|delete|list]
+#                          zero-setup dev environment (devcontainer, browser
+#                          IDE on :10800). Installs the pinned devpod CLI to
+#                          ~/.local/bin on first use; docs/devcontainer.md
 #   signalk uninstall      stop services + remove Quadlets (preserves data)
 #   signalk version        print installer version
 #   signalk help           show this help
@@ -1734,6 +1738,82 @@ cmd_bug_report() {
     fi
 }
 
+# ── signalk devpod ──────────────────────────────────────────────────────
+# Zero-setup development environment on an installer-provisioned box:
+# installs the pinned devpod CLI on first use, points its docker provider
+# at podman where no docker exists, disables devpod's idle timeout (it
+# kills the browser-IDE port forward mid-session), then delegates to the
+# repo devcontainer with the browser IDE. Field notes and desktop
+# alternatives: docs/devcontainer.md.
+DEVPOD_VERSION="v0.6.15"
+DEVPOD_OPENVSCODE_VERSION="v1.109.5"
+DEVPOD_SOURCE="github.com/dirkwa/signalk-universal-installer"
+DEVPOD_WORKSPACE="signalk-universal-installer"
+
+devpod_bin() {
+    if command -v devpod >/dev/null 2>&1; then
+        command -v devpod
+    else
+        echo "${HOME}/.local/bin/devpod"
+    fi
+}
+
+cmd_devpod() {
+    local sub="${1:-up}"
+    shift || true
+    local bin arch
+    bin="$(devpod_bin)"
+
+    if [[ ! -x "$bin" ]]; then
+        case "$(uname -m)" in
+            x86_64)        arch="amd64" ;;
+            aarch64|arm64) arch="arm64" ;;
+            *)
+                echo "[ERR] Unsupported architecture for devpod: $(uname -m)" >&2
+                exit 1
+                ;;
+        esac
+        echo "[i] Installing devpod ${DEVPOD_VERSION} to ${bin}"
+        mkdir -p "$(dirname "$bin")"
+        if ! curl -fsSL -o "$bin" \
+            "https://github.com/loft-sh/devpod/releases/download/${DEVPOD_VERSION}/devpod-linux-${arch}"; then
+            echo "[ERR] devpod download failed" >&2
+            exit 1
+        fi
+        chmod +x "$bin"
+    fi
+
+    # Podman-only hosts (the installer's default runtime): point the
+    # docker provider at podman. Hosts with a real docker keep their setup.
+    if ! command -v docker >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then
+        "$bin" provider add docker -o DOCKER_PATH="$(command -v podman)" >/dev/null 2>&1 \
+            || "$bin" provider set-options docker -o DOCKER_PATH="$(command -v podman)" >/dev/null 2>&1 \
+            || true
+    fi
+    # devpod exits after ~90 idle seconds by default, taking the browser
+    # IDE's port forward with it — disable once; harmless if repeated.
+    "$bin" context set-options -o EXIT_AFTER_TIMEOUT=false >/dev/null 2>&1 || true
+
+    case "$sub" in
+        up)
+            echo "[i] Browser IDE will serve on http://localhost:10800 — keep this command running,"
+            echo "    it is the tunnel. First run downloads the dev image (a few minutes)."
+            exec "$bin" up "$DEVPOD_SOURCE" \
+                --ide openvscode --ide-option VERSION="$DEVPOD_OPENVSCODE_VERSION" "$@"
+            ;;
+        ssh|stop|delete)
+            exec "$bin" "$sub" "$DEVPOD_WORKSPACE" "$@"
+            ;;
+        list)
+            exec "$bin" list "$@"
+            ;;
+        *)
+            echo "[ERR] Unknown devpod subcommand: $sub (use up|ssh|stop|delete|list)" >&2
+            exit 1
+            ;;
+    esac
+}
+
 case "${1:-help}" in
     health)     cmd_health ;;
     recover)    shift; cmd_recover "$@" ;;
@@ -1745,6 +1825,7 @@ case "${1:-help}" in
     bug-report) shift; cmd_bug_report "$@" ;;
     stop)       cmd_stop ;;
     start)      cmd_start ;;
+    devpod)     shift; cmd_devpod "$@" ;;
     uninstall)  cmd_uninstall ;;
     version|--version|-v) cmd_version ;;
     help|--help|-h) usage ;;

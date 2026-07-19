@@ -55,6 +55,11 @@ devpod up github.com/dirkwa/signalk-universal-installer \
   --ide openvscode --ide-option VERSION=v1.109.5
 ```
 
+On a box provisioned by the universal installer, all of this section is
+one command — `signalk devpod up` — which also installs the pinned devpod
+CLI to `~/.local/bin` on first use, points it at podman where no docker
+exists, and disables the idle timeout below.
+
 The `VERSION` pin matters: devpod's default openvscode is too old
 (v1.84) for current extensions such as Claude Code — set it on the FIRST
 `up` (an already-provisioned IDE keeps its installed version; to upgrade
