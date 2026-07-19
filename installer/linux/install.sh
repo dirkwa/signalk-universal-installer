@@ -251,8 +251,9 @@ fi
 # image-based: it has no dnf at runtime and an immutable /usr, so packages can
 # only be layered via `rpm-ostree install` + a reboot — hostile to a one-shot
 # installer. We therefore never try to install on CoreOS; the only packages
-# this installer needs (podman, slirp4netns, uidmap, fuse-overlayfs) are all
-# pre-baked on the podman-machine image, and jq is no longer host-installed.
+# this installer needs (podman, passt, slirp4netns, uidmap, fuse-overlayfs)
+# are all pre-baked on the podman-machine image, and jq is no longer
+# host-installed.
 #
 # Args are Debian package names; we translate the few that differ on Fedora.
 # Returns non-zero (without aborting the caller) when it genuinely couldn't
@@ -653,13 +654,35 @@ fi
 # 3. Install podman if absent
 section "Podman"
 if ! command -v podman >/dev/null 2>&1; then
-    info "Installing podman + uidmap + slirp4netns (requires sudo)"
-    if ! pkg_install podman uidmap slirp4netns; then
+    # passt is explicit, not left to podman's dependency pull: on Debian it
+    # is only a Recommends of podman, and Armbian ships with
+    # APT::Install-Recommends off — podman installs fine but the pasta
+    # binary is missing and every pasta-networked container (updater,
+    # doctor) fails to start.
+    info "Installing podman + passt + uidmap + slirp4netns (requires sudo)"
+    if ! pkg_install podman passt uidmap slirp4netns; then
         err "Could not install podman. Install it manually and re-run."
         exit 1
     fi
 fi
 ok "$(podman --version)"
+
+# Hosts that arrived WITH podman preinstalled (Armbian images, prior manual
+# installs) skip the block above, so ensure pasta separately. podman >= 5
+# defaults rootless networking to pasta; without the binary the updater and
+# doctor containers fail to start even though podman itself looks healthy.
+# Deliberately warn-not-fatal: a host configured to use slirp4netns via
+# containers.conf works without pasta, and aborting the whole install
+# over the default-backend package would block it.
+if ! command -v pasta >/dev/null 2>&1; then
+    info "Installing passt (pasta rootless networking backend, requires sudo)"
+    pkg_install passt || true
+    if ! command -v pasta >/dev/null 2>&1; then
+        warn "pasta still not found — updater/doctor containers may fail"
+        warn "to start. Install it manually (e.g. apt-get install passt)"
+        warn "if they do."
+    fi
+fi
 
 # Re-gate the podman version AFTER the install. Preflight runs before this
 # block, so on a host that arrived without podman its check_podman only said

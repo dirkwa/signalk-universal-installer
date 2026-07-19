@@ -464,6 +464,40 @@ cmd_status() {
         warn "No CAN interface present."
     fi
 
+    # A host-side-perfect CAN setup can still be dead in SignalK when the
+    # server image shipped without canboatjs's compiled SocketCAN addon
+    # (its install script is `node-gyp rebuild || echo ...` — a build
+    # failure or an npm >= 12 script-approval skip is SILENT, and the
+    # canbus-canboatjs connection then errors with "Failed to load native
+    # canSocket module"). Probe the running container so `status` points
+    # at the real culprit instead of leaving every host check green.
+    section "Server container"
+    if ! command -v podman >/dev/null 2>&1; then
+        info "(podman not found — skipping in-container canboatjs check)"
+    elif ! podman container exists signalk-server 2>/dev/null \
+        || [[ "$(podman inspect --format '{{.State.Running}}' signalk-server 2>/dev/null)" != "true" ]]; then
+        info "(signalk-server container not running — skipping in-container canboatjs check)"
+    else
+        # Only exit status 1 proves the file is absent — any other
+        # status is the exec itself failing (container flapping,
+        # podman error) and must not send the user chasing a rebuild.
+        local addon_rc=0
+        podman exec signalk-server test -f \
+            /home/node/signalk/node_modules/@canboat/canboatjs/build/Release/canSocket.node \
+            2>/dev/null || addon_rc=$?
+        if [[ "$addon_rc" -eq 0 ]]; then
+            ok "canboatjs native canSocket addon present in server image"
+        elif [[ "$addon_rc" -eq 1 ]]; then
+            err "canboatjs native canSocket addon MISSING in server image —"
+            err "NMEA 2000 connections of type canbus-canboatjs cannot open"
+            err "can0. Update to a fixed server image (signalk update), or as"
+            err "a stopgap (lost on container re-create):"
+            err "  podman exec signalk-server sh -c 'cd /home/node/signalk/node_modules/@canboat/canboatjs && npx node-gyp rebuild'"
+        else
+            warn "canboatjs addon probe inconclusive (podman exec exit ${addon_rc})"
+        fi
+    fi
+
     # ─── live-derived detected configuration ─────────────────────────
     # Identify which catalog HAT the live system most resembles. This
     # is computed fresh from config.txt + lsmod + ip link every run, so
