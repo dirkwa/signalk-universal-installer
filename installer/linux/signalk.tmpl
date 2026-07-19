@@ -1515,6 +1515,29 @@ cmd_bug_report() {
             echo "(aardvark-dns NOT found — DNS is dead on user-defined networks)"
         fi
         echo
+        echo "=== nftables (netavark firewall backend) ==="
+        # Third Recommends gap in the same family: netavark execs nft when
+        # it wires a container network, but nftables is only a Recommends
+        # of netavark — on recommends-off hosts (Armbian) every bridge-
+        # networked container (grafana, questdb, backup) fails to start
+        # with "netavark: unable to execute nft" (issue #171 field
+        # report). nft lives in /usr/sbin, often not on user PATH.
+        nft_bin="$(command -v nft 2>/dev/null || true)"
+        if [[ -z "$nft_bin" ]]; then
+            for c in /usr/sbin/nft /sbin/nft; do
+                if [[ -x "$c" ]]; then
+                    nft_bin="$c"
+                    break
+                fi
+            done
+        fi
+        if [[ -n "$nft_bin" ]]; then
+            echo "$nft_bin"
+            "$nft_bin" --version 2>&1 | head -1 || true
+        else
+            echo "(nft NOT found — netavark cannot wire bridge networks)"
+        fi
+        echo
         echo "=== canboatjs native canSocket addon (server image) ==="
         # canbus-canboatjs needs canboatjs's compiled SocketCAN addon. Its
         # install script is `node-gyp rebuild || echo ...`, so a build skip
