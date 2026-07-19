@@ -23,6 +23,20 @@ else
   echo "    then restart this container (no rebuild — the socket appears in the mounted dir)."
 fi
 
+# ── Browser IDE (openvscode) defaults ───────────────────────────────────
+# Seed a dark theme into openvscode's server-side User settings — only
+# when no settings exist yet, so a developer's later theme choice is
+# never overwritten. Desktop VS Code windows use the user's own theme and
+# are unaffected. (mkdir is safe: the openvscode tarball ships no data/.)
+OVS_USER_DIR="${HOME}/.openvscode-server/data/User"
+if [ ! -f "${OVS_USER_DIR}/settings.json" ]; then
+  mkdir -p "${OVS_USER_DIR}" 2>/dev/null || true
+  if printf '{\n  "workbench.colorTheme": "Default Dark Modern"\n}\n' \
+      > "${OVS_USER_DIR}/settings.json" 2>/dev/null; then
+    echo "==> Seeded dark theme for the browser IDE"
+  fi
+fi
+
 # ── CodeRabbit CLI: non-interactive auth if an API key is forwarded ─────
 # (Browser login does not survive container rebuilds; an API key from the
 # host via CODERABBIT_API_KEY does. Alternative: use the native Claude Code
