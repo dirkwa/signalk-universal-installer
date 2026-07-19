@@ -75,6 +75,13 @@ Label=io.signalk.role=dbus-proxy
 [Service]
 Restart=on-failure
 RestartSec=5
+# The proxy never traps SIGTERM, so with StopTimeout=5 every stop ends
+# in podman's SIGKILL — exit 137 (128+9), or 143 (128+15) should a
+# future image start honoring SIGTERM. Without this, each ordinary
+# `systemctl --user stop` leaves the unit in `failed` (Result:
+# exit-code), which reads as a crash in `signalk bluetooth status` and
+# the journal. Kill-on-stop is this container's normal shutdown.
+SuccessExitStatus=143 137
 
 [Install]
 WantedBy=default.target

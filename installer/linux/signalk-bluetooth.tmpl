@@ -311,6 +311,10 @@ cmd_disable() {
     # Leave the proxy unit installed (cheap, and re-enable stays one
     # command) but stop the running instance — nothing consumes it now.
     systemctl --user stop signalk-dbus-proxy.service 2>/dev/null || true
+    # Belt-and-braces for quadlets predating SuccessExitStatus=137: the
+    # proxy dies by SIGKILL on every stop (no SIGTERM handler), and the
+    # resulting `failed` unit state reads as a crash in `status`.
+    systemctl --user reset-failed signalk-dbus-proxy.service 2>/dev/null || true
     ok "bluetooth passthrough disabled"
 }
 
