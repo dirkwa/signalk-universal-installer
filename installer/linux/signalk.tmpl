@@ -7,6 +7,7 @@
 #   signalk recover [...]  delegate to ~/.local/bin/signalk-recovery
 #   signalk socketcan [..] Pi CAN-HAT detection + setup recipe
 #   signalk bluetooth [..] BLE / D-Bus passthrough (status | enable | disable)
+#   signalk timesync [...] host clock + timezone from GPS (status)
 #   signalk update         refresh installer scripts + Quadlet templates via doctor
 #   signalk resetadmin [user]
 #                          reset (or create) an admin user's password for the
@@ -103,7 +104,7 @@ usage() {
         # bluetooth is filtered for the same reason as socketcan: host
         # bluez/D-Bus passthrough has no equivalent inside the Podman
         # machine VM.
-        printf '%s\n' "$help" | grep -v -e 'signalk socketcan' -e 'signalk bluetooth'
+        printf '%s\n' "$help" | grep -v -e 'signalk socketcan' -e 'signalk bluetooth' -e 'signalk timesync'
     else
         printf '%s\n' "$help"
     fi
@@ -204,6 +205,18 @@ cmd_bluetooth() {
         exit 1
     fi
     exec "$HOME/.local/bin/signalk-bluetooth" "$@"
+}
+
+cmd_timesync() {
+    # Root-owned host agent (see install.sh step 17b) — /usr/local/bin,
+    # not ~/.local/bin: the systemd system timer executes it as root and
+    # root must never run a user-writable file.
+    if [[ ! -x /usr/local/bin/signalk-timesync ]]; then
+        echo "[ERR] /usr/local/bin/signalk-timesync is missing." >&2
+        echo "  Re-run the bash bootstrap one-liner (needs sudo) to install it." >&2
+        exit 1
+    fi
+    exec /usr/local/bin/signalk-timesync "$@"
 }
 
 cmd_update() {
@@ -642,6 +655,10 @@ cmd_uninstall() {
     echo "  rm -rf ~/.signalk ~/.signalk-updater ~/.signalk-doctor ~/.signalk-backup"
     echo "  rm -f  ~/.local/bin/signalk ~/.local/bin/signalk-recovery \\"
     echo "         ~/.local/bin/signalk-socketcan ~/.local/bin/signalk-bluetooth"
+    echo "  sudo systemctl disable --now signalk-timesync.timer"
+    echo "  sudo rm -f /usr/local/bin/signalk-timesync /etc/default/signalk-timesync \\"
+    echo "         /etc/systemd/system/signalk-timesync.{service,timer}"
+    echo "  sudo systemctl daemon-reload"
     echo "Done."
 }
 
@@ -1470,6 +1487,21 @@ cmd_bug_report() {
             echo "(dmesg restricted to root on this host — try 'sudo dmesg' manually)"
         fi
         echo
+        echo "=== signalk-timesync (host clock/timezone from GPS) ==="
+        # Wrong boat time breaks TLS, log ordering, and track timestamps;
+        # capture whether the host agent exists, ticks, and what its last
+        # runs decided.
+        if [[ -x /usr/local/bin/signalk-timesync ]]; then
+            # status (not list-timers): a disabled timer disappears from
+            # list-timers, and "disabled" vs "not installed" matters here.
+            systemctl status --no-pager signalk-timesync.timer 2>&1 | sed -n '1,4p' || true
+            timedatectl 2>&1 | sed -n '1,5p' || true
+            journalctl -u signalk-timesync.service -n 10 --no-pager -o short-iso 2>/dev/null \
+                || echo "(journal not readable as this user)"
+        else
+            echo "(signalk-timesync not installed)"
+        fi
+        echo
         echo "=== pasta / passt (rootless networking backend) ==="
         # podman >= 5 defaults rootless networking to pasta, but on Debian
         # passt is only a Recommends of podman and Armbian ships with APT
@@ -1707,6 +1739,7 @@ case "${1:-help}" in
     recover)    shift; cmd_recover "$@" ;;
     socketcan)  shift; cmd_socketcan "$@" ;;
     bluetooth)  shift; cmd_bluetooth "$@" ;;
+    timesync)   shift; cmd_timesync "$@" ;;
     update)     cmd_update ;;
     resetadmin) shift; cmd_resetadmin "$@" ;;
     bug-report) shift; cmd_bug_report "$@" ;;

@@ -41,6 +41,7 @@ echo "  ~/.signalk-doctor/         — Snapshots, last-good.json"
 echo "  ~/.signalk-backup/         — Backup repo (if present)"
 echo "  ~/.local/bin/signalk-recovery — Host recovery script"
 echo "  ~/.local/bin/signalk-{socketcan,bluetooth} — hardware helpers"
+echo "  signalk-timesync (system timer)   — disable: sudo systemctl disable --now signalk-timesync.timer"
 echo
 echo "To purge ALL data, run:  rm -rf ~/.signalk ~/.signalk-updater ~/.signalk-doctor ~/.signalk-backup"
 echo "Done."

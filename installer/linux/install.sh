@@ -100,6 +100,7 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/signalk-recovery.tmpl \
         installer/linux/signalk-socketcan.tmpl \
         installer/linux/signalk-bluetooth.tmpl \
+        installer/linux/signalk-timesync.tmpl \
         installer/linux/legacy-cleanup.sh \
         installer/linux/lib/colors.sh \
         installer/linux/lib/distro.sh \
@@ -1543,6 +1544,12 @@ fi
 # posture (some plugins try to compile native bindings that fail silently).
 section "Installing SignalK plugins"
 SK_PLUGINS=(signalk-container signalk-updater signalk-doctor)
+# Support libraries (not plugins — no auto-enable, no appstore entry).
+# tz-lookup: 70KB pure-JS lat/lon → IANA-zone lookup the host's
+# signalk-timesync agent invokes inside the container (the host has no
+# Node; the container has no timezone-setting powers — each side does
+# what only it can).
+SK_LIBS=(tz-lookup)
 mkdir -p "$HOME/.signalk"
 
 # Cold install of three plugins + their transitive deps over the network
@@ -1597,7 +1604,7 @@ timeout 900 podman run --rm \
     -v "$HOME/.signalk:/home/node/.signalk:Z" \
     --entrypoint sh \
     "$SK_IMAGE" \
-    -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]}" >"$NPM_LOG" 2>&1 || NPM_RC=$?
+    -c "cd /home/node/.signalk && npm install --ignore-scripts --no-audit --no-fund --no-progress ${SK_PLUGINS[*]} ${SK_LIBS[*]}" >"$NPM_LOG" 2>&1 || NPM_RC=$?
 npm_hb_cleanup
 trap - EXIT INT TERM
 if [[ "$NPM_RC" -eq 0 ]]; then
@@ -1607,6 +1614,13 @@ if [[ "$NPM_RC" -eq 0 ]]; then
             v=$(grep -m1 '"version"' "$HOME/.signalk/node_modules/$p/package.json" 2>/dev/null \
                 | sed 's/.*"\([0-9][^"]*\)".*/\1/')
             ok "$p@${v:-?}"
+        else
+            warn "$p — install reported ok but module dir is missing"
+        fi
+    done
+    for p in "${SK_LIBS[@]}"; do
+        if [[ -d "$HOME/.signalk/node_modules/$p" ]]; then
+            ok "$p (support library)"
         else
             warn "$p — install reported ok but module dir is missing"
         fi
@@ -2077,6 +2091,61 @@ else
     printf '%s\n' "$JOURNALD_DESIRED" | $SUDO install -m 0644 /dev/stdin "$JOURNALD_DROPIN"
     $SUDO systemctl restart systemd-journald
     ok "journald persistent + capped applied"
+fi
+
+# 17b. Host time & timezone sync agent.
+#
+# Root-side by necessity: CLOCK_REALTIME is not namespaced (a rootless
+# container can never hold CAP_SYS_TIME in the initial userns), and
+# timedated's set-timezone hits polkit auth_admin for session-less
+# users — so the in-container plugins (set-system-time,
+# signalk-set-gps-timezone's timedatectl path) are structurally unable
+# to do this. A root systemd timer has both powers natively; it reads
+# GPS datetime/position from the local SignalK REST API (with the
+# doctor's admin token) and only ever steps the clock when the host has
+# no NTP sync. Content-compared like the journald drop-in so no-change
+# re-runs stay sudo-free.
+section "Time & timezone sync (signalk-timesync)"
+TIMESYNC_BIN=/usr/local/bin/signalk-timesync
+TIMESYNC_DESIRED=$(sed \
+    -e "s/__SK_USER__/${USER}/g" \
+    -e "s/__SK_HTTP_PORT__/${SK_HTTP_PORT}/g" \
+    "$HERE/signalk-timesync.tmpl")
+TIMESYNC_SERVICE='# Installed by signalk-universal-installer
+[Unit]
+Description=SignalK GPS time & timezone sync (one pass)
+ConditionPathExists=/usr/local/bin/signalk-timesync
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/signalk-timesync run'
+TIMESYNC_TIMER='# Installed by signalk-universal-installer
+[Unit]
+Description=SignalK GPS time & timezone sync
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=300
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target'
+if [[ "$(cat "$TIMESYNC_BIN" 2>/dev/null)" == "$TIMESYNC_DESIRED" ]] \
+    && [[ "$(cat /etc/systemd/system/signalk-timesync.service 2>/dev/null)" == "$TIMESYNC_SERVICE" ]] \
+    && [[ "$(cat /etc/systemd/system/signalk-timesync.timer 2>/dev/null)" == "$TIMESYNC_TIMER" ]]; then
+    ok "signalk-timesync already installed (skipping)"
+else
+    info "Installing signalk-timesync agent + timer (requires sudo)"
+    if printf '%s\n' "$TIMESYNC_DESIRED" | $SUDO install -m 0755 -o root -g root /dev/stdin "$TIMESYNC_BIN" \
+        && printf '%s\n' "$TIMESYNC_SERVICE" | $SUDO install -m 0644 /dev/stdin /etc/systemd/system/signalk-timesync.service \
+        && printf '%s\n' "$TIMESYNC_TIMER" | $SUDO install -m 0644 /dev/stdin /etc/systemd/system/signalk-timesync.timer \
+        && $SUDO systemctl daemon-reload \
+        && $SUDO systemctl enable --now signalk-timesync.timer; then
+        ok "signalk-timesync timer enabled (clock: GPS when no NTP; timezone: GPS position)"
+    else
+        warn "could not install signalk-timesync; host clock/timezone won't follow GPS."
+        warn "Re-run the installer with sudo available to add it."
+    fi
 fi
 
 # 18. Mark bootstrap-complete

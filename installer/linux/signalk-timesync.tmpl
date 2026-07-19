@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# signalk-timesync — keep the HOST clock and timezone aligned with what
+# the boat's GPS knows, via the local SignalK server.
+#
+# Why this runs on the host, as root, and not as a SignalK plugin:
+# CLOCK_REALTIME is not namespaced — setting it needs CAP_SYS_TIME in the
+# *initial* user namespace, which a rootless container can never hold, so
+# in-container plugins (set-system-time) are kernel-blocked no-ops. And
+# timezone changes via timedated hit polkit's auth_admin for session-less
+# users. A root-owned host timer has both powers natively; the container
+# only supplies the data.
+#
+# Installed by signalk-universal-installer to /usr/local/bin (root:root —
+# deliberately NOT under the user's home: the systemd system service runs
+# this as root, and root must never execute a user-writable file). The
+# __SK_USER__ / __SK_HTTP_PORT__ placeholders are substituted at install
+# time. Driven by signalk-timesync.timer; `signalk timesync` delegates
+# here for status.
+#
+# Escape hatches (no file exists by default — hard-enabled by design):
+#   /etc/default/signalk-timesync with SIGNALK_TIMESYNC=off        → agent off
+#                                  or SIGNALK_TIMESYNC_TZ=off      → clock only
+
+set -euo pipefail
+
+SK_USER="__SK_USER__"
+SK_URL="http://127.0.0.1:__SK_HTTP_PORT__"
+# GPS clock wins only when NTP doesn't: skip stepping while the host is
+# NTP-synchronized. Below this offset we never touch a free-running
+# clock either — REST + delta latency is ~1-2s and stepping the clock
+# for that would churn journald ordering for nothing.
+STEP_THRESHOLD_S=10
+# Data older than this (measured against the server's OWN clock, so the
+# check stays valid even when absolute time is wrong — both timestamps
+# come from the same clock domain) is not acted on.
+MAX_AGE_S=60
+
+# shellcheck disable=SC1091
+[[ -f /etc/default/signalk-timesync ]] && . /etc/default/signalk-timesync
+[[ "${SIGNALK_TIMESYNC:-on}" == "off" ]] && exit 0
+
+log() { echo "$*"; }
+
+home_dir() { getent passwd "$SK_USER" | cut -d: -f6; }
+
+api() {
+    curl -fsS -m 5 -H "Authorization: Bearer $TOKEN" \
+        "$SK_URL/signalk/v1/api/vessels/self/$1" 2>/dev/null
+}
+
+# ISO8601 → epoch seconds; empty on parse failure.
+epoch() { date -u -d "$1" +%s 2>/dev/null || true; }
+
+cmd_run() {
+    if [[ "$(id -u)" -ne 0 ]]; then
+        echo "run must execute as root (systemd timer does); use 'status' instead" >&2
+        exit 1
+    fi
+    command -v jq >/dev/null 2>&1 || { log "jq not installed — skipping"; exit 0; }
+
+    local hd
+    hd=$(home_dir)
+    TOKEN=$(cat "$hd/.signalk-doctor/signalk-token" 2>/dev/null || true)
+    [[ -n "$TOKEN" ]] || { log "no signalk token at $hd/.signalk-doctor/signalk-token — skipping"; exit 0; }
+
+    # ── clock ────────────────────────────────────────────────────────
+    local dt_json value ts ts_epoch now age gps
+    if dt_json=$(api navigation/datetime) && [[ -n "$dt_json" ]]; then
+        value=$(jq -r '.value // empty' <<<"$dt_json")
+        ts=$(jq -r '.timestamp // empty' <<<"$dt_json")
+        ts_epoch=$(epoch "$ts")
+        now=$(date -u +%s)
+        gps=$(epoch "$value")
+        if [[ -z "$value" || -z "$gps" || -z "$ts_epoch" ]]; then
+            log "no parseable GPS datetime available — clock unchanged"
+        elif age=$(( now - ts_epoch )); (( age < 0 || age > MAX_AGE_S )); then
+            log "GPS datetime stale (${age}s) — clock unchanged"
+        elif [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]]; then
+            : # NTP owns the clock; nothing to do (and no log spam every tick)
+        else
+            local off=$(( gps - now ))
+            if (( off >= STEP_THRESHOLD_S || off <= -STEP_THRESHOLD_S )); then
+                date -u -s "@$gps" >/dev/null
+                log "stepped clock by ${off}s from GPS (no NTP sync)"
+            fi
+        fi
+    else
+        log "signalk-server unreachable — skipping"
+        exit 0
+    fi
+
+    # ── timezone ─────────────────────────────────────────────────────
+    [[ "${SIGNALK_TIMESYNC_TZ:-on}" == "off" ]] && exit 0
+    local pos_json lat lon tz cur
+    pos_json=$(api navigation/position) || true
+    lat=$(jq -r '.value.latitude // empty' <<<"${pos_json:-}")
+    lon=$(jq -r '.value.longitude // empty' <<<"${pos_json:-}")
+    ts=$(jq -r '.timestamp // empty' <<<"${pos_json:-}")
+    ts_epoch=$(epoch "$ts")
+    now=$(date -u +%s)
+    # Coordinates cross the container→host trust boundary and get
+    # interpolated into a node -e expression below — same strictness as
+    # the tz name: plain decimal numbers only, nothing else runs.
+    local num_re='^-?[0-9]{1,3}(\.[0-9]{1,12})?$'
+    if [[ -z "$ts_epoch" || ! "$lat" =~ $num_re || ! "$lon" =~ $num_re ]] \
+        || { age=$(( now - ts_epoch )); (( age < 0 || age > MAX_AGE_S )); }; then
+        log "no fresh GPS position — timezone unchanged"
+        exit 0
+    fi
+    # tz-lookup is a 70KB pure-JS package the installer drops into
+    # ~/.signalk/node_modules; the lookup runs inside the (rootless,
+    # user-owned) server container, so drop root for the podman call.
+    tz=$(runuser -u "$SK_USER" -- env "XDG_RUNTIME_DIR=/run/user/$(id -u "$SK_USER")" \
+        podman exec signalk-server node -e \
+        "console.log(require('/home/node/.signalk/node_modules/tz-lookup')($lat,$lon))" \
+        2>/dev/null || true)
+    if [[ -z "$tz" ]]; then
+        log "tz-lookup unavailable (re-run the installer to add it) — timezone unchanged"
+        exit 0
+    fi
+    # Strict validation: the value crosses a trust boundary (computed in
+    # the container) and becomes a root-run command argument. Must be a
+    # real zone name AND resolve to a zoneinfo file.
+    if [[ ! "$tz" =~ ^[A-Za-z0-9_+/-]{1,64}$ || ! -f "/usr/share/zoneinfo/$tz" ]]; then
+        log "tz-lookup returned invalid zone '$tz' — timezone unchanged"
+        exit 0
+    fi
+    cur=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+    if [[ "$tz" != "$cur" ]]; then
+        timedatectl set-timezone "$tz"
+        log "timezone changed ${cur:-unknown} -> $tz (GPS position)"
+        log "note: the signalk-server container picks the new zone up on its next restart"
+    fi
+    exit 0
+}
+
+cmd_status() {
+    local timer_state
+    # is-active prints "inactive" even for units that don't exist, and
+    # exits non-zero for both — distinguish via the unit file.
+    if [[ -f /etc/systemd/system/signalk-timesync.timer ]]; then
+        timer_state=$(systemctl is-active signalk-timesync.timer 2>/dev/null) || true
+    else
+        timer_state="not-installed"
+    fi
+    echo "timer:      ${timer_state:-unknown}"
+    if [[ "$timer_state" == "active" ]]; then
+        systemctl list-timers signalk-timesync.timer --no-pager 2>/dev/null | sed -n '2p'
+    fi
+    echo "ntp sync:   $(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"
+    echo "timezone:   $(timedatectl show -p Timezone --value 2>/dev/null || echo unknown)"
+    echo "clock (utc): $(date -u '+%Y-%m-%d %H:%M:%S')"
+    echo
+    echo "recent runs:"
+    journalctl -u signalk-timesync.service -n 10 --no-pager -o short-iso 2>/dev/null \
+        || echo "  (journal not readable as this user — try with sudo)"
+}
+
+usage() {
+    cat <<'EOF'
+signalk timesync — host clock + timezone from the boat's GPS
+
+  signalk timesync status   timer state, NTP state, zone, recent runs
+  signalk timesync run      one sync pass (root only; the systemd timer
+                            runs this every 5 minutes)
+
+Clock: stepped from SignalK navigation.datetime only while the host has
+no NTP sync (offline passages, RTC-less cold boot). Timezone: follows
+navigation.position via tz-lookup. Disable via /etc/default/signalk-timesync
+(SIGNALK_TIMESYNC=off, or SIGNALK_TIMESYNC_TZ=off for clock-only), or
+stop the timer: sudo systemctl disable --now signalk-timesync.timer
+EOF
+}
+
+case "${1:-status}" in
+    run)    cmd_run ;;
+    status) cmd_status ;;
+    help|-h|--help) usage ;;
+    *) echo "[ERR] unknown subcommand: $1" >&2; usage; exit 2 ;;
+esac
