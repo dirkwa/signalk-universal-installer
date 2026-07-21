@@ -27,7 +27,11 @@ Production stack on the host: 80 or 3000 (signalk-server), 3003
 ## Dev server
 
 - `./dev.sh start|stop|restart|status|logs` — manage the instance
-- `./dev.sh demo` — start with bundled sample NMEA data
+- `./dev.sh demo` — start with bundled sample NMEA data; runs on the SAME
+  dev config, so linked plugins stay loaded (e2e's `demo-fg` is isolated
+  on purpose). Plugins run with their live config: anything that writes
+  outward (questdb, grafana, MQTT...) will ingest the SAMPLE data —
+  disable such plugins before a demo run if that matters.
 - After changing plugin code, `./dev.sh restart` is required — Node caches
   modules; toggling the plugin in the admin UI is NOT enough.
 
