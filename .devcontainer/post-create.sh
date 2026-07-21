@@ -95,7 +95,11 @@ for plugin in "${DEV_DIR}/plugins"/*/; do
   [ -f "${plugin}/package.json" ] || continue
   name=$(jq -r .name "${plugin}/package.json")
   echo "==> Linking local plugin: ${name}"
-  ( cd "${plugin}" && npm install )
+  # build --if-present: TypeScript plugins ship no compiled output in a
+  # fresh checkout — without a build the server logs "Cannot find module
+  # .../index.js" and silently skips the plugin (field-hit). Plain-JS
+  # plugins are unaffected.
+  ( cd "${plugin}" && npm install && npm run build --if-present )
   ( cd "${SK_CONFIG_DIR}" && npm install --no-save "${plugin}" )
 done
 

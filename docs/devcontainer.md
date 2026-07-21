@@ -141,6 +141,13 @@ Troubleshooting:
   of reach; podman also doesn't seed `ping_group_range`). Use them on the
   box instead; in-container `dig`, `nslookup`, `nc`, `wget` and `curl`
   work everywhere.
+- npm fails with `EACCES` inside `/home/node/.signalk` (or files there
+  show owner `999`): the volume was written under a different user-id
+  mapping than the current runtime uses (devpod runs podman containers
+  with keep-id, so `node` is your host user; volumes from another
+  runtime era surface as foreign uids). Cure on the box:
+  `podman unshare chown -R 0:0 $(podman volume inspect signalk-devpod --format '{{.Mountpoint}}')`
+  — repeat for `signalk-devpod-claude` / `signalk-devpod-plugins`.
 
 After the build:
 
