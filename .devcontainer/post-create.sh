@@ -26,10 +26,9 @@ fi
 
 # ── 2. Persistent SignalK dev config ────────────────────────────────────
 # No security strategy on purpose: the dev instance must allow anonymous
-# reads (classic dev loop, Playwright smoke tests) and is only reachable
-# through the devcontainer's port forward. CAUTION: with the optional
-# --network=host runArgs (socketcan) it becomes LAN-visible — enable
-# security in the admin UI if that matters on your network.
+# reads (classic dev loop, Playwright smoke tests). CAUTION: with the
+# default host networking it is LAN-visible on :4000 — enable security
+# in the admin UI where the network is not owner-controlled.
 # The inbound NMEA0183 (:10110) and Signal K TCP (:8375) listeners are
 # seeded OFF — under host networking they would claim the very ports the
 # production stack already holds (field report: "8375: address already
@@ -68,7 +67,7 @@ else
     if tmp="$(mktemp "${SK_CONFIG_DIR}/.settings.json.XXXXXX" 2>/dev/null)"; then
       printf '%s\n' "${migrated}" > "${tmp}"
       mv "${tmp}" "${SK_CONFIG_DIR}/settings.json"
-      echo "==> Migrated dev config: inbound tcp/nmea-tcp listeners default to off"
+      echo "==> Migrated dev config defaults (unset keys only: tcp/nmea-tcp listeners, mdns -> off)"
     else
       echo "==> WARNING: could not write migrated dev config (mktemp failed)."
       echo "    Inbound :10110/:8375 listeners may still be enabled — devpod's"

@@ -67,10 +67,13 @@ The devcontainer runs with **host networking** (production parity), so
 under podman the IDE serves directly on `http://<box-ip>:10800` and the
 dev server on `http://<box-ip>:4000` — no forwards, no extra options,
 and both keep running after `devpod up` returns. The flip side, stated
-plainly: **both are unauthenticated and LAN-visible.** On an
-owner-controlled boat network that is usually fine; on anything shared,
-put them behind `tailscale serve` (below) or enable security in the
-admin UI.
+plainly: **both are unauthenticated and LAN-visible**, and each needs
+its own protection where that matters — for the IDE (:10800) use
+`tailscale serve --bg 10800` and reach it only via the tailnet URL; for
+the dev server (:4000) enable security in the admin UI. Neither measure
+covers the other port, and tailscale serve is a proxy, not a firewall —
+the plain ports stay reachable on the LAN. This default is for
+owner-controlled networks.
 
 Caveat: over plain `http://<ip>` the browser treats the IDE as an
 **insecure context** — the workbench loads, but webview-based extension
@@ -185,9 +188,10 @@ run side by side on the same box.
   the server's SSRF guard deliberately blocks loopback (127/8) for
   server-to-server connections. The same rule applies to
   WebSocket/Signal K connections and their access-token requests.
-- **can0 / socketcan** is simply present under host networking — add the
-  connection in the admin UI (see docs/socketcan.md for host-side CAN
-  setup).
+- **can0 / socketcan**: on a Linux host with a CAN interface it is
+  simply present under host networking — add the connection in the admin
+  UI (docs/socketcan.md for host-side CAN setup). macOS/Windows hosts
+  have no SocketCAN; use a network gateway or USB device there.
 - The dev instance's own inbound NMEA0183 (:10110) and Signal K TCP
   (:8375) listeners are seeded **off**: under host networking they would
   claim the very ports the production stack already holds. Re-enable
@@ -313,10 +317,12 @@ VM as described in AGENTS.md.
 - **USB gateway** (NGT-1 etc.): uncomment the `--device` line in
   `devcontainer.json`. Serial devices are exclusive — production and dev
   cannot open the same one simultaneously; let production forward via TCP.
-- **socketcan** (CAN hat): works with the default host networking —
-  `can0` is present in the container. Multiple readers are fine; sending
-  is fine too — each instance performs its own N2K address claim and
-  gets its own source address. See also docs/socketcan.md.
+- **socketcan** (CAN hat): on a Linux host with a CAN interface, `can0`
+  is present in the container under the default host networking (no
+  SocketCAN exists on macOS/Windows hosts — use a gateway or USB there).
+  Multiple readers are fine; sending is fine too — each instance
+  performs its own N2K address claim and gets its own source address.
+  See also docs/socketcan.md.
   Reminder: the dev instance runs **without authentication** and, under
   host networking, LAN-visible — enable security in the admin UI if that
   matters on your network.

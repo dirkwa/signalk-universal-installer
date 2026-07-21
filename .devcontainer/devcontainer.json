@@ -44,8 +44,11 @@
   // work out of the box and removes the pasta/SSRF host-mapping trap
   // (issue #191). Consequences, in the open:
   // - The dev server (:4000) and browser IDE (:10800) are LAN-visible
-  //   and UNAUTHENTICATED — fine on an owner-controlled boat network;
-  //   use `tailscale serve` or enable security where it is not.
+  //   and UNAUTHENTICATED. This default assumes an OWNER-CONTROLLED
+  //   network. Hardening is per port and none of it firewalls the plain
+  //   ports: enable admin-UI security for :4000, front :10800 with
+  //   `tailscale serve` (a proxy — the LAN port stays open) or firewall
+  //   it; for shared networks prefer bridge mode below.
   // - Meaningful under podman (what `signalk devpod` provisions).
   //   Rootless docker scopes "host" to its rootlesskit namespace; Docker
   //   Desktop scopes it to the VM — revert to bridge there (drop this
