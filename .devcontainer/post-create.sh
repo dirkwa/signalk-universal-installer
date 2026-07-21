@@ -26,15 +26,16 @@ fi
 
 # ── 2. Persistent SignalK dev config ────────────────────────────────────
 # No security strategy on purpose: the dev instance must allow anonymous
-# reads (classic dev loop, Playwright smoke tests) and is only reachable
-# through the devcontainer's port forward. CAUTION: with the optional
-# --network=host runArgs (socketcan) it becomes LAN-visible — enable
-# security in the admin UI if that matters on your network.
+# reads (classic dev loop, Playwright smoke tests). CAUTION: with the
+# default host networking it is LAN-visible on :4000 — enable security
+# in the admin UI where the network is not owner-controlled.
 # The inbound NMEA0183 (:10110) and Signal K TCP (:8375) listeners are
-# seeded OFF: devpod auto-forwards every listening port to the host,
-# where a production stack already holds those two (field report:
-# "8375: address already in use"). Re-enable in Server → Settings when a
-# dev consumer actually needs them.
+# seeded OFF — under host networking they would claim the very ports the
+# production stack already holds (field report: "8375: address already
+# in use"). Re-enable in Server → Settings when a dev consumer actually
+# needs them. mDNS announcement is seeded OFF too: with host networking
+# the dev instance would otherwise advertise itself on the real LAN and
+# every nav app would discover TWO SignalK servers.
 mkdir -p "${SK_CONFIG_DIR}"
 if [ ! -f "${SK_CONFIG_DIR}/settings.json" ]; then
   echo "==> Seeding fresh dev config in ${SK_CONFIG_DIR}"
@@ -44,18 +45,20 @@ if [ ! -f "${SK_CONFIG_DIR}/settings.json" ]; then
     "tcp": false,
     "nmea-tcp": false
   },
+  "mdns": false,
   "ssl": false,
   "pipedProviders": []
 }
 EOF
 else
-  # Existing volumes predate the listener-off default and would recreate
-  # the port collision on rebuild. Idempotent migration: fill ONLY the
-  # missing listener keys — a value the user has set (either way) is
-  # never touched. Best-effort: a parse failure leaves the file alone.
+  # Existing volumes predate the listener-off/mdns-off defaults and would
+  # recreate the collisions on rebuild. Idempotent migration: fill ONLY
+  # the missing keys — a value the user has set (either way) is never
+  # touched. Best-effort: a parse failure leaves the file alone.
   migrated="$(jq '.interfaces //= {}
     | if (.interfaces | has("tcp")) then . else .interfaces.tcp = false end
-    | if (.interfaces | has("nmea-tcp")) then . else .interfaces["nmea-tcp"] = false end' \
+    | if (.interfaces | has("nmea-tcp")) then . else .interfaces["nmea-tcp"] = false end
+    | if has("mdns") then . else .mdns = false end' \
     "${SK_CONFIG_DIR}/settings.json" 2>/dev/null || true)"
   if [ -n "${migrated}" ] \
       && ! printf '%s\n' "${migrated}" | cmp -s - "${SK_CONFIG_DIR}/settings.json"; then
@@ -64,7 +67,7 @@ else
     if tmp="$(mktemp "${SK_CONFIG_DIR}/.settings.json.XXXXXX" 2>/dev/null)"; then
       printf '%s\n' "${migrated}" > "${tmp}"
       mv "${tmp}" "${SK_CONFIG_DIR}/settings.json"
-      echo "==> Migrated dev config: inbound tcp/nmea-tcp listeners default to off"
+      echo "==> Migrated dev config defaults (unset keys only: tcp/nmea-tcp listeners, mdns -> off)"
     else
       echo "==> WARNING: could not write migrated dev config (mktemp failed)."
       echo "    Inbound :10110/:8375 listeners may still be enabled — devpod's"

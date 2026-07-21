@@ -52,25 +52,28 @@ resolve it. Use the **browser IDE** instead — no desktop tooling at all:
 
 ```bash
 devpod up github.com/dirkwa/signalk-universal-installer \
-  --ide openvscode --ide-option VERSION=v1.109.5
+  --ide openvscode --ide-option VERSION=v1.109.5 \
+  --ide-option FORWARD_PORTS=false
 ```
+
+(`FORWARD_PORTS=false` because under host networking the ports are on
+the box already — a devpod forward would only collide with them.)
 
 On a box provisioned by the universal installer, all of this section is
 one command — `signalk devpod up` — which also installs the pinned devpod
-CLI to `~/.local/bin` on first use, points it at podman where no docker
-exists, and disables the idle timeout below.
+CLI to `~/.local/bin` on first use and points it at podman.
 
-To reach the IDE **without any SSH forward** (fully headless), bind the
-forwarder to a reachable address:
-
-```bash
-signalk devpod up --ide-option BIND_ADDRESS=100.64.0.10:10800   # e.g. your tailscale IP
-```
-
-The option sticks to the workspace. The IDE runs **without
-authentication** — anyone who reaches the port gets a terminal in the
-container. Bind a VPN address (e.g. tailscale) rather than `0.0.0.0`
-unless the network is fully trusted.
+The devcontainer runs with **host networking** (production parity), so
+under podman the IDE serves directly on `http://<box-ip>:10800` and the
+dev server on `http://<box-ip>:4000` — no forwards, no extra options,
+and both keep running after `devpod up` returns. The flip side, stated
+plainly: **both are unauthenticated and LAN-visible**, and each needs
+its own protection where that matters — for the IDE (:10800) use
+`tailscale serve --bg 10800` and reach it only via the tailnet URL; for
+the dev server (:4000) enable security in the admin UI. Neither measure
+covers the other port, and tailscale serve is a proxy, not a firewall —
+the plain ports stay reachable on the LAN. This default is for
+owner-controlled networks.
 
 Caveat: over plain `http://<ip>` the browser treats the IDE as an
 **insecure context** — the workbench loads, but webview-based extension
@@ -90,17 +93,17 @@ The `VERSION` pin matters: devpod's default openvscode is too old
 later, delete `~/.openvscode-server` inside the container and re-run —
 note this also resets browser-IDE settings and extensions, which live
 under that directory).
-Without `BIND_ADDRESS` (the default), the IDE serves on localhost:10800
-on the box only; reach it from your desktop with any SSH port forward
-(`ssh -L 10800:localhost:10800 <user>@<box>`, or the Ports panel of an
-existing VS Code Remote-SSH window), then browse
-`http://localhost:10800/?folder=/workspaces/signalk-universal-installer`.
-Extensions there come from Open VSX (Claude Code is available).
+Open
+`http://<box-ip>:10800/?folder=/workspaces/signalk-universal-installer`
+(an SSH forward to `localhost:10800` also works and sidesteps the
+insecure-context caveat above). Extensions come from Open VSX (Claude
+Code is available).
 
-The `devpod up` process IS the tunnel — keep that terminal open. By
-default devpod also kills itself after ~90 idle seconds, which drops the
-forward mid-session and leaves the browser loading forever; disable that
-once per box:
+Bridge mode only (no host networking): devpod's port forwards become the
+transport again — re-enable them with
+`signalk devpod up --ide-option FORWARD_PORTS=true`, keep the `devpod up`
+process running (it IS the tunnel then), and disable devpod's ~90s idle
+self-termination once per box:
 
 ```bash
 devpod context set-options -o EXIT_AFTER_TIMEOUT=false
@@ -178,25 +181,22 @@ run side by side on the same box.
 - **No boat needed:** `dev/dev.sh demo` streams the bundled sample NMEA
   log — enough for most plugin work and for the e2e suite.
 - **Live sources** are added as usual in the admin UI (Server → Data
-  Connections) — with one container gotcha: inside the devcontainer,
-  `localhost` is the **container itself**. Reaching a production
-  signalk-server **on the same box** depends on the container runtime —
-  under rootless podman with pasta the usual host aliases resolve to a
-  link-local address the server's SSRF guard blocks; see "Connecting to a
-  production server on the same box" below for the runtime matrix and the
-  working addresses. Devices elsewhere on the network (YDWG-02, W2K-1,
-  another boat server) work by their normal IPs. The same rules apply to
+  Connections). With the default **host networking** the container shares
+  the box's network: gateways and devices work exactly as they would for
+  production. One rule for a production signalk-server **on the same
+  box**: connect to the box's **LAN or tailscale IP**, not `localhost` —
+  the server's SSRF guard deliberately blocks loopback (127/8) for
+  server-to-server connections. The same rule applies to
   WebSocket/Signal K connections and their access-token requests.
-- **can0 / socketcan** does not exist in the container by default —
-  socketcan is bound to the network namespace. Uncomment the
-  `--network=host` runArgs in `devcontainer.json` and rebuild (see
-  "NMEA 2000 access" below and docs/socketcan.md). `localhost` then IS
-  the box, and the dev instance becomes LAN-visible — enable security.
+- **can0 / socketcan**: on a Linux host with a CAN interface it is
+  simply present under host networking — add the connection in the admin
+  UI (docs/socketcan.md for host-side CAN setup). macOS/Windows hosts
+  have no SocketCAN; use a network gateway or USB device there.
 - The dev instance's own inbound NMEA0183 (:10110) and Signal K TCP
-  (:8375) listeners are seeded **off**: devpod forwards every listening
-  port to the host, where a production stack already occupies those two
-  ("address already in use"). Re-enable them in Server → Settings when a
-  dev consumer needs them.
+  (:8375) listeners are seeded **off**: under host networking they would
+  claim the very ports the production stack already holds. Re-enable
+  them in Server → Settings when a dev consumer needs them (pick free
+  ports).
 
 ## Developing plugins
 
@@ -248,9 +248,14 @@ errors, add `"--userns=keep-id"` to `runArgs`.
 
 ## Connecting to a production server on the same box
 
-What "the host" resolves to inside the container depends on the runtime —
-and signalk-server's SSRF guard (deliberately, and correctly for
-production) blocks link-local addresses:
+With the default **host networking**: use the box's LAN or tailscale IP
+in the Data Connection — not `localhost`, which the SSRF guard blocks
+(127/8). That is the whole rule.
+
+**Bridge mode only** (host networking removed from `runArgs`): what "the
+host" resolves to inside the container depends on the runtime — and
+signalk-server's SSRF guard (deliberately, and correctly for production)
+blocks link-local addresses:
 
 | Runtime | Host maps to | Works? |
 |---|---|---|
@@ -312,12 +317,15 @@ VM as described in AGENTS.md.
 - **USB gateway** (NGT-1 etc.): uncomment the `--device` line in
   `devcontainer.json`. Serial devices are exclusive — production and dev
   cannot open the same one simultaneously; let production forward via TCP.
-- **socketcan** (CAN hat): uncomment `--network=host`. Multiple readers are
-  fine; sending is fine too — each instance performs its own N2K address
-  claim and gets its own source address. See also docs/socketcan.md.
-  Note: the dev instance runs **without authentication** (anonymous reads
-  for the dev loop and e2e); with `--network=host` it becomes visible on
-  the LAN — enable security in the admin UI if that matters.
+- **socketcan** (CAN hat): on a Linux host with a CAN interface, `can0`
+  is present in the container under the default host networking (no
+  SocketCAN exists on macOS/Windows hosts — use a gateway or USB there).
+  Multiple readers are fine; sending is fine too — each instance
+  performs its own N2K address claim and gets its own source address.
+  See also docs/socketcan.md.
+  Reminder: the dev instance runs **without authentication** and, under
+  host networking, LAN-visible — enable security in the admin UI if that
+  matters on your network.
 
 ## AI tooling
 

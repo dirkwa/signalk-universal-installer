@@ -25,12 +25,12 @@
 #                          stops the whole VM instead.)
 #   signalk start          start signalk-server again after 'signalk stop'
 #   signalk devpod [up|ssh|stop|delete|list]
-#                          zero-setup dev environment (devcontainer, browser
-#                          IDE on :10800). Installs the pinned devpod CLI to
-#                          ~/.local/bin on first use; docs/devcontainer.md
-#                          Headless box without SSH forward: append
-#                          --ide-option BIND_ADDRESS=100.64.0.10:10800   # e.g. your tailscale IP
-#                          (IDE is UNAUTHENTICATED — prefer a VPN address)
+#                          zero-setup dev environment (devcontainer, host
+#                          networking). Browser IDE on http://<box>:10800,
+#                          dev server on :4000 — both LAN-visible and
+#                          UNAUTHENTICATED (docs/devcontainer.md for
+#                          hardening via tailscale serve). Installs the
+#                          pinned devpod CLI on first use.
 #   signalk uninstall      stop services + remove Quadlets (preserves data)
 #   signalk version        print installer version
 #   signalk help           show this help
@@ -1806,13 +1806,18 @@ cmd_devpod() {
 
     case "$sub" in
         up)
-            echo "[i] Browser IDE will serve on http://localhost:10800 — keep this command running,"
-            echo "    it is the tunnel. First run downloads the dev image (a few minutes)."
-            echo "[i] Remote access without an SSH forward: re-run with"
-            echo "      --ide-option BIND_ADDRESS=100.64.0.10:10800   # e.g. your tailscale IP"
-            echo "    The IDE is UNAUTHENTICATED — prefer a VPN (tailscale) address over 0.0.0.0."
+            echo "[i] Browser IDE will serve on http://<this-box>:10800 (host networking),"
+            echo "    dev server on :4000 — they keep running after this command returns."
+            echo "    First run downloads the dev image (a few minutes)."
+            echo "[i] Both are UNAUTHENTICATED and LAN-visible — on shared networks prefer"
+            echo "    'tailscale serve --bg 10800' (also gives HTTPS for the Claude panel)."
+            # FORWARD_PORTS=false: under host networking the ports are on
+            # the host already; devpod's forwards would only collide with
+            # them. Re-enable when reverting the workspace to bridge:
+            #   signalk devpod up --ide-option FORWARD_PORTS=true
             exec "$bin" up "$DEVPOD_SOURCE" \
-                --ide openvscode --ide-option VERSION="$DEVPOD_OPENVSCODE_VERSION" "$@"
+                --ide openvscode --ide-option VERSION="$DEVPOD_OPENVSCODE_VERSION" \
+                --ide-option FORWARD_PORTS=false "$@"
             ;;
         ssh|stop|delete)
             exec "$bin" "$sub" "$DEVPOD_WORKSPACE" "$@"

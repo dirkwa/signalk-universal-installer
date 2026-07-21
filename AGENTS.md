@@ -23,9 +23,12 @@ The installer is a **one-shot bootstrapper**. After it finishes, systemd and the
 A one-command development environment (pre-built server from the stack's own
 `ghcr.io/dirkwa/signalk-server:dirkwa` image, plugin linking, shellcheck,
 CodeRabbit CLI, Claude Code, Playwright e2e) lives under `.devcontainer/`
-with its workspace in `dev/`. It runs the dev signalk-server on **port 4000**
-and never touches a production install (production map: 80/3000 server, 3003
-updater, 3004 doctor). `dev/` and `.devcontainer/` are dev-only and NOT
+with its workspace in `dev/`. It runs with **host networking** (production
+parity — socketcan works, mDNS *discovery* of LAN devices works while the
+dev instance's own announcement is seeded off) and the dev signalk-server
+on **port 4000**; dev server and browser IDE (:10800) are unauthenticated
+and LAN-visible by design. It never touches a production install (production
+map: 80/3000 server, 3003 updater, 3004 doctor). `dev/` and `.devcontainer/` are dev-only and NOT
 published by GitHub Pages. See docs/devcontainer.md; workspace-specific agent
 context is in `dev/CLAUDE.md`. The pre-PR checklist tooling (shellcheck,
 `cr review`) is available inside the container.
