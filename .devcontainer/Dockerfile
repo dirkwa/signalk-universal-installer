@@ -34,12 +34,13 @@ RUN printf 'allow-scripts[]=@anthropic-ai/claude-code\n' >> /root/.npmrc
 # Basic network debugging (boat networks are half the job): ping,
 # nslookup/dig, wget, traceroute, netcat, tcpdump, htop. bind9-dnsutils
 # is declared here even though a devcontainer feature happens to drag it
-# in — guaranteed, not incidental. Honest caveat, verified: ICMP/raw
-# tools (ping, traceroute, live tcpdump captures) EPERM in ROOTLESS
-# PODMAN containers — host netns raw/ICMP sockets need privileges in the
-# initial user namespace, and podman (unlike docker) does not seed
-# ping_group_range for bridge mode either. They work under docker
-# runtimes and for pcap reading; on podman boxes run them on the HOST.
+# in — guaranteed, not incidental. Verified caveats: raw-socket tools
+# (traceroute, live tcpdump captures) EPERM in rootless podman — run
+# those on the HOST. ping is rescued below: its cap_net_raw FILE
+# CAPABILITY makes execve itself fail in a rootless userns ("bash:
+# /usr/bin/ping: Operation not permitted"); stripped, ping falls back to
+# unprivileged ICMP datagram sockets, which the host's ping_group_range
+# permits on systemd hosts (field-verified under host networking).
 # dig/nslookup/nc/wget/curl use plain sockets and work everywhere.
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -61,6 +62,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
         netcat-openbsd \
         tcpdump \
         htop \
+    && setcap -r /usr/bin/ping \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Playwright / Chromium ────────────────────────────────────────────────
