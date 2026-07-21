@@ -163,7 +163,7 @@ After the build:
 | Server management     | `dev/dev.sh start\|stop\|restart\|logs`  |
 | e2e tests (Chromium)  | `cd dev && npm run test:e2e`             |
 | AI pair programming   | `claude` (terminal or VS Code panel)     |
-| AI code review        | `cr review --plain`                      |
+| AI code review        | `cr review`                              |
 | Shell lint            | `shellcheck installer/**/*.sh scripts/*.sh .devcontainer/*.sh dev/*.sh` |
 
 The `dev.sh` verbs are also one-click **status-bar buttons** at the
@@ -180,7 +180,8 @@ or recreate the workspace.
 
 Dev config, installed plugins and security settings persist in the named
 volume `signalk-devpod` (mounted at `/home/node/.signalk`); Claude Code
-login and auto memory persist in `signalk-devpod-claude`; your plugin
+login, auto memory and the CodeRabbit CLI login persist in
+`signalk-devpod-claude`; your plugin
 checkouts under `dev/plugins/` persist in `signalk-devpod-plugins`. All
 three survive container rebuilds **and** `devpod delete` — deleting and
 recreating the workspace is always safe. The volumes are per box and
@@ -397,8 +398,10 @@ VM as described in AGENTS.md.
 - **CodeRabbit** — the repo's `.coderabbit.yaml` applies. Three auth paths:
   the native Claude Code plugin (state persists via the `~/.claude` mount),
   the CLI with a forwarded `CODERABBIT_API_KEY` (post-start authenticates
-  automatically), or interactive `coderabbit auth login` (repeat after
-  rebuilds). `cr review --plain` matches the pre-PR checklist.
+  automatically), or interactive `coderabbit auth login` — a one-time act:
+  post-create symlinks `~/.coderabbit` into the `signalk-devpod-claude`
+  volume, so the login survives rebuilds and recreates. `cr review`
+  matches the pre-PR checklist.
 - The Playwright MCP server in `.mcp.json` lets Claude Code drive a browser
   against the admin UI on port 4000 — available to both the CLI and the
   VS Code extension.

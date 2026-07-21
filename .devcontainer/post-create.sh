@@ -106,7 +106,36 @@ done
 # ── 4. e2e test dependencies ────────────────────────────────────────────
 ( cd "${DEV_DIR}" && npm install )
 
-# ── 5. Claude Code binary sanity ────────────────────────────────────────
+# ── 5. CodeRabbit auth persistence ──────────────────────────────────────
+# The CLI keeps its login in ~/.coderabbit (auth.json) — container-
+# lifetime storage, so every workspace recreate logged the user out
+# (field report). Symlink it into the signalk-devpod-claude volume.
+# State written by a previous container (before the link existed) is
+# migrated; on conflict the volume copy wins — it is the one that
+# survived recreates.
+CR_HOME="${HOME}/.coderabbit"
+CR_STATE="${HOME}/.claude/.coderabbit"
+if [ ! -L "${CR_HOME}" ]; then
+  mkdir -p "${CR_STATE}"
+  if [ -d "${CR_HOME}" ]; then
+    # Delete the original only after a successful copy — a permission
+    # or I/O failure must never destroy the one working login. cp -n
+    # skips files the volume already has (they survived recreates and
+    # win) without failing.
+    if cp -an "${CR_HOME}/." "${CR_STATE}/" 2>/dev/null; then
+      rm -rf "${CR_HOME}"
+    else
+      echo "==> WARNING: could not migrate CodeRabbit state into the volume;"
+      echo "    keeping ${CR_HOME} as-is (login will not survive recreates)."
+    fi
+  fi
+  if [ ! -e "${CR_HOME}" ]; then
+    ln -s "${CR_STATE}" "${CR_HOME}"
+    echo "==> CodeRabbit login now persists across rebuilds (claude volume)"
+  fi
+fi
+
+# ── 6. Claude Code binary sanity ────────────────────────────────────────
 # If the feature's npm postinstall was script-gated anyway, /usr/bin/claude
 # is an error stub. We cannot fix it as the node user (module dir is
 # root-owned) — detect and print the remediation instead of failing later
@@ -124,4 +153,4 @@ echo "    Sample NMEA data:   dev/dev.sh demo"
 echo "    e2e tests:          cd dev && npm run test:e2e"
 echo "    Server-source dev:  clone into dev/signalk-server, re-run this script"
 echo "    Companion repos:    dev/clone-companions.sh"
-echo "    AI tooling:         claude | cr review --plain"
+echo "    AI tooling:         claude | cr review"
