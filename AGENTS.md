@@ -59,7 +59,7 @@ Before pushing or opening a PR:
 1. `shellcheck installer/**/*.sh scripts/*.sh .devcontainer/*.sh dev/*.sh` — lints all shell.
 2. `bash -n` on every script to catch syntax errors.
 3. Manual smoke: run the script on a clean VM or in a container, verify the documented behavior.
-4. `cr review --plain | tee /tmp/cr-review-<branch>.txt` — local CodeRabbit pass. Commit first, then review.
+4. `cr review | tee /tmp/cr-review-<branch>.txt` — local CodeRabbit pass (plain text is the default; the CLI no longer knows `--plain`). Commit first, then review.
 
 Skip `cr review` only for `chore(release): X.Y.Z` PRs.
 
