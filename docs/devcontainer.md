@@ -148,7 +148,8 @@ Troubleshooting:
   with keep-id, so `node` is your host user; volumes from another
   runtime era surface as foreign uids). Cure on the box:
   `podman unshare chown -R 0:0 $(podman volume inspect signalk-devpod --format '{{.Mountpoint}}')`
-  — repeat for `signalk-devpod-claude` / `signalk-devpod-plugins`.
+  — repeat for `signalk-devpod-claude` / `signalk-devpod-plugins` (the
+  volume names are defined in `.devcontainer/devcontainer.json`).
 
 After the build:
 
