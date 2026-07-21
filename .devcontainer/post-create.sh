@@ -30,16 +30,48 @@ fi
 # through the devcontainer's port forward. CAUTION: with the optional
 # --network=host runArgs (socketcan) it becomes LAN-visible — enable
 # security in the admin UI if that matters on your network.
+# The inbound NMEA0183 (:10110) and Signal K TCP (:8375) listeners are
+# seeded OFF: devpod auto-forwards every listening port to the host,
+# where a production stack already holds those two (field report:
+# "8375: address already in use"). Re-enable in Server → Settings when a
+# dev consumer actually needs them.
 mkdir -p "${SK_CONFIG_DIR}"
 if [ ! -f "${SK_CONFIG_DIR}/settings.json" ]; then
   echo "==> Seeding fresh dev config in ${SK_CONFIG_DIR}"
   cat > "${SK_CONFIG_DIR}/settings.json" <<'EOF'
 {
-  "interfaces": {},
+  "interfaces": {
+    "tcp": false,
+    "nmea-tcp": false
+  },
   "ssl": false,
   "pipedProviders": []
 }
 EOF
+else
+  # Existing volumes predate the listener-off default and would recreate
+  # the port collision on rebuild. Idempotent migration: fill ONLY the
+  # missing listener keys — a value the user has set (either way) is
+  # never touched. Best-effort: a parse failure leaves the file alone.
+  migrated="$(jq '.interfaces //= {}
+    | if (.interfaces | has("tcp")) then . else .interfaces.tcp = false end
+    | if (.interfaces | has("nmea-tcp")) then . else .interfaces["nmea-tcp"] = false end' \
+    "${SK_CONFIG_DIR}/settings.json" 2>/dev/null || true)"
+  if [ -n "${migrated}" ] \
+      && ! printf '%s\n' "${migrated}" | cmp -s - "${SK_CONFIG_DIR}/settings.json"; then
+    # Atomic replace (temp file + rename in the same dir): a crash mid-
+    # write must never leave a truncated settings.json behind.
+    if tmp="$(mktemp "${SK_CONFIG_DIR}/.settings.json.XXXXXX" 2>/dev/null)"; then
+      printf '%s\n' "${migrated}" > "${tmp}"
+      mv "${tmp}" "${SK_CONFIG_DIR}/settings.json"
+      echo "==> Migrated dev config: inbound tcp/nmea-tcp listeners default to off"
+    else
+      echo "==> WARNING: could not write migrated dev config (mktemp failed)."
+      echo "    Inbound :10110/:8375 listeners may still be enabled — devpod's"
+      echo "    port forward can collide with a production stack. Disable them"
+      echo "    manually in Server → Settings."
+    fi
+  fi
 fi
 
 # ── 3. Local plugin repos ───────────────────────────────────────────────

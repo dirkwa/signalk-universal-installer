@@ -27,11 +27,23 @@ RUN printf 'allow-scripts[]=@anthropic-ai/claude-code\n' >> /root/.npmrc
 # shellcheck: required by the repo's pre-PR checklist (AGENTS.md).
 # can-utils/socat: N2K and serial debugging (git, jq, curl already in base).
 # unzip: needed by the CodeRabbit CLI installer below.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# openssh-client: the base image ships git but no ssh — `git clone
+# git@github.com:...` dies with "cannot run ssh" (field report).
+# gh: GitHub CLI for clone/auth/PR work from inside the container; from
+# GitHub's apt repo, same keyring pattern the base uses for docker-ce-cli.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
         can-utils \
         socat \
         shellcheck \
         unzip \
+        openssh-client \
+        gh \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Playwright / Chromium ────────────────────────────────────────────────
