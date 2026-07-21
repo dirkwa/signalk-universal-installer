@@ -21,9 +21,13 @@ workspace-specific context.
 
 ## Port map (do not collide!)
 
-Production stack on the host: 80 or 3000 (signalk-server), 3003
-(signalk-updater-server), 3004 (signalk-doctor-server).
-**Dev instance: port 4000.** Never bind 80, 3000, 3003 or 3004.
+The devcontainer uses **host networking** (production parity): every
+port a dev process binds lands DIRECTLY on the box. Production stack:
+80 or 3000 (signalk-server), 3003 (signalk-updater-server), 3004
+(signalk-doctor-server); browser IDE: 10800.
+**Dev instance: port 4000.** Never bind 80, 3000, 3003, 3004 or 10800.
+For a same-box production connection use the box's LAN/tailscale IP —
+`localhost` is SSRF-blocked by the server (127/8).
 
 ## Dev server
 

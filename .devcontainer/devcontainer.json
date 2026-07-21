@@ -38,13 +38,27 @@
     "source=${localEnv:XDG_RUNTIME_DIR:/tmp}/podman,target=/run/host-podman,type=bind"
   ],
 
+  // HOST NETWORKING by default — production parity: the real
+  // signalk-server Quadlet runs Network=host (rootless podman joins the
+  // actual host netns). This makes socketcan (can0) and mDNS discovery
+  // work out of the box and removes the pasta/SSRF host-mapping trap
+  // (issue #191). Consequences, in the open:
+  // - The dev server (:4000) and browser IDE (:10800) are LAN-visible
+  //   and UNAUTHENTICATED — fine on an owner-controlled boat network;
+  //   use `tailscale serve` or enable security where it is not.
+  // - Meaningful under podman (what `signalk devpod` provisions).
+  //   Rootless docker scopes "host" to its rootlesskit namespace; Docker
+  //   Desktop scopes it to the VM — revert to bridge there (drop this
+  //   runArgs line and re-enable forwards:
+  //   `signalk devpod up --ide-option FORWARD_PORTS=true`).
+  "runArgs": ["--network=host"],
+
   // v2 stack port map: 80 or 3000 (signalk-server), 3003 (updater
   // console), 3004 (doctor console). The dev instance uses 4000 so it
   // can run side by side with a production install on the same host.
-  "forwardPorts": [4000],
-  "portsAttributes": {
-    "4000": { "label": "SignalK Dev Server", "onAutoForward": "notify" }
-  },
+  // No forwardPorts: under host networking the ports are already on the
+  // host, and a devpod forward would collide with the very port the
+  // server holds.
 
   "containerEnv": {
     "PORT": "4000",
@@ -74,23 +88,22 @@
   // production and dev cannot open it at the same time:
   // "runArgs": ["--device=/dev/ttyUSB0", "--group-add=keep-groups"],
   //
-  // Direct socketcan (CAN hat on a Pi). socketcan is bound to the network
-  // namespace, so host networking is required. Multiple readers are fine on
-  // CAN; sending is also fine (each instance claims its own N2K address):
-  // "runArgs": ["--network=host"],
+  // Direct socketcan (CAN hat on a Pi): works with the default host
+  // networking — can0 is simply present. Multiple readers are fine on
+  // CAN; sending is fine too (each instance claims its own N2K address).
   //
   // If the devcontainer itself runs under rootless podman and the host
-  // socket probe reports permission errors, map the container user onto
-  // the host user owning the socket:
-  // "runArgs": ["--userns=keep-id"],
+  // socket probe reports permission errors, add to runArgs:
+  // "--userns=keep-id",
   //
-  // Rootless podman with pasta (the podman >= 5 default) maps "the host"
-  // to link-local 169.254.1.2 — which signalk-server's SSRF guard blocks,
-  // so the dev server cannot connect to a production server ON THE SAME
-  // BOX ("Could not connect to Signal K server", issue #191). Either use
-  // the host's tailscale IP in the connection, or switch this workspace
-  // to slirp4netns and connect to 10.0.2.2 instead:
-  // "runArgs": ["--network=slirp4netns:allow_host_loopback=true"],
+  // Prefer an ISOLATED (bridge) network instead? Remove the
+  // "--network=host" runArgs above and re-enable devpod's forwards
+  // (`signalk devpod up --ide-option FORWARD_PORTS=true`). Note the
+  // pasta trap that host networking avoids: under rootless podman's
+  // default pasta network, "the host" maps to link-local 169.254.1.2,
+  // which signalk-server's SSRF guard blocks (issue #191) — use the
+  // host's tailscale IP, or bridge via
+  // "--network=slirp4netns:allow_host_loopback=true" and 10.0.2.2.
   // ──────────────────────────────────────────────────────────────────────
 
   "postCreateCommand": "bash .devcontainer/post-create.sh",
