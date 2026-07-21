@@ -1,0 +1,140 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SignalK: Start dev server",
+      "type": "shell",
+      "command": "${workspaceFolder}/dev/dev.sh",
+      "args": ["start"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(play) SK Start",
+          "tooltip": "Start the dev server on port 4000 (dev.sh start)"
+        }
+      }
+    },
+    {
+      "label": "SignalK: Stop dev server",
+      "type": "shell",
+      "command": "${workspaceFolder}/dev/dev.sh",
+      "args": ["stop"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(debug-stop) Stop",
+          "tooltip": "Stop the dev server (dev.sh stop)"
+        }
+      }
+    },
+    {
+      "label": "SignalK: Restart dev server",
+      "type": "shell",
+      "command": "${workspaceFolder}/dev/dev.sh",
+      "args": ["restart"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(sync) Restart",
+          "tooltip": "Restart the dev server — picks up plugin code changes (dev.sh restart)"
+        }
+      }
+    },
+    {
+      "label": "SignalK: Demo data",
+      "type": "shell",
+      "command": "${workspaceFolder}/dev/dev.sh",
+      "args": ["demo"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(pulse) Demo",
+          "tooltip": "Start the dev server with bundled sample NMEA data — linked plugins stay loaded (dev.sh demo)"
+        }
+      }
+    },
+    {
+      "label": "SignalK: Server logs",
+      "type": "shell",
+      "command": "${workspaceFolder}/dev/dev.sh",
+      "args": ["logs"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "showReuseMessage": false
+      },
+      "options": {
+        "statusbar": {
+          "label": "$(output) Logs",
+          "tooltip": "Tail the dev server log (dev.sh logs — Ctrl+C or the trash-can to stop tailing)"
+        }
+      }
+    },
+    {
+      "label": "SignalK: e2e tests",
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "test:e2e"],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/dev",
+        "statusbar": {
+          "label": "$(beaker) e2e",
+          "tooltip": "Run the Playwright e2e suite on its own port-4100 server — the dev instance is untouched"
+        }
+      }
+    },
+    {
+      "label": "SignalK: Status",
+      "type": "shell",
+      "command": "${workspaceFolder}/dev/dev.sh",
+      "args": ["status"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "showReuseMessage": false
+      },
+      "options": {
+        "statusbar": {
+          "hide": true
+        }
+      }
+    }
+  ]
+}
