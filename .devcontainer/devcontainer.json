@@ -76,6 +76,14 @@
   // socket probe reports permission errors, map the container user onto
   // the host user owning the socket:
   // "runArgs": ["--userns=keep-id"],
+  //
+  // Rootless podman with pasta (the podman >= 5 default) maps "the host"
+  // to link-local 169.254.1.2 — which signalk-server's SSRF guard blocks,
+  // so the dev server cannot connect to a production server ON THE SAME
+  // BOX ("Could not connect to Signal K server", issue #191). Either use
+  // the host's tailscale IP in the connection, or switch this workspace
+  // to slirp4netns and connect to 10.0.2.2 instead:
+  // "runArgs": ["--network=slirp4netns:allow_host_loopback=true"],
   // ──────────────────────────────────────────────────────────────────────
 
   "postCreateCommand": "bash .devcontainer/post-create.sh",
