@@ -38,9 +38,11 @@ jobs:
           fetch-depth: 0
 
       - name: Advance release branch to the tag
+        id: tag
         env:
           TAG_INPUT: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             tag="$TAG_INPUT"
           else
@@ -58,3 +60,21 @@ jobs:
             exit 1
           fi
           git push origin "+${sha}:refs/heads/release"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      # A GitHub Release turns the bare tag into a changelog: every PR
+      # merged since the previous version tag, auto-generated. Creating
+      # a Release fires no tag-push workflows, so the channel and Pages
+      # logic above stay untouched. The guard keeps manual rollback
+      # dispatches (tag already released) from failing or duplicating.
+      - name: Create GitHub Release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — leaving it as is."
+          else
+            gh release create "$TAG" --verify-tag --generate-notes
+          fi
