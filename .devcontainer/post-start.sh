@@ -76,6 +76,14 @@ seed_browser_ide_theme() {
   # and quietly detach it from its source, so leave it entirely alone.
   [ -L "${OVS_SETTINGS}" ] && return 7
 
+  # Anything else that exists but is not a regular file is not ours to
+  # replace either. A directory is the dangerous one: mv moves the temp
+  # file *into* it and reports success, so the seed would claim to have
+  # worked while no settings file was ever written.
+  if [ -e "${OVS_SETTINGS}" ] && [ ! -f "${OVS_SETTINGS}" ]; then
+    return 8
+  fi
+
   local sig tmp grep_rc=0
   sig="$(ovs_settings_sig)"
   tmp="$(mktemp "${OVS_USER_DIR}/.settings.json.XXXXXX" 2>/dev/null)" || return 1
@@ -150,6 +158,7 @@ case "${ovs_seed_rc}" in
   5) echo "==> INFO: browser-IDE settings changed mid-seed — left them alone" ;;
   6) echo "==> INFO: browser-IDE settings.json unreadable — left it alone" ;;
   7) echo "==> INFO: browser-IDE settings.json is a symlink — left it alone" ;;
+  8) echo "==> INFO: browser-IDE settings.json is not a regular file — left it alone" ;;
   *) echo "==> INFO: could not seed the browser-IDE theme (non-fatal, defaults apply)" ;;
 esac
 
