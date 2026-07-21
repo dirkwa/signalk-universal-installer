@@ -84,6 +84,13 @@ fi
 # rebuilds and deletes); it shadows the repo's .gitkeep, so restore it —
 # otherwise the workspace repo shows a phantom deletion in git status.
 [ -f "${DEV_DIR}/plugins/.gitkeep" ] || touch "${DEV_DIR}/plugins/.gitkeep" 2>/dev/null || true
+# npm links local plugin installs as SYMLINKS into the workspace path.
+# The config volume outlives workspaces, so after a delete/recreate those
+# links dangle — and npm then dies with EACCES while reifying over them
+# (field-hit). Prune dangling links before relinking; live ones and real
+# directories are untouched.
+find "${SK_CONFIG_DIR}/node_modules" -maxdepth 1 -xtype l -print -delete 2>/dev/null \
+  | sed 's/^/==> Pruned dangling plugin link: /' || true
 for plugin in "${DEV_DIR}/plugins"/*/; do
   [ -f "${plugin}/package.json" ] || continue
   name=$(jq -r .name "${plugin}/package.json")
