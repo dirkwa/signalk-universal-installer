@@ -40,9 +40,11 @@
 
   // HOST NETWORKING by default — production parity: the real
   // signalk-server Quadlet runs Network=host (rootless podman joins the
-  // actual host netns). This makes socketcan (can0) and mDNS discovery
-  // work out of the box and removes the pasta/SSRF host-mapping trap
-  // (issue #191). Consequences, in the open:
+  // actual host netns). This makes socketcan (can0) work out of the box,
+  // lets the dev instance DISCOVER mDNS devices on the LAN (its own mDNS
+  // announcement stays off — post-create seeds mdns:false so nav apps
+  // don't find two servers), and removes the pasta/SSRF host-mapping
+  // trap (issue #191). Consequences, in the open:
   // - The dev server (:4000) and browser IDE (:10800) are LAN-visible
   //   and UNAUTHENTICATED. This default assumes an OWNER-CONTROLLED
   //   network. Hardening is per port and none of it firewalls the plain
