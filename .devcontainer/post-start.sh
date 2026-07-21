@@ -30,16 +30,17 @@ fi
 # then fails with the generic "Could not connect to Signal K server".
 # Detect the situation and say so up front instead of letting it surface
 # as a mystery in the admin UI.
-host_ip="$(getent hosts host.containers.internal 2>/dev/null | awk '{print $1; exit}' || true)"
-case "${host_ip}" in
-  169.254.*)
-    echo "==> INFO: running under pasta — the host maps to ${host_ip}, which"
-    echo "    signalk-server's SSRF guard blocks. To connect the dev server to a"
-    echo "    production server on THIS box, use the host's tailscale IP in the"
-    echo "    connection — or switch the workspace to slirp4netns (see the"
-    echo "    commented runArgs in devcontainer.json) and connect to 10.0.2.2."
-    ;;
-esac
+# Scan ALL resolved addresses — the link-local entry is not guaranteed
+# to come first when the name resolves to several.
+pasta_ip="$(getent hosts host.containers.internal 2>/dev/null \
+  | awk '$1 ~ /^169\.254\./ { print $1; exit }' || true)"
+if [ -n "${pasta_ip}" ]; then
+  echo "==> INFO: running under pasta — the host maps to ${pasta_ip}, which"
+  echo "    signalk-server's SSRF guard blocks. To connect the dev server to a"
+  echo "    production server on THIS box, use the host's tailscale IP in the"
+  echo "    connection — or switch the workspace to slirp4netns (see the"
+  echo "    commented runArgs in devcontainer.json) and connect to 10.0.2.2."
+fi
 
 # ── Browser IDE (openvscode) defaults ───────────────────────────────────
 # Seed a dark theme into openvscode's server-side User settings — only
