@@ -1786,20 +1786,27 @@ cmd_devpod() {
         chmod +x "$bin"
     fi
 
-    # A fresh devpod install has NO provider at all and `up` dies with
-    # "no default provider found" — ensure one exists AND is selected.
-    # "docker" is only devpod's provider NAME: with DOCKER_PATH=podman
-    # everything runs through podman — the runtime the installer already
-    # manages; no second runtime is installed. podman is preferred
-    # whenever present; a plain docker only serves podman-less dev boxes.
-    # An EXISTING provider is never repointed (`add` fails harmlessly
-    # then) — changing its runtime would strand existing workspaces.
+    # Provider setup, fully automatic. When podman exists (every
+    # installer-provisioned box), signalk workspaces run under a DEDICATED
+    # named provider instance ("docker-podman" — devpod's docker provider
+    # pointed at podman via DOCKER_PATH; no second runtime is installed).
+    # A named instance means a user's own devpod setup for other projects
+    # is never touched or repointed — boxes with a real-docker default
+    # provider get podman for signalk workspaces anyway, which is also
+    # what makes the host-networking default land on the REAL host
+    # (rootless docker scopes it to rootlesskit). Podman-less dev boxes
+    # fall back to a plain docker provider; a fresh devpod install
+    # otherwise has NO provider at all and `up` dies with "no default
+    # provider found".
+    provider_args=()
     if command -v podman >/dev/null 2>&1; then
-        "$bin" provider add docker -o DOCKER_PATH="$(command -v podman)" >/dev/null 2>&1 || true
+        "$bin" provider add docker --name docker-podman \
+            -o DOCKER_PATH="$(command -v podman)" >/dev/null 2>&1 || true
+        provider_args=(--provider docker-podman)
     elif command -v docker >/dev/null 2>&1; then
         "$bin" provider add docker >/dev/null 2>&1 || true
+        "$bin" provider use docker >/dev/null 2>&1 || true
     fi
-    "$bin" provider use docker >/dev/null 2>&1 || true
     # devpod exits after ~90 idle seconds by default, taking the browser
     # IDE's port forward with it — disable once; harmless if repeated.
     "$bin" context set-options -o EXIT_AFTER_TIMEOUT=false >/dev/null 2>&1 || true
@@ -1815,7 +1822,9 @@ cmd_devpod() {
             # the host already; devpod's forwards would only collide with
             # them. Re-enable when reverting the workspace to bridge:
             #   signalk devpod up --ide-option FORWARD_PORTS=true
-            exec "$bin" up "$DEVPOD_SOURCE" \
+            # provider_args first, "$@" last: a user-supplied --provider
+            # (or any repeated flag) wins over our defaults.
+            exec "$bin" up "$DEVPOD_SOURCE" ${provider_args[@]+"${provider_args[@]}"} \
                 --ide openvscode --ide-option VERSION="$DEVPOD_OPENVSCODE_VERSION" \
                 --ide-option FORWARD_PORTS=false "$@"
             ;;
