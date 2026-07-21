@@ -48,6 +48,20 @@ if [ ! -f "${SK_CONFIG_DIR}/settings.json" ]; then
   "pipedProviders": []
 }
 EOF
+else
+  # Existing volumes predate the listener-off default and would recreate
+  # the port collision on rebuild. Idempotent migration: fill ONLY the
+  # missing listener keys — a value the user has set (either way) is
+  # never touched. Best-effort: a parse failure leaves the file alone.
+  migrated="$(jq '.interfaces //= {}
+    | if (.interfaces | has("tcp")) then . else .interfaces.tcp = false end
+    | if (.interfaces | has("nmea-tcp")) then . else .interfaces["nmea-tcp"] = false end' \
+    "${SK_CONFIG_DIR}/settings.json" 2>/dev/null || true)"
+  if [ -n "${migrated}" ] \
+      && ! printf '%s\n' "${migrated}" | cmp -s - "${SK_CONFIG_DIR}/settings.json"; then
+    printf '%s\n' "${migrated}" > "${SK_CONFIG_DIR}/settings.json"
+    echo "==> Migrated dev config: inbound tcp/nmea-tcp listeners default to off"
+  fi
 fi
 
 # ── 3. Local plugin repos ───────────────────────────────────────────────
