@@ -136,6 +136,11 @@ Troubleshooting:
   active theme per site from earlier sessions. Pick it once
   (Ctrl+K Ctrl+T → "Default Dark Modern") or clear site data for the
   10800 origin; fresh browsers pick up the server-side default directly.
+- `ping`/`traceroute`/`tcpdump` say "Operation not permitted": expected
+  in rootless podman containers (host-namespace ICMP/raw sockets are out
+  of reach; podman also doesn't seed `ping_group_range`). Use them on the
+  box instead; in-container `dig`, `nslookup`, `nc`, `wget` and `curl`
+  work everywhere.
 
 After the build:
 
