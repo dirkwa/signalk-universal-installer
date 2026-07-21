@@ -206,6 +206,38 @@ pick distinct container names/ports in the plugin's dev config. If the
 devcontainer itself runs under podman and the socket yields permission
 errors, add `"--userns=keep-id"` to `runArgs`.
 
+## Connecting to a production server on the same box
+
+What "the host" resolves to inside the container depends on the runtime —
+and signalk-server's SSRF guard (deliberately, and correctly for
+production) blocks link-local addresses:
+
+| Runtime | Host maps to | Works? |
+|---|---|---|
+| Docker Desktop (Mac/Win) | `host.docker.internal` → `192.168.65.x` | yes |
+| Rootful docker (Linux) | `172.17.0.1` | yes |
+| Rootless podman + slirp4netns | `10.0.2.2` | yes |
+| Rootless podman + **pasta** (the podman ≥ 5 default) | `169.254.1.2` | **no — SSRF-blocked** |
+
+Under pasta the connection test fails with the generic
+`Could not connect to Signal K server` (issue #191); `post-start.sh`
+detects this and prints the remediation at container start. Two verified
+ways out:
+
+- Use the **host's tailscale IP** (CGNAT `100.64/10` is allowed and not
+  mirrored by pasta) in the Data Connection.
+- Or switch the workspace to slirp4netns — uncomment in
+  `devcontainer.json`:
+
+  ```jsonc
+  "runArgs": ["--network=slirp4netns:allow_host_loopback=true"]
+  ```
+
+  rebuild, and connect to `10.0.2.2:<port>` instead.
+
+Devices elsewhere on the LAN are unaffected either way — pasta mirrors
+the host's own address, everything else routes normally.
+
 ## Developing the server
 
 By default the dev instance runs the **pre-built server baked into the

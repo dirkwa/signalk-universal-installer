@@ -23,6 +23,24 @@ else
   echo "    then restart this container (no rebuild — the socket appears in the mounted dir)."
 fi
 
+# ── Same-host production reachability (issue #191) ──────────────────────
+# pasta (rootless podman's default network) maps "the host" to link-local
+# 169.254.1.2 — an address signalk-server's SSRF guard deliberately
+# blocks. A dev-server connection to a production server on the SAME box
+# then fails with the generic "Could not connect to Signal K server".
+# Detect the situation and say so up front instead of letting it surface
+# as a mystery in the admin UI.
+host_ip="$(getent hosts host.containers.internal 2>/dev/null | awk '{print $1; exit}' || true)"
+case "${host_ip}" in
+  169.254.*)
+    echo "==> INFO: running under pasta — the host maps to ${host_ip}, which"
+    echo "    signalk-server's SSRF guard blocks. To connect the dev server to a"
+    echo "    production server on THIS box, use the host's tailscale IP in the"
+    echo "    connection — or switch the workspace to slirp4netns (see the"
+    echo "    commented runArgs in devcontainer.json) and connect to 10.0.2.2."
+    ;;
+esac
+
 # ── Browser IDE (openvscode) defaults ───────────────────────────────────
 # Seed a dark theme into openvscode's server-side User settings — only
 # when no settings exist yet, so a developer's later theme choice is
