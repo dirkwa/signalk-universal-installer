@@ -1860,8 +1860,11 @@ cmd_devpod() {
                 # backs :10800 — never just the first URL in the status
                 # output (a box can serve several hosts).
                 ts_ide_url() {
+                    # Match the handler that backs the IDE's local
+                    # target — not any text containing 10800 (which
+                    # could be a hostname or an unrelated rule).
                     tailscale serve status 2>/dev/null \
-                        | awk '/^https:/{u=$1} /10800/{print u; exit}'
+                        | awk '/^https:/{u=$1} /proxy http:\/\/(127\.0\.0\.1|localhost):10800$/{print u; exit}'
                 }
                 if ! ts_status="$(tailscale serve status 2>/dev/null)"; then
                     # Daemon down or logged out — a serve attempt now
@@ -1877,9 +1880,8 @@ cmd_devpod() {
                         echo "[i] tailscale is here but 'serve' needs privileges; for the Claude panel:"
                         echo "      sudo tailscale serve --bg 10800"
                     fi
-                elif [[ "$ts_status" == *"10800"* ]]; then
-                    ts_url="$(ts_ide_url || true)"
-                    echo "[i] IDE over HTTPS (tailnet only): ${ts_url:-run 'tailscale serve status'}"
+                elif ts_url="$(ts_ide_url)" && [[ -n "$ts_url" ]]; then
+                    echo "[i] IDE over HTTPS (tailnet only): ${ts_url}"
                 else
                     echo "[i] tailscale serve already publishes something else — left untouched."
                     echo "    For the IDE add: sudo tailscale serve --bg --https=8443 10800"

@@ -122,16 +122,23 @@ if [ ! -L "${CR_HOME}" ]; then
     # or I/O failure must never destroy the one working login. cp -n
     # skips files the volume already has (they survived recreates and
     # win) without failing.
+    # Never abort workspace setup over CodeRabbit state (set -e is
+    # active): a failed rm leaves a real dir behind — the volume copy
+    # already exists, and the next recreate starts clean and links it.
     if cp -an "${CR_HOME}/." "${CR_STATE}/" 2>/dev/null; then
-      rm -rf "${CR_HOME}"
+      rm -rf "${CR_HOME}" 2>/dev/null || true
     else
       echo "==> WARNING: could not migrate CodeRabbit state into the volume;"
       echo "    keeping ${CR_HOME} as-is (login will not survive recreates)."
     fi
   fi
   if [ ! -e "${CR_HOME}" ]; then
-    ln -s "${CR_STATE}" "${CR_HOME}"
-    echo "==> CodeRabbit login now persists across rebuilds (claude volume)"
+    if ln -s "${CR_STATE}" "${CR_HOME}" 2>/dev/null; then
+      echo "==> CodeRabbit login now persists across rebuilds (claude volume)"
+    else
+      echo "==> WARNING: could not link ${CR_HOME} into the volume;"
+      echo "    CodeRabbit login will not survive recreates."
+    fi
   fi
 fi
 
