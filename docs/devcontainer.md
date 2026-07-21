@@ -163,6 +163,18 @@ After the build:
 | AI code review        | `cr review --plain`                      |
 | Shell lint            | `shellcheck installer/**/*.sh scripts/*.sh .devcontainer/*.sh dev/*.sh` |
 
+The `dev.sh` verbs are also one-click **status-bar buttons** at the
+bottom of the IDE (look for `SK Start`). Each verb, plus the Playwright
+e2e suite, is a plain VS Code task — `.vscode/tasks.json` is the single
+source for the button set — rendered by the pre-installed
+`actboy168.tasks` extension, so the same list is under *Terminal → Run
+Task* in any IDE flavor. VS Code disables tasks in
+Restricted Mode — accept the one-time workspace-trust dialog and the
+buttons appear. In a workspace created before
+the extension was wired in, `git pull` brings the tasks — add the
+buttons by installing "Tasks" (actboy168) once from the Extensions view,
+or recreate the workspace.
+
 Dev config, installed plugins and security settings persist in the named
 volume `signalk-devpod` (mounted at `/home/node/.signalk`); Claude Code
 login and auto memory persist in `signalk-devpod-claude`; your plugin

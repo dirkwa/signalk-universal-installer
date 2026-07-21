@@ -119,6 +119,9 @@
   "customizations": {
     "vscode": {
       "extensions": [
+        // Renders .vscode/tasks.json as one-click status-bar buttons
+        // (available on Open VSX, so it works in the browser IDE too).
+        "actboy168.tasks",
         "anthropic.claude-code",
         "dbaeumer.vscode-eslint",
         "esbenp.prettier-vscode",
