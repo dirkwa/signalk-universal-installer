@@ -77,6 +77,10 @@ fi
 # ── 3. Local plugin repos ───────────────────────────────────────────────
 # Any plugin checked out under dev/plugins/<name> is linked into the dev
 # instance. Add your repos there (clone, submodule, or extra mount).
+# dev/plugins is the signalk-devpod-plugins VOLUME (survives workspace
+# rebuilds and deletes); it shadows the repo's .gitkeep, so restore it —
+# otherwise the workspace repo shows a phantom deletion in git status.
+[ -f "${DEV_DIR}/plugins/.gitkeep" ] || touch "${DEV_DIR}/plugins/.gitkeep" 2>/dev/null || true
 for plugin in "${DEV_DIR}/plugins"/*/; do
   [ -f "${plugin}/package.json" ] || continue
   name=$(jq -r .name "${plugin}/package.json")
