@@ -18,6 +18,13 @@
     // Persist Claude Code state across rebuilds: login/credentials AND
     // per-project auto memory (~/.claude/projects/<project>/memory/).
     "source=signalk-devpod-claude,target=/home/node/.claude,type=volume",
+    // Plugin checkouts survive workspace rebuilds AND deletes — work in
+    // progress under dev/plugins/ must never share the disposable
+    // workspace lifecycle (a `devpod delete` used to take it along).
+    // NOTE for pre-existing workspaces: the fresh volume shadows plugins
+    // already sitting in the workspace tree — re-clone once, or copy
+    // them from the workspace content dir on the host.
+    "source=signalk-devpod-plugins,target=${containerWorkspaceFolder}/dev/plugins,type=volume",
     // Host's rootless podman socket DIRECTORY (probe-and-fallback): a
     // directory mount never fails container creation when the socket is
     // missing, and enabling podman.socket on the host later makes it

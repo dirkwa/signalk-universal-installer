@@ -11,6 +11,7 @@ workspace-specific context.
   only; when absent, dev.sh runs the pre-built server baked into the image
   at `/home/node/signalk` — production parity, nothing to build)
 - `plugins/<name>/` — local plugin repos, linked into the dev instance
+  (named volume `signalk-devpod-plugins` — survives workspace delete)
 - `companions/<name>/` — optional checkouts of the stack's companion repos
   (signalk-updater-server, signalk-doctor-server, signalk-updater,
   signalk-doctor, signalk-container) via `./clone-companions.sh`

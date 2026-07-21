@@ -148,13 +148,24 @@ After the build:
 
 Dev config, installed plugins and security settings persist in the named
 volume `signalk-devpod` (mounted at `/home/node/.signalk`); Claude Code
-login and auto memory persist in `signalk-devpod-claude`. Both survive
-container rebuilds. Volumes are used instead of home-dir bind mounts so
-ownership is correct under rootful docker, rootless docker and podman
-alike — and the production `~/.signalk*` dirs on the host are never
-touched. Inspect from the host with `docker volume inspect signalk-devpod`
-(or `podman volume inspect`), or just browse `/home/node/.signalk` inside
-the container.
+login and auto memory persist in `signalk-devpod-claude`; your plugin
+checkouts under `dev/plugins/` persist in `signalk-devpod-plugins`. All
+three survive container rebuilds **and** `devpod delete` — deleting and
+recreating the workspace is always safe. The volumes are per box and
+shared by every workspace on it, so a second workspace sees the same
+config, login and plugin checkouts. Volumes are used instead of home-dir
+bind mounts so ownership is correct under rootful docker, rootless
+docker and podman alike — and the production `~/.signalk*` dirs on the
+host are never touched. Inspect from the host with
+`docker volume inspect signalk-devpod` (or `podman volume inspect`), or
+just browse the paths inside the container. A complete reset is the
+volume removal after the workspace delete:
+`docker volume rm signalk-devpod signalk-devpod-claude signalk-devpod-plugins`.
+
+Upgrading a workspace created before the plugins volume existed: the
+fresh volume shadows plugins already sitting in the workspace tree —
+re-clone them once (or copy them from the old location on the host,
+`~/.devpod/agent/contexts/default/workspaces/<name>/content/dev/plugins/`).
 
 ## Why port 4000?
 
