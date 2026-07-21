@@ -30,12 +30,20 @@ fi
 # through the devcontainer's port forward. CAUTION: with the optional
 # --network=host runArgs (socketcan) it becomes LAN-visible — enable
 # security in the admin UI if that matters on your network.
+# The inbound NMEA0183 (:10110) and Signal K TCP (:8375) listeners are
+# seeded OFF: devpod auto-forwards every listening port to the host,
+# where a production stack already holds those two (field report:
+# "8375: address already in use"). Re-enable in Server → Settings when a
+# dev consumer actually needs them.
 mkdir -p "${SK_CONFIG_DIR}"
 if [ ! -f "${SK_CONFIG_DIR}/settings.json" ]; then
   echo "==> Seeding fresh dev config in ${SK_CONFIG_DIR}"
   cat > "${SK_CONFIG_DIR}/settings.json" <<'EOF'
 {
-  "interfaces": {},
+  "interfaces": {
+    "tcp": false,
+    "nmea-tcp": false
+  },
   "ssl": false,
   "pipedProviders": []
 }

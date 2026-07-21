@@ -162,6 +162,29 @@ The production stack binds 80 or 3000 (signalk-server), 3003 (Updater
 Console) and 3004 (Doctor Console). The dev instance uses 4000 so both can
 run side by side on the same box.
 
+## Getting data into the dev instance
+
+- **No boat needed:** `dev/dev.sh demo` streams the bundled sample NMEA
+  log — enough for most plugin work and for the e2e suite.
+- **Live sources** are added as usual in the admin UI (Server → Data
+  Connections) — with one container gotcha: inside the devcontainer,
+  `localhost` is the **container itself**. To reach a production
+  signalk-server or gateway running **on the same box**, use
+  `host.containers.internal` (podman) / `host.docker.internal` (docker),
+  or the box's LAN IP. Devices elsewhere on the network (YDWG-02, W2K-1,
+  another boat server) work by their normal IPs. The same rule applies to
+  WebSocket/Signal K connections and their access-token requests.
+- **can0 / socketcan** does not exist in the container by default —
+  socketcan is bound to the network namespace. Uncomment the
+  `--network=host` runArgs in `devcontainer.json` and rebuild (see
+  "NMEA 2000 access" below and docs/socketcan.md). `localhost` then IS
+  the box, and the dev instance becomes LAN-visible — enable security.
+- The dev instance's own inbound NMEA0183 (:10110) and Signal K TCP
+  (:8375) listeners are seeded **off**: devpod forwards every listening
+  port to the host, where a production stack already occupies those two
+  ("address already in use"). Re-enable them in Server → Settings when a
+  dev consumer needs them.
+
 ## Developing plugins
 
 Put your plugin repos under `dev/plugins/`:
