@@ -59,8 +59,13 @@ else
     "${SK_CONFIG_DIR}/settings.json" 2>/dev/null || true)"
   if [ -n "${migrated}" ] \
       && ! printf '%s\n' "${migrated}" | cmp -s - "${SK_CONFIG_DIR}/settings.json"; then
-    printf '%s\n' "${migrated}" > "${SK_CONFIG_DIR}/settings.json"
-    echo "==> Migrated dev config: inbound tcp/nmea-tcp listeners default to off"
+    # Atomic replace (temp file + rename in the same dir): a crash mid-
+    # write must never leave a truncated settings.json behind.
+    if tmp="$(mktemp "${SK_CONFIG_DIR}/.settings.json.XXXXXX" 2>/dev/null)"; then
+      printf '%s\n' "${migrated}" > "${tmp}"
+      mv "${tmp}" "${SK_CONFIG_DIR}/settings.json"
+      echo "==> Migrated dev config: inbound tcp/nmea-tcp listeners default to off"
+    fi
   fi
 fi
 
