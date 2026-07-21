@@ -168,11 +168,13 @@ run side by side on the same box.
   log — enough for most plugin work and for the e2e suite.
 - **Live sources** are added as usual in the admin UI (Server → Data
   Connections) — with one container gotcha: inside the devcontainer,
-  `localhost` is the **container itself**. To reach a production
-  signalk-server or gateway running **on the same box**, use
-  `host.containers.internal` (podman) / `host.docker.internal` (docker),
-  or the box's LAN IP. Devices elsewhere on the network (YDWG-02, W2K-1,
-  another boat server) work by their normal IPs. The same rule applies to
+  `localhost` is the **container itself**. Reaching a production
+  signalk-server **on the same box** depends on the container runtime —
+  under rootless podman with pasta the usual host aliases resolve to a
+  link-local address the server's SSRF guard blocks; see "Connecting to a
+  production server on the same box" below for the runtime matrix and the
+  working addresses. Devices elsewhere on the network (YDWG-02, W2K-1,
+  another boat server) work by their normal IPs. The same rules apply to
   WebSocket/Signal K connections and their access-token requests.
 - **can0 / socketcan** does not exist in the container by default —
   socketcan is bound to the network namespace. Uncomment the
