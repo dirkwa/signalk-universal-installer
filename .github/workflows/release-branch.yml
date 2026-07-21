@@ -1,0 +1,57 @@
+# Devpod release channel: every v* tag force-updates the 'release'
+# branch to the tagged commit. `signalk devpod up` clones @release, so
+# master can break between tags without breaking new dev workspaces.
+# Tagging IS the release act; rollback = re-run manually (Actions ->
+# release-branch -> Run workflow) with an earlier tag.
+name: release-branch
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing v* tag to point the release branch at'
+        required: true
+
+# Serialize updates: each run force-pushes, so an older run finishing
+# last must not overwrite a newer release. Queued, never cancelled —
+# a manual rollback dispatched after a tag run must still apply.
+concurrency:
+  group: release-branch
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    # Job-scoped on purpose: only this job may write the release ref.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full fetch so any existing tag can be resolved and verified,
+          # not just the ref that triggered the run.
+          fetch-depth: 0
+
+      - name: Advance release branch to the tag
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$TAG_INPUT"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          # Only real v* tags may become the channel content — a typo or
+          # a branch name here would hand every `signalk devpod up` a
+          # non-release tree.
+          case "$tag" in
+            v*) ;;
+            *) echo "Refusing: '$tag' is not a v* tag" >&2; exit 1 ;;
+          esac
+          if ! sha="$(git rev-parse --verify --quiet "refs/tags/${tag}^{commit}")"; then
+            echo "Refusing: tag '$tag' does not exist" >&2
+            exit 1
+          fi
+          git push origin "+${sha}:refs/heads/release"

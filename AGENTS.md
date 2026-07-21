@@ -65,7 +65,7 @@ Skip `cr review` only for `chore(release): X.Y.Z` PRs.
 
 ### Release flow
 
-There is no npm publish for this repo — it's pure bash. GitHub Pages publishes the script tree on every push to `master` and on `v*` tags. Tag triggers add the tag name as `INSTALLER_VERSION` via a `sed` substitution at deploy time.
+There is no npm publish for this repo — it's pure bash. GitHub Pages publishes the script tree on every push to `master` and on `v*` tags. Tag triggers add the tag name as `INSTALLER_VERSION` via a `sed` substitution at deploy time. A `v*` tag also force-updates the `release` branch (`.github/workflows/release-branch.yml`) — the channel `signalk devpod up` clones — so master is free to break between tags without breaking new dev workspaces.
 
 ### Branch protection / merging
 

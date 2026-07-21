@@ -196,6 +196,29 @@ fresh volume shadows plugins already sitting in the workspace tree —
 re-clone them once (or copy them from the old location on the host,
 `~/.devpod/agent/contexts/default/workspaces/<name>/content/dev/plugins/`).
 
+## Release channel
+
+`signalk devpod up` clones the **`release` branch**, not `master`.
+Master is where development happens and may break at any time; the
+release branch is force-updated to every `v*` tag by CI
+(`.github/workflows/release-branch.yml`) — tagging is the release act.
+What this means:
+
+- New workspaces always start from the latest tagged state.
+- Upgrading an existing workspace is unchanged — `git pull` inside the
+  workspace, then `signalk devpod up --recreate` on the host — but the
+  pull now lands on the latest release, never on a half-finished
+  master.
+- Unreleased state (developing the devcontainer itself, verifying a fix
+  before it is tagged): `SIGNALK_DEVPOD_REF=master signalk devpod up`.
+  The ref only matters when the workspace is created — an existing
+  workspace keeps the clone it was created from until
+  `signalk devpod delete` + `up` (the three named volumes survive, so
+  delete/recreate stays safe).
+
+Workspaces created before the channel existed track `master`; migrate
+once with `signalk devpod delete` + `signalk devpod up`.
+
 ## Why port 4000?
 
 The production stack binds 80 or 3000 (signalk-server), 3003 (Updater
