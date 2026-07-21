@@ -61,7 +61,10 @@ the box already — a devpod forward would only collide with them.)
 
 On a box provisioned by the universal installer, all of this section is
 one command — `signalk devpod up` — which also installs the pinned devpod
-CLI to `~/.local/bin` on first use and points it at podman.
+CLI to `~/.local/bin` on first use, points it at podman, and — when
+tailscale is present and `tailscale serve` is unclaimed — publishes the
+IDE as HTTPS on the tailnet automatically (secure context, see the
+caveat below; an existing serve config is never touched).
 
 The devcontainer runs with **host networking** (production parity), so
 under podman the IDE serves directly on `http://<box-ip>:10800` and the
