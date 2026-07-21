@@ -31,6 +31,16 @@ RUN printf 'allow-scripts[]=@anthropic-ai/claude-code\n' >> /root/.npmrc
 # git@github.com:...` dies with "cannot run ssh" (field report).
 # gh: GitHub CLI for clone/auth/PR work from inside the container; from
 # GitHub's apt repo, same keyring pattern the base uses for docker-ce-cli.
+# Basic network debugging (boat networks are half the job): ping,
+# nslookup/dig, wget, traceroute, netcat, tcpdump, htop. bind9-dnsutils
+# is declared here even though a devcontainer feature happens to drag it
+# in — guaranteed, not incidental. Honest caveat, verified: ICMP/raw
+# tools (ping, traceroute, live tcpdump captures) EPERM in ROOTLESS
+# PODMAN containers — host netns raw/ICMP sockets need privileges in the
+# initial user namespace, and podman (unlike docker) does not seed
+# ping_group_range for bridge mode either. They work under docker
+# runtimes and for pcap reading; on podman boxes run them on the HOST.
+# dig/nslookup/nc/wget/curl use plain sockets and work everywhere.
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -44,6 +54,13 @@ RUN install -m 0755 -d /etc/apt/keyrings \
         unzip \
         openssh-client \
         gh \
+        iputils-ping \
+        bind9-dnsutils \
+        wget \
+        traceroute \
+        netcat-openbsd \
+        tcpdump \
+        htop \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Playwright / Chromium ────────────────────────────────────────────────
