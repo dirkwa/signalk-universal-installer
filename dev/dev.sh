@@ -86,23 +86,40 @@ start() {
   verify_up
 }
 
-# Demo mode notes: direct invocation instead of bin/nmea-from-file (npm
-# strips the exec bit from undeclared bin/ scripts). -s always resolves
-# relative to the config dir, so unset SIGNALK_NODE_CONFIG_DIR: the config
-# dir then defaults to the server root — sample settings and samples/
-# resolve, and demo state stays out of the persistent dev config.
+# Demo mode: the DEV CONFIG DIR with the sample-data settings — linked
+# plugins stay loaded (issue #192: demo previously ran on an isolated
+# config and "removed" every plugin). The sample settings file is copied
+# into the config dir because -s always resolves relative to it; copy
+# only when absent so local tweaks survive. Direct signalk-server
+# invocation instead of bin/nmea-from-file (npm strips the exec bit from
+# undeclared bin/ scripts).
+seed_demo_settings() {
+  if [ ! -f "${CONFIG_DIR}/settings/volare-file-settings.json" ]; then
+    mkdir -p "${CONFIG_DIR}/settings"
+    # The sample-log path inside the settings is relative and would now
+    # resolve against the config dir — pin it to the server's copy.
+    sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
+      "${SERVER_ROOT}/settings/volare-file-settings.json" \
+      > "${CONFIG_DIR}/settings/volare-file-settings.json"
+  fi
+}
+
 demo() {
   if is_running; then stop; fi
   ensure_port_free
+  seed_demo_settings
   echo "Starting SignalK dev server with sample NMEA data on port ${PORT} — ${SERVER_FLAVOR}..."
-  launch env -u SIGNALK_NODE_CONFIG_DIR PORT="${PORT}" ./bin/signalk-server \
-    -s settings/volare-file-settings.json
+  launch env PORT="${PORT}" ./bin/signalk-server \
+    -c "${CONFIG_DIR}" -s settings/volare-file-settings.json
   verify_up
 }
 
 # Foreground variant for supervisors that own the process lifecycle
 # (Playwright's webServer): no pidfile, no log redirect, exec so the
-# supervisor signals the server itself, not a wrapper shell.
+# supervisor signals the server itself, not a wrapper shell. DELIBERATELY
+# stays on the isolated package config (SIGNALK_NODE_CONFIG_DIR unset):
+# e2e must be deterministic and independent of whatever plugins a
+# developer has linked into the dev config.
 demo_fg() {
   ensure_port_free
   cd "${SERVER_ROOT}"
