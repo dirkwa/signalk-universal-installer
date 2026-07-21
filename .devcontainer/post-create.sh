@@ -65,6 +65,11 @@ else
       printf '%s\n' "${migrated}" > "${tmp}"
       mv "${tmp}" "${SK_CONFIG_DIR}/settings.json"
       echo "==> Migrated dev config: inbound tcp/nmea-tcp listeners default to off"
+    else
+      echo "==> WARNING: could not write migrated dev config (mktemp failed)."
+      echo "    Inbound :10110/:8375 listeners may still be enabled — devpod's"
+      echo "    port forward can collide with a production stack. Disable them"
+      echo "    manually in Server → Settings."
     fi
   fi
 fi
