@@ -1,17 +1,20 @@
-# Devpod release channel: every v* tag force-updates the 'release'
-# branch to the tagged commit. `signalk devpod up` clones @release, so
-# master can break between tags without breaking new dev workspaces.
-# Tagging IS the release act; rollback = re-run manually (Actions ->
-# release-branch -> Run workflow) with an earlier tag.
+# Devpod release channel: every version tag (vX.Y.Z) force-updates the
+# 'release' branch to the tagged commit. `signalk devpod up` clones
+# @release, so master can break between tags without breaking new dev
+# workspaces. Tagging IS the release act; rollback = re-run manually
+# (Actions -> release-branch -> Run workflow) with an earlier tag.
+# The dotted pattern, not plain v*: the repo also carries non-version
+# v-tags (v1-keeper-final) that must never become the channel content —
+# and a bare v[0-9]* glob would still match them.
 name: release-branch
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v[0-9]*.[0-9]*.[0-9]*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing v* tag to point the release branch at'
+        description: 'Existing version tag (vX.Y.Z) to point the release branch at'
         required: true
 
 # Serialize updates: each run force-pushes, so an older run finishing
@@ -43,12 +46,12 @@ jobs:
           else
             tag="${GITHUB_REF#refs/tags/}"
           fi
-          # Only real v* tags may become the channel content — a typo or
-          # a branch name here would hand every `signalk devpod up` a
-          # non-release tree.
+          # Only real version tags may become the channel content — a
+          # typo, a branch name, or a non-version v-tag (v1-keeper-final)
+          # here would hand every `signalk devpod up` a non-release tree.
           case "$tag" in
-            v*) ;;
-            *) echo "Refusing: '$tag' is not a v* tag" >&2; exit 1 ;;
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "Refusing: '$tag' is not a vX.Y.Z version tag" >&2; exit 1 ;;
           esac
           if ! sha="$(git rev-parse --verify --quiet "refs/tags/${tag}^{commit}")"; then
             echo "Refusing: tag '$tag' does not exist" >&2

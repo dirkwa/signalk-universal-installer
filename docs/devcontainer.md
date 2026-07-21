@@ -200,7 +200,7 @@ re-clone them once (or copy them from the old location on the host,
 
 `signalk devpod up` clones the **`release` branch**, not `master`.
 Master is where development happens and may break at any time; the
-release branch is force-updated to every `v*` tag by CI
+release branch is force-updated to every version tag (`vX.Y.Z`) by CI
 (`.github/workflows/release-branch.yml`) — tagging is the release act.
 What this means:
 

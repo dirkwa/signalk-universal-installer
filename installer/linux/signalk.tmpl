@@ -1751,15 +1751,16 @@ cmd_bug_report() {
 DEVPOD_VERSION="v0.6.15"
 DEVPOD_OPENVSCODE_VERSION="v1.109.5"
 # Workspaces track the 'release' BRANCH, which CI force-updates to every
-# v* tag (.github/workflows/release-branch.yml) — master is where
-# development happens and may break at any time without breaking
-# `signalk devpod up`. A branch rather than a tag clone keeps the
-# documented upgrade flow intact: `git pull` inside the workspace is
+# version tag, vX.Y.Z (.github/workflows/release-branch.yml) — master
+# is where development happens and may break at any time without
+# breaking `signalk devpod up`. A branch rather than a tag clone keeps
+# the documented upgrade flow intact: `git pull` inside the workspace is
 # never detached and lands on the latest release.
 # Unreleased state (devcontainer development, verifying a fix):
 #   SIGNALK_DEVPOD_REF=master signalk devpod up
 DEVPOD_REF="${SIGNALK_DEVPOD_REF:-release}"
-DEVPOD_SOURCE="github.com/dirkwa/signalk-universal-installer@${DEVPOD_REF}"
+DEVPOD_REPO="github.com/dirkwa/signalk-universal-installer"
+DEVPOD_SOURCE="${DEVPOD_REPO}@${DEVPOD_REF}"
 DEVPOD_WORKSPACE="signalk-universal-installer"
 
 devpod_bin() {
@@ -1822,6 +1823,26 @@ cmd_devpod() {
 
     case "$sub" in
         up)
+            # Fail-open bootstrap guard: until the first vX.Y.Z tag
+            # after the channel shipped, the release branch does not
+            # exist and a FRESH workspace would die in devpod with a
+            # cryptic, locale-dependent git error. Refuse with a real
+            # explanation only when all three hold: default channel, no
+            # existing workspace (an existing one re-ups from its own
+            # clone without consulting the source — verified), and a
+            # definitive 404 from the GitHub API. Offline, rate-limited
+            # or otherwise unsure: proceed and let devpod decide.
+            if [[ "$DEVPOD_REF" == "release" ]] \
+                && ! "$bin" list 2>/dev/null | grep -q "$DEVPOD_WORKSPACE" \
+                && [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+                    "https://api.github.com/repos/${DEVPOD_REPO#github.com/}/branches/release" \
+                    2>/dev/null)" == "404" ]]; then
+                echo "[ERR] The 'release' channel branch does not exist (yet)." >&2
+                echo "      It is created by the first vX.Y.Z tag once the release" >&2
+                echo "      channel has shipped. Until then, development state works:" >&2
+                echo "        SIGNALK_DEVPOD_REF=master signalk devpod up" >&2
+                exit 1
+            fi
             echo "[i] Browser IDE will serve on http://<this-box>:10800 (host networking),"
             echo "    dev server on :4000 — they keep running after this command returns."
             echo "    First run downloads the dev image (a few minutes)."
