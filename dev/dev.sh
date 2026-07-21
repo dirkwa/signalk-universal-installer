@@ -94,14 +94,25 @@ start() {
 # invocation instead of bin/nmea-from-file (npm strips the exec bit from
 # undeclared bin/ scripts).
 seed_demo_settings() {
-  if [ ! -f "${CONFIG_DIR}/settings/volare-file-settings.json" ]; then
-    mkdir -p "${CONFIG_DIR}/settings"
-    # The sample-log path inside the settings is relative and would now
-    # resolve against the config dir — pin it to the server's copy.
-    sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
-      "${SERVER_ROOT}/settings/volare-file-settings.json" \
-      > "${CONFIG_DIR}/settings/volare-file-settings.json"
+  local copy="${CONFIG_DIR}/settings/volare-file-settings.json"
+  local sample
+  if [ -f "${copy}" ]; then
+    # Keep an existing copy (local tweaks survive) — but only while the
+    # sample file it references still exists. The pinned absolute path
+    # breaks when the server flavor changes (e.g. a removed source
+    # checkout), and a dead feed is silent — reseed instead.
+    sample="$(jq -r 'first(.. | .filename? // empty)' "${copy}" 2>/dev/null || true)"
+    if [ -n "${sample}" ] && [ -f "${sample}" ]; then
+      return 0
+    fi
+    echo "Demo settings referenced a missing sample log — reseeding from ${SERVER_FLAVOR}."
   fi
+  mkdir -p "${CONFIG_DIR}/settings"
+  # The sample-log path inside the settings is relative and would now
+  # resolve against the config dir — pin it to the server's copy.
+  sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
+    "${SERVER_ROOT}/settings/volare-file-settings.json" \
+    > "${copy}"
 }
 
 demo() {
