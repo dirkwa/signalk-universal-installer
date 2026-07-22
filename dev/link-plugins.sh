@@ -131,12 +131,14 @@ link_plugins() {
     [ "${all}" -eq 1 ] && return 0
   fi
 
-  # Link ALL plugins in ONE call. ~/.signalk/package.json carries no
-  # dependencies, so a per-plugin `npm install --no-save <one>` treats every
-  # other linked plugin as extraneous and prunes it — one call with all
-  # paths keeps them all. A per-plugin build failure above is non-fatal (you
-  # may be mid-fix), but the link step itself failing is a real error, so
-  # propagate it.
+  # Link ALL plugins in ONE call. Local plugins are linked with --no-save, so
+  # they are never recorded in ~/.signalk/package.json; a per-plugin
+  # `npm install --no-save <one>` therefore treats every OTHER linked plugin
+  # as extraneous and prunes it — one call with all paths keeps them all.
+  # (Default plugins installed as SAVED deps — e.g. signalk-container from
+  # post-create.sh — are in package.json and survive this untouched.)
+  # A per-plugin build failure above is non-fatal (you may be mid-fix), but
+  # the link step itself failing is a real error, so propagate it.
   log "Linking ${#paths[@]} local plugin(s) into ${CONFIG_DIR}"
   if ! ( cd "${CONFIG_DIR}" && npm install --no-save --no-audit --no-fund "${paths[@]}" ); then
     warn "linking plugins failed — see the npm output above"

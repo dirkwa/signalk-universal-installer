@@ -77,7 +77,33 @@ else
   fi
 fi
 
-# ── 3. Local plugin repos ───────────────────────────────────────────────
+# ── 3. Default plugins from npm ─────────────────────────────────────────
+# signalk-container ships enabled by default so container-runtime consumer
+# plugins (questdb, grafana, mayara, …) work out of the box. It is installed
+# as a SAVED dependency, so the link-plugins step below (which runs
+# `npm install --no-save <local paths>`) keeps it — only packages absent
+# from package.json get pruned. Skipped when a source checkout exists under
+# dev/plugins/signalk-container (developing the plugin itself): that local
+# link supersedes the published package. Install-if-missing keeps rebuilds
+# offline-safe.
+if [ ! -e "${SK_CONFIG_DIR}/node_modules/signalk-container" ] \
+    && [ ! -d "${DEV_DIR}/plugins/signalk-container" ]; then
+  echo "==> Installing default plugin signalk-container from npm"
+  [ -f "${SK_CONFIG_DIR}/package.json" ] \
+    || printf '{\n  "name": "signalk-server-config",\n  "version": "0.0.0"\n}\n' \
+         > "${SK_CONFIG_DIR}/package.json"
+  ( cd "${SK_CONFIG_DIR}" \
+      && npm install --save --no-audit --no-fund "signalk-container@^1.22.0" ) \
+    || echo "==> WARNING: could not install signalk-container (offline?) — skipping"
+fi
+# Enable it by default without clobbering an existing choice (whether it came
+# from npm above or a local dev/plugins checkout).
+mkdir -p "${SK_CONFIG_DIR}/plugin-config-data"
+sk_container_cfg="${SK_CONFIG_DIR}/plugin-config-data/signalk-container.json"
+[ -f "${sk_container_cfg}" ] \
+  || printf '{\n  "enabled": true,\n  "configuration": {}\n}\n' > "${sk_container_cfg}"
+
+# ── 4. Local plugin repos ───────────────────────────────────────────────
 # Any plugin checked out under dev/plugins/<name> is built and linked into
 # the dev instance. Add your repos there (clone, submodule, or extra mount).
 # dev/plugins is the signalk-devpod-plugins VOLUME (survives workspace
@@ -89,14 +115,16 @@ fi
 # workspaces, so after a delete/recreate the old links dangle and npm dies
 # with EACCES reifying over them), builds each plugin on first run, and
 # links them ALL in one npm call — a per-plugin install would prune the
-# others, since ~/.signalk/package.json carries no dependencies.
+# others, since local plugins are linked with --no-save (not recorded in
+# ~/.signalk/package.json). Saved deps like the default signalk-container
+# above stay in package.json and are kept.
 SIGNALK_NODE_CONFIG_DIR="${SK_CONFIG_DIR}" bash "${DEV_DIR}/link-plugins.sh" \
   || echo "==> WARNING: plugin linking reported errors (see above)"
 
-# ── 4. e2e test dependencies ────────────────────────────────────────────
+# ── 5. e2e test dependencies ────────────────────────────────────────────
 ( cd "${DEV_DIR}" && npm install )
 
-# ── 5. CodeRabbit auth persistence ──────────────────────────────────────
+# ── 6. CodeRabbit auth persistence ──────────────────────────────────────
 # The CLI keeps its login in ~/.coderabbit (auth.json) — container-
 # lifetime storage, so every workspace recreate logged the user out
 # (field report). Symlink it into the signalk-devpod-claude volume.

@@ -53,7 +53,16 @@ The host's podman socket dir is mounted at `/run/host-podman/` (probe-and-
 fallback: the container starts fine without a socket; post-start prints an
 INFO with remediation). `CONTAINER_HOST`/`DOCKER_HOST` and the image's
 containers.conf point at `/run/host-podman/podman.sock`, so signalk-container
-and its consumer plugins work unchanged. Managed containers run as siblings
+and its consumer plugins work unchanged.
+
+`signalk-container` is a **default plugin**: `post-create.sh` installs it
+from npm (a SAVED dep in `~/.signalk`, so `link-plugins` keeps it) and seeds
+it enabled, so container-runtime consumer plugins work out of the box with no
+manual setup. To develop signalk-container itself, check it out under
+`dev/plugins/signalk-container` — that local link supersedes the npm copy
+(post-create skips the npm install when the checkout is present).
+
+Managed containers run as siblings
 on the host. `dev.sh` exports `SIGNALK_CONTAINER_NAMESPACE=devpod`, so this
 instance's managed containers and jobs are named `devpod-<name>` /
 `devpod-job-*` and can never collide with, reap, or recreate the production
