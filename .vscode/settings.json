@@ -1,0 +1,19 @@
+{
+  // Keep VS Code's file watcher off large generated trees so it does not
+  // exhaust the host's inotify watches (fs.inotify.max_user_watches) and
+  // fail with "Unable to watch for file changes ... (ENOSPC)". A fresh
+  // dev/plugins/* checkout adds tens of thousands of node_modules files —
+  // ~97% of the files in this workspace. See docs/devcontainer.md.
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/build/**": true
+  },
+  // node_modules is installed/linked here, not authored — keep it out of
+  // full-text search too.
+  "search.exclude": {
+    "**/node_modules": true
+  }
+}
