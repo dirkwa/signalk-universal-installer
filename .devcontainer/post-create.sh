@@ -85,9 +85,19 @@ fi
 # from package.json get pruned. Skipped when a source checkout exists under
 # dev/plugins/signalk-container (developing the plugin itself): that local
 # link supersedes the published package. Install-if-missing keeps rebuilds
-# offline-safe.
+# offline-safe — which also pins the copy at its first-installed version, so
+# to upgrade the default, delete node_modules/signalk-container and rebuild
+# (the next post-create reinstalls the current ^1.22.0).
 if [ ! -e "${SK_CONFIG_DIR}/node_modules/signalk-container" ] \
     && [ ! -d "${DEV_DIR}/plugins/signalk-container" ]; then
+  # A source checkout that was linked then deleted leaves a DANGLING symlink
+  # here (the config volume outlives workspaces). `[ ! -e ]` above is true
+  # for it, so we'd reach `npm install`, which reifies over the stale link
+  # and hits the same EACCES the link-plugins prune guards against — but that
+  # prune runs in the next step. Clear it first.
+  if [ -L "${SK_CONFIG_DIR}/node_modules/signalk-container" ]; then
+    rm -f "${SK_CONFIG_DIR}/node_modules/signalk-container"
+  fi
   echo "==> Installing default plugin signalk-container from npm"
   [ -f "${SK_CONFIG_DIR}/package.json" ] \
     || printf '{\n  "name": "signalk-server-config",\n  "version": "0.0.0"\n}\n' \

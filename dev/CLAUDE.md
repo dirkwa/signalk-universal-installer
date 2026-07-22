@@ -56,11 +56,19 @@ containers.conf point at `/run/host-podman/podman.sock`, so signalk-container
 and its consumer plugins work unchanged.
 
 `signalk-container` is a **default plugin**: `post-create.sh` installs it
-from npm (a SAVED dep in `~/.signalk`, so `link-plugins` keeps it) and seeds
-it enabled, so container-runtime consumer plugins work out of the box with no
-manual setup. To develop signalk-container itself, check it out under
+from npm (a SAVED dep `^1.22.0` in `~/.signalk`, so `link-plugins` keeps it)
+and seeds it enabled, so container-runtime consumer plugins work out of the
+box with no manual setup. The install is install-if-missing (offline-safe),
+which pins it at first-install — to **upgrade** the default, delete
+`~/.signalk/node_modules/signalk-container` and rebuild the workspace.
+
+To **develop** signalk-container itself, check it out under
 `dev/plugins/signalk-container` — that local link supersedes the npm copy
-(post-create skips the npm install when the checkout is present).
+(post-create skips the npm install when the checkout is present). Keep the
+checkout on a version that satisfies the saved `^1.22.0` range: npm flags a
+non-satisfying version (a `0.x`/`2.x` branch, a prerelease) as `invalid` and
+strict peer resolution can escalate it to `ERESOLVE`. If you need such a
+version, drop the saved dep from `~/.signalk/package.json` first.
 
 Managed containers run as siblings
 on the host. `dev.sh` exports `SIGNALK_CONTAINER_NAMESPACE=devpod`, so this
