@@ -17,6 +17,13 @@ set -euo pipefail
 DEV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${SIGNALK_NODE_CONFIG_DIR:-$HOME/.signalk}"
 PORT="${PORT:-4000}"
+# Namespace every managed container and one-shot job this dev instance
+# creates so it can never collide with, reap, or recreate the production
+# `sk-*` stack sharing this host's podman socket. signalk-container reads
+# this; builds without namespace support simply ignore it (harmless). The
+# `env …` launches below inherit this exported value. Override by exporting
+# SIGNALK_CONTAINER_NAMESPACE yourself before invoking dev.sh.
+export SIGNALK_CONTAINER_NAMESPACE="${SIGNALK_CONTAINER_NAMESPACE:-devpod}"
 # Port-scoped state: a second instance on another port gets its own files
 # and can never signal this one.
 PIDFILE="/tmp/signalk-dev-${PORT}.pid"
