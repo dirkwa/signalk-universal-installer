@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # Convenience wrapper around the dev SignalK instance.
 #
-#   dev.sh start     start server on $PORT (default 4000) with ~/.signalk config
-#   dev.sh demo      start server with bundled sample NMEA0183 data
-#   dev.sh demo-fg   demo server in the FOREGROUND (Playwright webServer)
-#   dev.sh stop      stop the dev server
-#   dev.sh restart   stop + start (picks up plugin code changes!)
-#   dev.sh logs      tail the server log
-#   dev.sh status    is it running?
+#   ./dev.sh start     start server on $PORT (default 4000) with ~/.signalk config
+#   ./dev.sh demo      start server with bundled sample NMEA0183 data
+#   ./dev.sh demo-fg   demo server in the FOREGROUND (Playwright webServer)
+#   ./dev.sh stop      stop the dev server
+#   ./dev.sh restart   stop + start (picks up plugin code changes!)
+#   ./dev.sh link      build + link dev/plugins/* into the dev config (no restart)
+#   ./dev.sh logs      tail the server log
+#   ./dev.sh status    is it running?
+#
+# start/demo/restart auto-link every plugin under dev/plugins/ when launching
+# the server (via link-plugins.sh), so a freshly cloned plugin just works.
+# Restart after any plugin code change (Node caches modules); for TypeScript
+# source edits, force the rebuild with SK_DEV_PLUGIN_BUILD=1 ./dev.sh restart.
 #
 # Server resolution: a source checkout at dev/signalk-server/ (server
 # development) takes precedence; otherwise the pre-built server baked into
@@ -75,12 +81,22 @@ verify_up() {
   exit 1
 }
 
+# Build (first run) and link every dev/plugins/* into the dev config so a
+# freshly cloned plugin is picked up on start. Pass the resolved config dir
+# explicitly — link-plugins.sh refuses to guess one. Exit status is
+# preserved so `./dev.sh link` can be scripted; start/demo call it
+# non-fatally below — a plugin problem must never stop the server coming up.
+link_plugins() {
+  SIGNALK_NODE_CONFIG_DIR="${CONFIG_DIR}" bash "${DEV_DIR}/link-plugins.sh"
+}
+
 start() {
   if is_running; then
     echo "Dev server already running (pid $(cat "${PIDFILE}"), port ${PORT})"
     return 0
   fi
   ensure_port_free
+  link_plugins || echo "WARNING: plugin linking reported errors — starting anyway" >&2
   echo "Starting SignalK dev server on port ${PORT} — ${SERVER_FLAVOR}..."
   launch env PORT="${PORT}" ./bin/signalk-server -c "${CONFIG_DIR}"
   verify_up
@@ -118,6 +134,7 @@ seed_demo_settings() {
 demo() {
   if is_running; then stop; fi
   ensure_port_free
+  link_plugins || echo "WARNING: plugin linking reported errors — starting anyway" >&2
   seed_demo_settings
   echo "Starting SignalK dev server with sample NMEA data on port ${PORT} — ${SERVER_FLAVOR}..."
   launch env PORT="${PORT}" ./bin/signalk-server \
@@ -162,6 +179,7 @@ case "${1:-}" in
   demo-fg) demo_fg ;;
   stop)    stop ;;
   restart) stop; start ;;
+  link)    link_plugins ;;
   logs)    tail -f "${LOGFILE}" ;;
   status)  is_running && echo "running (pid $(cat "${PIDFILE}"), port ${PORT}, ${SERVER_FLAVOR})" || echo "stopped" ;;
   *) grep '^#   ' "$0" | sed 's/^#   //'; exit 1 ;;
