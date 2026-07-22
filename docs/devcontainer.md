@@ -162,6 +162,14 @@ Troubleshooting:
   box (a rootless container can't change it from inside) with a persistent
   drop-in: `echo 'fs.inotify.max_user_watches=524288' | sudo tee
   /etc/sysctl.d/99-inotify-watches.conf && sudo sysctl --system`.
+- `git push`/`pull` fails with `could not read Username` or a
+  `git-credentials … --port` **connection refused**: devpod's credential
+  proxy only serves creds while an active `devpod up` client holds the
+  tunnel to your machine — the browser IDE and attach modes have none. Setup
+  routes GitHub auth through `gh` instead (`gh auth setup-git`, with the
+  login persisted in the claude volume), so `git push` to HTTPS GitHub
+  remotes works in every mode. If it still fails, run `gh auth login` once,
+  then `gh auth setup-git`. (SSH remotes don't use this — they need a key.)
 
 After the build:
 
@@ -189,8 +197,8 @@ or recreate the workspace.
 
 Dev config, installed plugins and security settings persist in the named
 volume `signalk-devpod` (mounted at `/home/node/.signalk`); Claude Code
-login, auto memory and the CodeRabbit CLI login persist in
-`signalk-devpod-claude`; your plugin
+login, auto memory, the CodeRabbit CLI login and the GitHub CLI (`gh`)
+login persist in `signalk-devpod-claude`; your plugin
 checkouts under `dev/plugins/` persist in `signalk-devpod-plugins`. All
 three survive container rebuilds **and** `devpod delete` — deleting and
 recreating the workspace is always safe. The volumes are per box and
