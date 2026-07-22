@@ -54,8 +54,13 @@ fallback: the container starts fine without a socket; post-start prints an
 INFO with remediation). `CONTAINER_HOST`/`DOCKER_HOST` and the image's
 containers.conf point at `/run/host-podman/podman.sock`, so signalk-container
 and its consumer plugins work unchanged. Managed containers run as siblings
-on the host: pick container names/ports that don't clash with the production
-stack. Inspect with `podman ps` / `podman logs`.
+on the host. `dev.sh` exports `SIGNALK_CONTAINER_NAMESPACE=devpod`, so this
+instance's managed containers and jobs are named `devpod-<name>` /
+`devpod-job-*` and can never collide with, reap, or recreate the production
+`sk-*` stack on the same podman socket. That isolates **names and reaping**,
+not host **ports** — a consumer plugin that publishes a fixed host port
+still needs a non-colliding port for dev. Inspect with `podman ps` /
+`podman logs` (production is `sk-*`, this instance is `devpod-*`).
 
 ## Pre-PR (from AGENTS.md, tooling is in this container)
 
