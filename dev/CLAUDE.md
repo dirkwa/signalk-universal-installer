@@ -57,6 +57,16 @@ and its consumer plugins work unchanged. Managed containers run as siblings
 on the host: pick container names/ports that don't clash with the production
 stack. Inspect with `podman ps` / `podman logs`.
 
+## Commit & PR conventions (from AGENTS.md — enforced here too)
+
+- **All commits and PRs use Angular conventional naming**:
+  `<type>(<scope>): <subject>` (`feat|fix|docs|style|refactor|test|chore|perf`),
+  subject ≤ 50 chars, imperative mood, no period. No AI attribution lines.
+- **Never push directly to `master`.** Every change goes through a branch — or,
+  better, a dedicated git worktree — and lands via a PR. No direct commits to
+  `master`, ever.
+- Branch names use **hyphens**, never slashes: `fix-something`, `feat-something`.
+
 ## Pre-PR (from AGENTS.md, tooling is in this container)
 
 `shellcheck` on all touched shell, `bash -n`, manual smoke, then
