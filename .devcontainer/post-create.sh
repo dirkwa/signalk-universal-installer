@@ -143,6 +143,62 @@ if command -v claude >/dev/null 2>&1 && ! claude --version >/dev/null 2>&1; then
   echo "      node /usr/lib/node_modules/@anthropic-ai/claude-code/install.cjs"
 fi
 
+# ── 7. gh (GitHub CLI) auth: persist login + wire git to use it ──────────
+# devpod's git-credentials proxy only serves creds while an active
+# `devpod up` client holds the reverse tunnel to the host — the browser IDE
+# and attach modes have none, so HTTPS `git push` has no credential source
+# (and the helper's port drifts between reconnects). gh's token works in
+# every mode: persist the login in the claude volume (same pattern as
+# CodeRabbit above) and route git's GitHub auth through gh.
+if command -v gh >/dev/null 2>&1; then
+  # Resolve gh's real config dir (honor GH_CONFIG_DIR / XDG_CONFIG_HOME) so
+  # the symlink lands where gh actually reads it.
+  GH_HOME="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
+  GH_STATE="${HOME}/.claude/.config-gh"
+  if [ ! -L "${GH_HOME}" ]; then
+    # Never abort workspace setup over gh persistence (set -e is active): a
+    # volume-permission problem (the documented uid-mapping case) must
+    # degrade to a warning, not break creation.
+    if mkdir -p "${GH_STATE}" "$(dirname "${GH_HOME}")" 2>/dev/null; then
+      if [ -d "${GH_HOME}" ]; then
+        # Migrate an existing login into the volume; the volume copy wins on
+        # conflict (it survived recreates). Delete the original only after a
+        # successful copy so a failure never destroys the one working login.
+        if cp -an "${GH_HOME}/." "${GH_STATE}/" 2>/dev/null; then
+          rm -rf "${GH_HOME}" 2>/dev/null || {
+            echo "==> WARNING: gh state copied to the volume, but ${GH_HOME}"
+            echo "    could not be removed; persistence starts on next recreate."
+          }
+        else
+          echo "==> WARNING: could not migrate gh state into the volume;"
+          echo "    keeping ${GH_HOME} as-is (login will not survive recreates)."
+        fi
+      fi
+      if [ ! -e "${GH_HOME}" ]; then
+        if ln -s "${GH_STATE}" "${GH_HOME}" 2>/dev/null; then
+          echo "==> gh login now persists across rebuilds (claude volume)"
+        else
+          echo "==> WARNING: could not link ${GH_HOME} into the volume;"
+          echo "    gh login will not survive recreates."
+        fi
+      fi
+    else
+      echo "==> WARNING: could not prepare ${GH_STATE} (volume permissions?);"
+      echo "    gh login will not survive recreates."
+    fi
+  fi
+  # Route git's GitHub auth through gh's token (tunnel-independent), so
+  # `git push` works from the browser IDE and attach modes too. Harmless
+  # before login — it only wires the helper; creds flow once `gh auth login`
+  # runs. ~/.gitconfig is container-ephemeral, so re-wire on every setup.
+  if gh auth setup-git >/dev/null 2>&1; then
+    echo "==> git configured to authenticate GitHub via gh"
+  else
+    echo "==> NOTE: run 'gh auth login' once, then re-run this script (or"
+    echo "    'gh auth setup-git'), so git push can authenticate via gh."
+  fi
+fi
+
 echo ""
 echo "==> Setup complete."
 echo "    Start dev server:   dev/dev.sh start    (http://localhost:4000)"
