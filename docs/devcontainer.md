@@ -153,6 +153,15 @@ Troubleshooting:
   `podman unshare chown -R 0:0 $(podman volume inspect signalk-devpod --format '{{.Mountpoint}}')`
   — repeat for `signalk-devpod-claude` / `signalk-devpod-plugins` (the
   volume names are defined in `.devcontainer/devcontainer.json`).
+- VS Code shows **"Unable to watch for file changes in this large
+  workspace (ENOSPC)"**: the linked plugins under `dev/plugins/` add tens
+  of thousands of `node_modules` files, exhausting the host's inotify
+  watches. The committed `.vscode/settings.json` excludes `node_modules`
+  and build output from the watcher — reload the window (*Developer:
+  Reload Window*) to apply it. If you still hit the limit, raise it on the
+  box (a rootless container can't change it from inside) with a persistent
+  drop-in: `echo 'fs.inotify.max_user_watches=524288' | sudo tee
+  /etc/sysctl.d/99-inotify-watches.conf && sudo sysctl --system`.
 
 After the build:
 
