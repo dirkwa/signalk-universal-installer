@@ -78,30 +78,20 @@ else
 fi
 
 # ── 3. Local plugin repos ───────────────────────────────────────────────
-# Any plugin checked out under dev/plugins/<name> is linked into the dev
-# instance. Add your repos there (clone, submodule, or extra mount).
+# Any plugin checked out under dev/plugins/<name> is built and linked into
+# the dev instance. Add your repos there (clone, submodule, or extra mount).
 # dev/plugins is the signalk-devpod-plugins VOLUME (survives workspace
 # rebuilds and deletes); it shadows the repo's .gitkeep, so restore it —
 # otherwise the workspace repo shows a phantom deletion in git status.
 [ -f "${DEV_DIR}/plugins/.gitkeep" ] || touch "${DEV_DIR}/plugins/.gitkeep" 2>/dev/null || true
-# npm links local plugin installs as SYMLINKS into the workspace path.
-# The config volume outlives workspaces, so after a delete/recreate those
-# links dangle — and npm then dies with EACCES while reifying over them
-# (field-hit). Prune dangling links before relinking; live ones and real
-# directories are untouched.
-find "${SK_CONFIG_DIR}/node_modules" -maxdepth 1 -xtype l -print -delete 2>/dev/null \
-  | sed 's/^/==> Pruned dangling plugin link: /' || true
-for plugin in "${DEV_DIR}/plugins"/*/; do
-  [ -f "${plugin}/package.json" ] || continue
-  name=$(jq -r .name "${plugin}/package.json")
-  echo "==> Linking local plugin: ${name}"
-  # build --if-present: TypeScript plugins ship no compiled output in a
-  # fresh checkout — without a build the server logs "Cannot find module
-  # .../index.js" and silently skips the plugin (field-hit). Plain-JS
-  # plugins are unaffected.
-  ( cd "${plugin}" && npm install && npm run build --if-present )
-  ( cd "${SK_CONFIG_DIR}" && npm install --no-save "${plugin}" )
-done
+# Delegate to the shared linker that dev.sh (start/restart) runs too, so the
+# two never diverge: it prunes dangling links (the config volume outlives
+# workspaces, so after a delete/recreate the old links dangle and npm dies
+# with EACCES reifying over them), builds each plugin on first run, and
+# links them ALL in one npm call — a per-plugin install would prune the
+# others, since ~/.signalk/package.json carries no dependencies.
+SIGNALK_NODE_CONFIG_DIR="${SK_CONFIG_DIR}" bash "${DEV_DIR}/link-plugins.sh" \
+  || echo "==> WARNING: plugin linking reported errors (see above)"
 
 # ── 4. e2e test dependencies ────────────────────────────────────────────
 ( cd "${DEV_DIR}" && npm install )
