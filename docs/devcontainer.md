@@ -160,7 +160,7 @@ After the build:
 |-----------------------|------------------------------------------|
 | Dev server            | http://localhost:4000                    |
 | Sample NMEA data      | `dev/dev.sh demo`                        |
-| Server management     | `dev/dev.sh start\|stop\|restart\|logs`  |
+| Server management     | `dev/dev.sh start\|stop\|restart\|link\|status\|logs` |
 | e2e tests (Chromium)  | `cd dev && npm run test:e2e`             |
 | AI pair programming   | `claude` (terminal or VS Code panel)     |
 | AI code review        | `cr review`                              |
@@ -253,18 +253,22 @@ run side by side on the same box.
 
 ## Developing plugins
 
-Put your plugin repos under `dev/plugins/`:
+Put your plugin repos under `dev/plugins/`, then (re)start the dev server —
+it links every plugin there automatically, building any that isn't built
+yet, so a freshly cloned plugin just works with no manual `npm` or
+`post-create.sh` step:
 
 ```bash
 cd dev/plugins
 git clone https://github.com/you/your-signalk-plugin.git
-bash ../../.devcontainer/post-create.sh   # links it into the dev instance
+cd .. && ./dev.sh restart
 ```
 
-Because plugin and server live in the same container, `npm install <path>`
-works again — the symlink problem of the containerized production setup does
-not exist here. After code changes run `dev/dev.sh restart` (Node caches
-modules; toggling the plugin in the admin UI is not enough).
+`./dev.sh link` links without (re)starting the server; restart after any
+plugin code change (Node caches modules). An already-built plugin is not
+rebuilt automatically, so after editing a **TypeScript** plugin's source,
+rebuild it by setting `SK_DEV_PLUGIN_BUILD=1` on the restart. See
+[`dev/link-plugins.sh`](../dev/link-plugins.sh) for the build/link mechanics.
 
 To verify against a production install afterward: `npm pack` the plugin and
 install the tarball there, or add a bind mount for the plugin directory in

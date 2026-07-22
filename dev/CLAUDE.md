@@ -37,8 +37,15 @@ LAN/tailscale IP — `localhost` is SSRF-blocked by the server (127/8).
   on purpose). Plugins run with their live config: anything that writes
   outward (questdb, grafana, MQTT...) will ingest the SAMPLE data —
   disable such plugins before a demo run if that matters.
+- `start`/`demo`/`restart` auto-link every `plugins/<name>` when they launch
+  the server (`link-plugins.sh`), building any not built yet, so a freshly
+  cloned plugin just works — no manual `npm install`/`post-create`.
+  `./dev.sh link` links without a restart; `demo-fg` deliberately does NOT
+  (isolated e2e config). See `link-plugins.sh` for the build/link mechanics.
 - After changing plugin code, `./dev.sh restart` is required — Node caches
-  modules; toggling the plugin in the admin UI is NOT enough.
+  modules; toggling the plugin in the admin UI is NOT enough. An already-
+  built plugin is not rebuilt automatically; after editing a **TypeScript**
+  plugin's source: `SK_DEV_PLUGIN_BUILD=1 ./dev.sh restart`.
 
 ## Container-runtime plugins
 
