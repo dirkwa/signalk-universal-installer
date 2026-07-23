@@ -55,6 +55,16 @@ Image=ghcr.io/dirkwa/signalk-server:dirkwa
 ContainerName=signalk-server
 Network=host
 
+# Set the container's /etc/localtime from the host zone (podman
+# translates this to `--tz=local`). Without it the container defaults to
+# UTC, so time-based logic disagrees with the host clock — the
+# signalk-timesync agent sets the HOST zone (from GPS) but has no reach
+# into the container. This also lets signalk-container read the real
+# host zone via Intl and propagate TZ into the managed peer containers
+# (questdb, grafana, Node-RED); with the container on UTC it resolves
+# UTC and propagates nothing. Requires podman >= 4.6 (we require 5.3).
+Timezone=local
+
 # Map the host invoking user to in-container UID 1000 (the `node`
 # user the signalk-server image runs as) so the ~/.signalk bind mount
 # is owned by `node` from inside the container.
