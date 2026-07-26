@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full fetch so any existing tag can be resolved and verified,
           # not just the ref that triggered the run.
