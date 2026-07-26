@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-TMPL=${TMPL:-installer/linux/signalk-timesync.tmpl}
+TMPL="${TMPL:-installer/linux/signalk-timesync.tmpl}"
 if [[ ! -f "$TMPL" ]]; then
     echo "[ERR] $TMPL not found (run from repo root)" >&2
     exit 2
@@ -67,11 +67,13 @@ fi
 # restart_server must be invoked from INSIDE the opt-in conditional, not just
 # somewhere after it. Track the guard's own then-block: open on the guard
 # line, close on the matching else/fi, and only count a restart_server call
-# that isn't the guard line itself.
+# that isn't the guard line itself. Match else/fi as whole tokens with
+# ([^a-zA-Z]|$) rather than \b — mawk (Debian/CI default) has no \b, so the
+# scope would never close and the check would silently weaken to ordering.
 if awk '
-    /SIGNALK_TIMESYNC_TZ_RESTART:-off/       { inguard=1; next }
-    inguard && /^[[:space:]]*(else|fi)\b/    { inguard=0 }
-    inguard && /restart_server/              { seen=1 }
+    /SIGNALK_TIMESYNC_TZ_RESTART:-off/               { inguard=1; next }
+    inguard && /^[[:space:]]*(else|fi)([^a-zA-Z]|$)/ { inguard=0 }
+    inguard && /restart_server/                      { seen=1 }
     END { exit(seen ? 0 : 1) }
 ' "$render"; then
     ok "restart_server is called inside the opt-in guard's then-block"

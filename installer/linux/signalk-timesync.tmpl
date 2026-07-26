@@ -225,7 +225,7 @@ signalk timesync — host clock + timezone from the boat's GPS
   signalk timesync run      one sync pass (root only; the systemd timer
                             runs this every 5 minutes)
       --confirm-restart     on a zone change, recreate signalk-server so
-                            the new zone reaches the running stack
+                            the new zone reaches it and its managed peers
 
 Clock: stepped from SignalK navigation.datetime only while the host has
 no NTP sync (offline passages, RTC-less cold boot). Timezone: follows
@@ -236,8 +236,11 @@ stop the timer: sudo systemctl disable --now signalk-timesync.timer
 Mid-passage zone changes don't reach an already-running signalk-server
 (its zone is frozen at container-create). To auto-recreate it on a zone
 change, set SIGNALK_TIMESYNC_TZ_RESTART=on in /etc/default/signalk-timesync
-or pass `run --confirm-restart`. Off by default (a restart briefly drops
-WebSocket clients).
+or pass `run --confirm-restart`. The recreate re-runs Timezone=local on
+signalk-server and, via signalk-container, its managed peers (questdb,
+grafana, Node-RED); the updater and doctor containers keep their own zone
+until they are themselves recreated. Off by default (a restart briefly
+drops WebSocket clients).
 EOF
 }
 
