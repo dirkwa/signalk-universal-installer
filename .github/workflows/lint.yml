@@ -44,6 +44,9 @@ jobs:
       - name: render server quadlet
         run: bash scripts/test/check-render-quadlet.sh
 
+      - name: render-server refresh (issue #217)
+        run: bash scripts/test/check-render-server.sh
+
       - name: hardware.json operator-toggle merge
         run: bash scripts/test/check-hardware-merge.sh
 
