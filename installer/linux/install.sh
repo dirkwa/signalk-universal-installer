@@ -14,7 +14,7 @@
 #   4b. Enable user podman.socket (engine containers bind-mount it)
 #   4c. Cgroup delegation: write user@.service.d/delegate.conf if needed
 #   4d. Open-files limit: write user@.service.d/nofile.conf if needed
-#   5. Ensure group memberships (dialout, gpio, netdev)
+#   5. Ensure group memberships (dialout, gpio, netdev, audio)
 #   6. Generate auth tokens for updater and doctor
 #   7. Initialize ~/.signalk-doctor/{snapshots,last-good.json}
 #   8. Detect hardware → ~/.signalk-updater/hardware.json
@@ -106,6 +106,7 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/lib/distro.sh \
         installer/linux/lib/http.sh \
         installer/linux/lib/ghcr.sh \
+        installer/linux/lib/hardware-merge.sh \
         quadlets/signalk-server.container.template \
         quadlets/signalk-updater-server.container.template \
         quadlets/signalk-doctor-server.container.template \
@@ -156,6 +157,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/http.sh"
 # shellcheck disable=SC1091
 . "$HERE/lib/ghcr.sh"
+# shellcheck disable=SC1091
+. "$HERE/lib/hardware-merge.sh"
 
 # Refuse root BEFORE the install-log tee below: run as root, the tee
 # would first create /root/.signalk-updater/install.log — a root-owned
@@ -1058,13 +1061,17 @@ fi
 
 # 5. Groups
 section "Group memberships"
-for g in dialout gpio netdev; do
+# `audio` is what makes rootless /dev/snd passthrough work end-to-end:
+# device nodes keep their HOST group (root:audio), and the managed audio
+# container (wyoming-satellite) reaches them via the calling user's own
+# supplementary groups (crun keep-original-groups), not via a uid map.
+for g in dialout gpio netdev audio; do
     if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
         info "Adding $USER to $g (requires sudo)"
         $SUDO /usr/sbin/usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
     fi
 done
-ok "groups: dialout, gpio, netdev (ensured if present on host)"
+ok "groups: dialout, gpio, netdev, audio (ensured if present on host)"
 
 # 6. Tokens
 section "Authentication tokens"
@@ -1113,18 +1120,12 @@ section "Hardware detection"
 # passthrough and drop the socketcan candidate. Carry those fields over
 # from the previous hardware.json. Per-device serial/can enabled flags
 # are NOT carried (the device set itself may have changed; the updater's
-# hardware apply flow owns those).
+# hardware apply flow owns those). The merge filter — and why audio needs
+# an explicit has() check rather than jq's `//` — lives in
+# lib/hardware-merge.sh, shared with check-hardware-merge.sh.
 HW_FRESH=$("$HERE/detect-hardware.sh")
 if command -v jq >/dev/null 2>&1 && [[ -s "$UPDATER_DATA/hardware.json" ]]; then
-    HW_MERGED=$(jq -s '
-        .[0] as $old
-        | .[1]
-        | .bluetooth.enabled = ($old.bluetooth.enabled // false)
-        | .gpio.enabled = ($old.gpio.enabled // false)
-        | if $old.socketcanCandidate != null
-          then .socketcanCandidate = $old.socketcanCandidate
-          else . end
-    ' "$UPDATER_DATA/hardware.json" <(printf '%s' "$HW_FRESH") 2>/dev/null) \
+    HW_MERGED=$(hardware_merge "$UPDATER_DATA/hardware.json" <(printf '%s' "$HW_FRESH") 2>/dev/null) \
         && [[ -n "$HW_MERGED" ]] && HW_FRESH="$HW_MERGED"
 fi
 printf '%s\n' "$HW_FRESH" >"$UPDATER_DATA/hardware.json"

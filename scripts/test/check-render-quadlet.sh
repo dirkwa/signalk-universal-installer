@@ -49,6 +49,7 @@ cat >"$tmp/hardware.json" <<'JSON'
     {"interface":"can0","enabled":false}
   ],
   "bluetooth": { "dbusAvailable": true, "enabled": false },
+  "audio": { "present": true, "enabled": false },
   "gpio": { "platform": "rpi5", "enabled": false }
 }
 JSON
@@ -81,11 +82,11 @@ fi
 # 3. Disabled hardware is excluded. BLE renders as the proxy's named
 #    socket volume (signalk-dbus-socket), never a direct /run/dbus bind
 #    mount — both patterns must stay absent while disabled.
-if grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem' <<<"$out"; then
+if grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem|/dev/snd' <<<"$out"; then
     echo "  [MISS] disabled hardware leaked into output"
     fail=1
 else
-    echo "  [OK]   disabled CAN/BLE/GPIO correctly excluded"
+    echo "  [OK]   disabled CAN/BLE/GPIO/audio correctly excluded"
 fi
 
 # 4. Enabled bluetooth must render the auth-proxy's named socket volume.
@@ -121,6 +122,45 @@ if command -v jq >/dev/null 2>&1; then
     fi
 else
     echo "  [SKIP] jq not available — enabled-bluetooth render not checked"
+fi
+
+# 5. Enabled audio renders the read-only /dev/snd view — but only while the
+#    host path exists: a Volume= with a missing source fails the whole unit
+#    at start, so a stale enabled=true must render nothing rather than brick
+#    the server. AUDIO_DIR points the probe at controlled paths so the test
+#    is deterministic on hosts and CI runners with or without sound cards.
+jq '.audio.enabled = true' "$tmp/hardware.json" >"$tmp/hardware-audio.json"
+err_audio="$tmp/stderr-audio.log"
+out_audio=$(AUDIO_DIR="$tmp" bash "$RENDER" "$tmp/hardware-audio.json" "$TEMPLATE" 2>"$err_audio") || {
+    echo "  [MISS] render (audio enabled) exited non-zero"
+    fail=1
+}
+if [[ -s "$err_audio" ]]; then
+    echo "  [MISS] render (audio enabled) wrote to stderr:"
+    sed 's/^/         /' "$err_audio"
+    fail=1
+fi
+if grep -qxF "Volume=$tmp:/dev/snd:ro" <<<"$out_audio"; then
+    echo "  [OK]   enabled audio emits the read-only /dev/snd view"
+else
+    echo "  [MISS] enabled audio did not emit the /dev/snd volume"
+    fail=1
+fi
+err_audio_missing="$tmp/stderr-audio-missing.log"
+out_audio_missing=$(AUDIO_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-audio.json" "$TEMPLATE" 2>"$err_audio_missing") || {
+    echo "  [MISS] render (audio enabled, path missing) exited non-zero"
+    fail=1
+}
+if [[ -s "$err_audio_missing" ]]; then
+    echo "  [MISS] render (audio enabled, path missing) wrote to stderr:"
+    sed 's/^/         /' "$err_audio_missing"
+    fail=1
+fi
+if grep -q ':/dev/snd:ro' <<<"$out_audio_missing"; then
+    echo "  [MISS] audio volume rendered although the host path is missing"
+    fail=1
+else
+    echo "  [OK]   missing host path suppresses the audio volume"
 fi
 
 if (( fail )); then
