@@ -1405,6 +1405,14 @@ ok "Quadlets written to $QUADLET_DIR"
 PAYLOAD_DIR="$DOCTOR_DATA/installer-payload"
 mkdir -p "$PAYLOAD_DIR"
 install -m 0755 "$HERE/detect-hardware.sh" "$PAYLOAD_DIR/detect-hardware.sh"
+# render-server-quadlet.sh is staged too so `signalk render-server` (and the
+# render step chained off `signalk update`) can rebuild the live
+# signalk-server.container from the staged template on an existing box —
+# template-only fixes (e.g. Timezone=local) otherwise never reach a deployed
+# install without a full re-run of the bash bootstrapper (issue #217). Like
+# detect-hardware.sh it's fetched-not-invoked by the doctor; the host CLI runs
+# it. 0755 — it's an executable script.
+install -m 0755 "$HERE/render-server-quadlet.sh" "$PAYLOAD_DIR/render-server-quadlet.sh"
 for t in signalk-server signalk-updater-server signalk-doctor-server signalk-dbus-proxy; do
     install -m 0644 "$HERE/../../quadlets/${t}.container.template" \
         "$PAYLOAD_DIR/${t}.container.template"

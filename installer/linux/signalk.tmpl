@@ -8,7 +8,18 @@
 #   signalk socketcan [..] Pi CAN-HAT detection + setup recipe
 #   signalk bluetooth [..] BLE / D-Bus passthrough (status | enable | disable)
 #   signalk timesync [...] host clock + timezone from GPS (status | run)
-#   signalk update         refresh installer scripts + Quadlet templates via doctor
+#   signalk update [--no-render]
+#                          refresh installer scripts + Quadlet templates via the
+#                          doctor, then re-render the live signalk-server Quadlet
+#                          from the refreshed template (restarting the server only
+#                          if the render changed). --no-render skips that last step.
+#   signalk render-server [--no-restart]
+#                          rebuild ~/.config/containers/systemd/signalk-server.container
+#                          from the staged template + hardware.json and (unless
+#                          --no-restart) restart signalk-server to apply it. Idempotent:
+#                          no-ops when the live Quadlet already matches the render. Use
+#                          it to pull in a template-only fix (e.g. Timezone=local) on an
+#                          existing box without re-running the installer.
 #   signalk resetadmin [user]
 #                          reset (or create) an admin user's password for the
 #                          Admin UI login (default user: admin). Prompts for the
@@ -110,8 +121,26 @@ usage() {
     if [[ "${SIGNALK_WINDOWS_SHIM:-0}" == "1" ]]; then
         # bluetooth is filtered for the same reason as socketcan: host
         # bluez/D-Bus passthrough has no equivalent inside the Podman
-        # machine VM.
-        printf '%s\n' "$help" | grep -v -e 'signalk socketcan' -e 'signalk bluetooth' -e 'signalk timesync'
+        # machine VM. render-server too: there is no host signalk-server
+        # Quadlet to render inside the VM.
+        #
+        # Some of these entries (render-server, update) span a header line
+        # plus indented continuation lines, so a per-line `grep -v` on the
+        # header would leave orphaned detail behind. Drop each matched entry
+        # as a BLOCK: skip the "signalk <name>" header and every following
+        # continuation line (a line that does NOT begin a new "signalk "
+        # entry and is not the closing blank/plain line) until the next
+        # top-level entry starts. Keyed on the leading-space indent the
+        # continuation lines carry after the comment-prefix strip above.
+        # Help lines are indented (a leading "  " after the comment-prefix
+        # strip). A subcommand HEADER is "  signalk <name>"; CONTINUATION
+        # lines are indented deeper and do not start a new "signalk" entry.
+        printf '%s\n' "$help" | awk '
+            /^[[:space:]]*signalk (socketcan|bluetooth|timesync|render-server)( |$)/ { drop = 1; next }
+            /^[[:space:]]*signalk / { drop = 0; print; next }
+            drop { next }
+            { print }
+        '
     else
         printf '%s\n' "$help"
     fi
@@ -226,18 +255,263 @@ cmd_timesync() {
     exec /usr/local/bin/signalk-timesync "$@"
 }
 
+# Restart signalk-server through the updater's authenticated REST API (the
+# sanctioned lifecycle path — see _signalk_lifecycle and install.sh), falling
+# back to a direct `systemctl --user restart` only when the updater can't be
+# reached. Mirrors the posture install.sh, `signalk bluetooth`, and the
+# timesync host agent (#216) already use. Unlike _signalk_lifecycle's
+# pause/resume this is a plain restart (no Quadlet WantedBy rewrite), so a
+# direct systemctl fallback is a complete substitute — a restart is not a
+# durable state the updater has to persist. Returns 0 on either path; non-zero
+# only if both fail. Echoes which path was taken.
+_signalk_restart_server() {
+    local token_path="$HOME/.signalk-updater/token"
+    local token=""
+    [[ -f "$token_path" ]] && token=$(<"$token_path")
+    if [[ -n "$token" ]] && curl -fsS -m 30 -X POST \
+        -H "Authorization: Bearer $token" \
+        "${UPDATER_URL}/api/signalk/restart" >/dev/null 2>&1; then
+        echo "[OK] Restarted signalk-server via the updater."
+        return 0
+    fi
+    echo "[i] Updater REST restart unavailable — using systemctl fallback." >&2
+    if systemctl --user restart signalk-server.service; then
+        echo "[OK] Restarted signalk-server via systemctl."
+        return 0
+    fi
+    echo "[ERR] Failed to restart signalk-server (updater unreachable and" >&2
+    echo "      systemctl --user restart signalk-server.service failed)." >&2
+    echo "      Restart it yourself once the cause is clear:" >&2
+    echo "        systemctl --user restart signalk-server" >&2
+    return 1
+}
+
+cmd_render_server() {
+    # Rebuild the LIVE ~/.config/containers/systemd/signalk-server.container
+    # from the staged template, so a template-only improvement (e.g.
+    # Timezone=local, #212) reaches an already-deployed box without a full
+    # installer re-run (#217). The bash installer renders this file only on a
+    # fresh run; a plain `signalk update` stages the new template but never
+    # applied it — this closes that gap.
+    #
+    # We reuse render-server-quadlet.sh VERBATIM (staged into installer-payload
+    # by install.sh + refreshed by the doctor) rather than re-implementing its
+    # jq/awk hardware-block logic here — one renderer, no drift. Inputs:
+    #   - renderer:  ~/.signalk-doctor/installer-payload/render-server-quadlet.sh
+    #   - template:  ~/.signalk-doctor/installer-payload/signalk-server.container.template
+    #   - hardware:  ~/.signalk-updater/hardware.json (detected devices)
+    # and the same __SK_HTTP_PORT__ substitution install.sh applies, with the
+    # port read live from the current Quadlet (sk_http_port) so a re-render
+    # preserves the operator's chosen port. The live Image= tag (the updater's
+    # version-of-record) and the operator's USER ADDITIONS block are preserved
+    # too, spliced from the live file — see below. Everything else is the fresh
+    # template body, which is how a template-only fix (#217) actually lands.
+    local no_restart=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-restart) no_restart=true; shift ;;
+            *) echo "[ERR] Unknown render-server argument: $1" >&2; return 1 ;;
+        esac
+    done
+
+    local payload_dir="${DOCTOR_DATA}/installer-payload"
+    local renderer="${payload_dir}/render-server-quadlet.sh"
+    local template="${payload_dir}/signalk-server.container.template"
+    local hw_file="$HOME/.signalk-updater/hardware.json"
+    local live="${QUADLET_DIR}/signalk-server.container"
+
+    # The renderer + template are staged by a fresh install and refreshed by
+    # `signalk update`. If they're absent this is an older install that never
+    # staged them (or the doctor never ran a refresh) — point at `signalk
+    # update` rather than failing cryptically.
+    if [[ ! -f "$renderer" || ! -f "$template" ]]; then
+        echo "[ERR] Staged server template/renderer not found under $payload_dir." >&2
+        echo "      Run 'signalk update' first (it stages them), then retry —" >&2
+        echo "      or re-run the bash bootstrap one-liner." >&2
+        return 1
+    fi
+    if [[ ! -f "$hw_file" ]]; then
+        echo "[ERR] hardware.json not found at $hw_file." >&2
+        echo "      Re-run the bash bootstrap one-liner to (re)detect hardware." >&2
+        return 1
+    fi
+    if [[ ! -f "$live" ]]; then
+        echo "[ERR] Live Quadlet $live is missing — nothing to re-render onto." >&2
+        echo "      Re-run the bash bootstrap one-liner to lay down the stack." >&2
+        return 1
+    fi
+
+    # Render to a string, applying the same port substitution install.sh does.
+    local port rendered
+    port=$(sk_http_port)
+    if ! rendered=$(bash "$renderer" "$hw_file" "$template" \
+        | sed -e "s/__SK_HTTP_PORT__/${port}/g"); then
+        echo "[ERR] render-server-quadlet.sh failed (see error above)." >&2
+        return 1
+    fi
+
+    # Never overwrite a working Quadlet with junk. A renderer that exits 0 but
+    # emits empty/truncated output (a malformed hardware.json, a future
+    # renderer bug that short-circuits) would otherwise be snapshotted over the
+    # live file and restarted — taking signalk-server down. Require the two
+    # structural anchors every valid render has: the [Container] section and an
+    # Image= line. Cheap, and it fails BEFORE the snapshot/write/restart path.
+    if [[ -z "$rendered" ]] || ! grep -q '^\[Container\]' <<<"$rendered" \
+        || ! grep -q '^Image=' <<<"$rendered"; then
+        echo "[ERR] render-server-quadlet.sh produced empty or malformed output" >&2
+        echo "      (no [Container]/Image= line) — refusing to touch the live Quadlet." >&2
+        return 1
+    fi
+
+    # Preserve the running IMAGE tag. The template pins Image=…:dirkwa, but the
+    # updater rewrites this line in the LIVE Quadlet on every version switch —
+    # it is the operator's chosen version-of-record. Rendering from the pristine
+    # template would silently revert that choice back to :dirkwa on every
+    # `signalk update`. So carry the live Image= line into the render (there is
+    # exactly one Image= in [Container]). Only when both sides have one; if the
+    # live file somehow lacks it we keep the template's rather than drop it.
+    local live_image
+    live_image=$(grep -m1 '^Image=' "$live" || true)
+    if [[ -n "$live_image" ]] && grep -q '^Image=' <<<"$rendered"; then
+        # Replace only the FIRST Image= line in the render with the live one.
+        # Env-passed so a tag with sed-special chars can't corrupt the program.
+        rendered=$(LIVE_IMAGE="$live_image" awk '
+            !done && /^Image=/ { print ENVIRON["LIVE_IMAGE"]; done = 1; next }
+            { print }
+        ' <<<"$rendered")
+    fi
+
+    # Preserve the operator's hand-edits. The template carries a
+    #   # === BEGIN USER ADDITIONS ===  …  # === END USER ADDITIONS ===
+    # block whose contents (custom mounts / capabilities / env) the updater
+    # preserves verbatim across version switches and hardware-apply rewrites.
+    # A fresh render comes from the pristine template, so — unlike the bash
+    # installer's one-shot render — we must NOT let a routine `signalk update`
+    # silently wipe those edits. Splice the LIVE block's contents into the
+    # freshly rendered body (same idea as the updater's spliceHardwareBlock,
+    # but for the USER ADDITIONS markers). If either side lacks the markers we
+    # leave the render as-is: nothing to preserve, or a template that no longer
+    # carries the block. `awk` extracts the inner lines from the live file and
+    # re-emits the rendered body with its own inner lines swapped for them.
+    local begin_marker='# === BEGIN USER ADDITIONS ==='
+    local end_marker='# === END USER ADDITIONS ==='
+    if grep -qF "$begin_marker" "$live" && grep -qF "$end_marker" "$live" \
+        && grep -qF "$begin_marker" <<<"$rendered" && grep -qF "$end_marker" <<<"$rendered"; then
+        local live_additions
+        # Inner lines only (strictly between the markers), verbatim.
+        live_additions=$(awk '
+            /^# === BEGIN USER ADDITIONS ===/ { grab = 1; next }
+            /^# === END USER ADDITIONS ===/   { grab = 0 }
+            grab { print }
+        ' "$live")
+        # Rebuild the rendered body: keep everything except the rendered block
+        # inner lines, and drop in the live inner lines right after BEGIN.
+        # Passed via an env var so arbitrary operator content (quotes, %, etc.)
+        # can't be reinterpreted by awk's program text.
+        rendered=$(LIVE_ADDITIONS="$live_additions" awk '
+            /^# === BEGIN USER ADDITIONS ===/ {
+                print
+                add = ENVIRON["LIVE_ADDITIONS"]
+                if (add != "") print add
+                skip = 1
+                next
+            }
+            /^# === END USER ADDITIONS ===/ { skip = 0; print; next }
+            skip { next }
+            { print }
+        ' <<<"$rendered")
+    fi
+
+    # Idempotent short-circuit: if the render matches the live file byte-for-
+    # byte there is nothing to write and no reason to restart the data plane.
+    # Compare the rendered string (no trailing newline) against the file with
+    # its trailing newline trimmed, matching how atomic_write appends exactly
+    # one newline below.
+    if [[ "$rendered" == "$(cat "$live")" ]]; then
+        echo "[OK] Live signalk-server Quadlet already matches the current template — nothing to do."
+        return 0
+    fi
+
+    # It differs — snapshot the live file first (CC-1), then atomic-write the
+    # new render. Snapshot dir + naming mirror install.sh::snapshot_existing
+    # and the doctor's snapshots (~/.signalk-doctor/snapshots/<ts>-<name>).
+    local snap_dir="${DOCTOR_DATA}/snapshots"
+    mkdir -p "$snap_dir"
+    local ts
+    ts=$(date -u +"%Y%m%dT%H%M%SZ")
+    if cp -p "$live" "${snap_dir}/${ts}-signalk-server.container"; then
+        echo "[i] Snapshotted the current Quadlet to ${snap_dir}/${ts}-signalk-server.container"
+    else
+        echo "[ERR] Could not snapshot $live — refusing to overwrite without a backup." >&2
+        return 1
+    fi
+
+    # Atomic write (temp + mv), 0644 — same as install.sh::atomic_write.
+    local tmp
+    tmp=$(mktemp "${live}.XXXXXX") || { echo "[ERR] mktemp failed for $live" >&2; return 1; }
+    # Handle the write/chmod failing (ENOSPC, EDQUOT) explicitly: without this,
+    # set -e would abort before the mv below and leave the temp file behind in
+    # the live Quadlet dir. Clean it up on failure, same as the mv path.
+    if ! printf '%s\n' "$rendered" >"$tmp" || ! chmod 0644 "$tmp"; then
+        echo "[ERR] Failed to stage the rendered Quadlet at $tmp." >&2
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! mv -f "$tmp" "$live"; then
+        echo "[ERR] Failed to install rendered Quadlet to $live." >&2
+        rm -f "$tmp"
+        return 1
+    fi
+    echo "[OK] Rewrote $live from the current template."
+
+    # systemd must re-parse the changed Quadlet before a restart recreates the
+    # container from it.
+    systemctl --user daemon-reload || {
+        echo "[ERR] systemctl --user daemon-reload failed; the new Quadlet is on disk" >&2
+        echo "      but not yet parsed. Retry:  systemctl --user daemon-reload" >&2
+        return 1
+    }
+
+    if [[ "$no_restart" == true ]]; then
+        echo "[i] --no-restart: the new Quadlet is in place but signalk-server is"
+        echo "    still running the old one. Apply it with:  systemctl --user restart signalk-server"
+        return 0
+    fi
+
+    echo "[i] Restarting signalk-server to apply the new Quadlet…"
+    _signalk_restart_server
+}
+
 cmd_update() {
     # Refresh installer scripts + Quadlet templates by calling the
     # doctor's /api/installer/refresh endpoint. The doctor fetches the
     # latest payload from GitHub Pages and rewrites:
     #   ~/.local/bin/signalk           (this script)
     #   ~/.local/bin/signalk-recovery  (the host-resident safety net)
-    #   ~/.signalk-doctor/installer-payload/*.template  (Quadlets — not applied)
+    #   ~/.signalk-doctor/installer-payload/*  (Quadlet templates + the
+    #                                            render-server-quadlet.sh
+    #                                            renderer — staged, not applied)
     #
-    # No containers are restarted. If the doctor is unreachable, fall
-    # back to the bash one-liner. Doctor token lives at
-    # ~/.signalk-doctor/token (mode 0600); read it ourselves rather
-    # than asking the user to copy/paste.
+    # The doctor refresh itself restarts nothing. But a template-only fix
+    # (e.g. Timezone=local) staged into installer-payload never reaches the
+    # LIVE signalk-server.container on its own (issue #217), so after a
+    # successful refresh we chain into the render step, which rebuilds the
+    # live Quadlet from the refreshed template and restarts signalk-server
+    # ONLY when the render actually changed the file (idempotent — a refresh
+    # that moved nothing on the server template is a no-op here). --no-render
+    # skips that chained step for operators who want the pure old behavior.
+    #
+    # If the doctor is unreachable, fall back to the bash one-liner. Doctor
+    # token lives at ~/.signalk-doctor/token (mode 0600); read it ourselves
+    # rather than asking the user to copy/paste.
+    local do_render=true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-render) do_render=false; shift ;;
+            *) echo "[ERR] Unknown update argument: $1" >&2; return 1 ;;
+        esac
+    done
+
     local token_path="${DOCTOR_DATA}/token"
     if [[ ! -f "$token_path" ]]; then
         echo "[ERR] doctor token not found at $token_path" >&2
@@ -304,6 +578,18 @@ cmd_update() {
             ;;
     esac
     rm -f "$body_file"
+
+    # Only the 200 path reaches here (every other status exit'd above), so
+    # the refresh succeeded. Apply the refreshed server template to the live
+    # Quadlet unless the operator opted out, or we're inside the Windows
+    # Podman-machine VM (no host signalk-server Quadlet to render there — the
+    # render step is a Linux-host concern, same reasoning that hides
+    # render-server from the shim's help). cmd_render_server is idempotent and
+    # returns 0 when nothing changed, so this is safe to run every update.
+    if [[ "$do_render" == true && "${SIGNALK_WINDOWS_SHIM:-0}" != "1" ]]; then
+        echo
+        cmd_render_server
+    fi
 }
 
 cmd_resetadmin() {
@@ -1928,7 +2214,8 @@ case "${1:-help}" in
     socketcan)  shift; cmd_socketcan "$@" ;;
     bluetooth)  shift; cmd_bluetooth "$@" ;;
     timesync)   shift; cmd_timesync "$@" ;;
-    update)     cmd_update ;;
+    update)     shift; cmd_update "$@" ;;
+    render-server) shift; cmd_render_server "$@" ;;
     resetadmin) shift; cmd_resetadmin "$@" ;;
     bug-report) shift; cmd_bug_report "$@" ;;
     stop)       cmd_stop ;;
