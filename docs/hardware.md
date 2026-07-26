@@ -10,8 +10,9 @@ The installer detects host hardware at install time and passes it through to the
 | **SocketCAN** | `ip -o link show type can` (every `can*` netlink interface) | Disabled (requires explicit opt-in) — CAN interfaces can be physical (NGT-1 plugged in over USB-CAN) or virtual (`vcan0` for testing) and surfacing them all by default is noisy | `{ interface, type: "socketcan", enabled }` per interface |
 | **Bluetooth (DBus)** | Presence of `/run/dbus/system_bus_socket` | Disabled — BLE on Linux requires the host DBus to be reachable from the container, and not every install needs it | `{ enabled, dbusAvailable }` (no per-device list; toggle mounts the dbus-auth-proxy socket volume — see [Bluetooth / BLE passthrough](#bluetooth--ble-passthrough)) |
 | **Raspberry Pi GPIO** | `/proc/device-tree/model` matched against `Pi[ ]*[3-5]` | Disabled (opt-in) — only meaningful on Pi hosts | `{ enabled, platform: "rpi5"\|"rpi4"\|"rpi3"\|"rpi-other"\|"none" }` |
+| **ALSA audio** | Presence of `/dev/snd` | **Enabled when present** — the mount is a read-only *metadata view* for signalk-container's device probe, not direct audio access (see [Audio passthrough](#audio-passthrough)); the low risk doesn't warrant install-time friction for voice-stack users | `{ present, enabled }` |
 
-For each enabled entry the renderer (`render-server-quadlet.sh`) emits an `AddDevice=` line (USB serial, CAN) or a `Volume=` line (DBus, GPIO) inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. Anything outside that block — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
+For each enabled entry the renderer (`render-server-quadlet.sh`) emits an `AddDevice=` line (USB serial, CAN) or a `Volume=` line (DBus, GPIO, audio) inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. Anything outside that block — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
 
 ## Group memberships
 
@@ -22,8 +23,9 @@ Rootless Podman needs the calling user in the right Unix groups to forward devic
 | `dialout` | USB serial (`/dev/ttyUSB*`, `/dev/serial/by-id/*`) |
 | `gpio` | Raspberry Pi GPIO (`/dev/gpiomem`) |
 | `netdev` | SocketCAN (`vcan` setup, `ip` administration) |
+| `audio` | ALSA devices (`/dev/snd/*`) opened by managed audio containers (see [Audio passthrough](#audio-passthrough)) |
 
-The installer adds you to all three at step 5 of `install.sh`. Group changes only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.
+The installer adds you to all four at step 5 of `install.sh`. Group changes only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.
 
 ## Re-running detection
 
@@ -52,6 +54,25 @@ signalk bluetooth disable   # unmount + restart
 `enable`/`disable` edit only the bluetooth line of the managed HARDWARE block (and migrate away any legacy direct `/run/dbus` bind mount from older installs). The host needs `bluez` running; the container needs no bluez of its own.
 
 On installs that predate the proxy, `signalk update` alone is enough: it stages the proxy Quadlet template in the doctor's installer payload, and `signalk bluetooth enable` installs it from there (substituting the pinned proxy image) — no re-run of the bash installer required.
+
+## Audio passthrough
+
+Voice-assistant plugins (the [signalk-wyoming](https://github.com/hoeken/signalk-wyoming) family) run their audio consumer — a [wyoming-satellite](https://github.com/hoeken/wyoming-satellite) container holding the mic/speaker — as a **sibling container managed through signalk-container**. The sound card reaches that sibling via signalk-container's own device emission (`/dev/snd` bind + `audio` group), *not* via this installer.
+
+What the installer contributes is one level of indirection up: signalk-container runs *inside* the signalk-server container and stats a plugin's requested device paths on its **own** filesystem before emitting them for the target container. The HARDWARE block's
+
+```
+Volume=/dev/snd:/dev/snd:ro
+```
+
+gives it a truthful view of the host's sound devices — full drift fidelity, live hot-plug tracking, and correct doctor reporting. It is deliberately **read-only and metadata-only**: signalk-server itself never opens audio devices, and the audio consumer container gets its own (writable) bind from signalk-container. Newer signalk-container releases also emit well-known device paths *unverified* when they can't see them locally, so audio can work without this mount — the mount removes the guesswork.
+
+Two guards keep it safe:
+
+- **Render-time existence check** (same as the avahi socket): a `Volume=` whose source is missing fails the whole unit at start, so a stale `enabled: true` on a host that lost its sound devices renders nothing instead of bricking the server.
+- **`enabled` in `hardware.json`** is the operator opt-out, like every other class.
+
+The `audio` group membership (step 5) is the other half: under rootless Podman the device nodes keep their host ownership (`root:audio`), and the consumer container's access rides on the calling user's own supplementary groups (crun's keep-original-groups), not on a uid mapping.
 
 ## Platform notes
 

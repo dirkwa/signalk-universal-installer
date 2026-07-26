@@ -10,6 +10,9 @@ set -euo pipefail
 
 HW_FILE="${1:-${HOME}/.signalk-updater/hardware.json}"
 TEMPLATE="${2:-}"
+# Host path probed/mounted for the audio class; overridable so the render
+# test can exercise both the present and missing cases deterministically.
+AUDIO_DIR="${AUDIO_DIR:-/dev/snd}"
 
 if [[ -z "$TEMPLATE" ]]; then
     # Default: look next to this script (../../quadlets/...)
@@ -57,6 +60,30 @@ hardware_block() {
         # No jq — minimal grep/sed parser. Handles serial-by-id only;
         # CAN/BLE/GPIO require jq.
         grep -oE '"byId":"[^"]+"' "$HW_FILE" | sed 's/.*"byId":"\(.*\)"$/AddDevice=\1/'
+    fi
+
+    # ALSA /dev/snd view (the `audio` class in hardware.json). This is NOT
+    # audio access for signalk-server itself: signalk-container runs INSIDE
+    # this container and stats a consumer plugin's requested device paths on
+    # its OWN filesystem before emitting the /dev/snd bind for the managed
+    # container that actually uses the sound card (e.g. signalk-wyoming's
+    # wyoming-satellite). Without this view the probe reports the device
+    # missing. Read-only — the manager only stats/readdirs; the consumer
+    # container gets its own bind from signalk-container. Existence-guarded
+    # like the avahi socket below (a Volume= with a missing source fails the
+    # unit to start), so a stale enabled=true in hardware.json can never
+    # brick the server on a host that lost its sound devices.
+    local audio_enabled=false
+    if command -v jq >/dev/null 2>&1; then
+        [ "$(jq -r '.audio.enabled // false' "$HW_FILE")" = "true" ] \
+            && audio_enabled=true
+    elif grep -A2 '"audio"' "$HW_FILE" 2>/dev/null | grep -q '"enabled": *true'; then
+        # No jq — same minimal-parser spirit as the serial fallback above;
+        # relies on detect-hardware.sh's flat two-key `audio` object.
+        audio_enabled=true
+    fi
+    if [ "$audio_enabled" = "true" ] && [ -d "$AUDIO_DIR" ]; then
+        echo "Volume=${AUDIO_DIR}:/dev/snd:ro"
     fi
 
     # Host avahi socket (mDNS .local resolution). The signalk-server image ships

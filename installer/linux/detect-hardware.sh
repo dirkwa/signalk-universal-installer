@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Emits ~/.signalk-updater/hardware.json describing detected USB serial,
-# SocketCAN, Bluetooth-DBus availability, and Raspberry Pi GPIO.
-# Serial defaults to enabled (most boats want them); CAN/BLE/GPIO default
-# to disabled (require explicit opt-in via the Updater UI).
+# SocketCAN, Bluetooth-DBus availability, Raspberry Pi GPIO, and ALSA
+# audio. Serial defaults to enabled (most boats want them); CAN/BLE/GPIO
+# default to disabled (require explicit opt-in via the Updater UI); audio
+# defaults to enabled when present — the rendered mount is a read-only
+# metadata view for signalk-container's device probe, not direct audio
+# access (see docs/hardware.md, "Audio passthrough").
 
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +52,12 @@ emit_json() {
     local bluetooth_avail=false
     [[ -S /run/dbus/system_bus_socket ]] && bluetooth_avail=true
 
+    # ALSA sound devices (any card — HDMI counts; capture-capable cards
+    # can hot-plug later, and the render-time mount tracks the directory,
+    # not its contents)
+    local audio_present=false
+    [[ -d /dev/snd ]] && audio_present=true
+
     local pi_platform="none"
     if is_pi; then
         local model
@@ -83,6 +92,10 @@ emit_json() {
         echo "  \"bluetooth\": {"
         echo "    \"dbusAvailable\": $bluetooth_avail,"
         echo "    \"enabled\": false"
+        echo "  },"
+        echo "  \"audio\": {"
+        echo "    \"present\": $audio_present,"
+        echo "    \"enabled\": $audio_present"
         echo "  },"
         echo "  \"gpio\": {"
         echo "    \"platform\": \"$pi_platform\","

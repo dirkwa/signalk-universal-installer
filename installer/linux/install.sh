@@ -14,7 +14,7 @@
 #   4b. Enable user podman.socket (engine containers bind-mount it)
 #   4c. Cgroup delegation: write user@.service.d/delegate.conf if needed
 #   4d. Open-files limit: write user@.service.d/nofile.conf if needed
-#   5. Ensure group memberships (dialout, gpio, netdev)
+#   5. Ensure group memberships (dialout, gpio, netdev, audio)
 #   6. Generate auth tokens for updater and doctor
 #   7. Initialize ~/.signalk-doctor/{snapshots,last-good.json}
 #   8. Detect hardware → ~/.signalk-updater/hardware.json
@@ -1058,13 +1058,17 @@ fi
 
 # 5. Groups
 section "Group memberships"
-for g in dialout gpio netdev; do
+# `audio` is what makes rootless /dev/snd passthrough work end-to-end:
+# device nodes keep their HOST group (root:audio), and the managed audio
+# container (wyoming-satellite) reaches them via the calling user's own
+# supplementary groups (crun keep-original-groups), not via a uid map.
+for g in dialout gpio netdev audio; do
     if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
         info "Adding $USER to $g (requires sudo)"
         $SUDO /usr/sbin/usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
     fi
 done
-ok "groups: dialout, gpio, netdev (ensured if present on host)"
+ok "groups: dialout, gpio, netdev, audio (ensured if present on host)"
 
 # 6. Tokens
 section "Authentication tokens"
