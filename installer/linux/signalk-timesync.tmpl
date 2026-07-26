@@ -20,11 +20,23 @@
 # Escape hatches (no file exists by default — hard-enabled by design):
 #   /etc/default/signalk-timesync with SIGNALK_TIMESYNC=off        → agent off
 #                                  or SIGNALK_TIMESYNC_TZ=off      → clock only
+#
+# Mid-passage zone changes (opt-in — a restart drops WS clients + a brief
+# outage, so it is OFF by default): a GPS zone change only reaches an
+# already-running signalk-server (and its peer containers) on recreate,
+# because /etc/localtime is frozen at container-create by `Timezone=local`.
+#   /etc/default/signalk-timesync with SIGNALK_TIMESYNC_TZ_RESTART=on → after
+#                                  a zone change, recreate signalk-server
+#   or pass `run --confirm-restart` (crontab / manual) for the same effect.
 
 set -euo pipefail
 
 SK_USER="__SK_USER__"
 SK_URL="http://127.0.0.1:__SK_HTTP_PORT__"
+# The updater owns the signalk-server lifecycle; the opt-in mid-passage
+# recreate goes through its REST API (see restart_server). Localhost — the
+# agent runs on the host, same posture as install.sh / `signalk bluetooth`.
+UPDATER_URL="${UPDATER_URL:-http://127.0.0.1:3003}"
 # GPS clock wins only when NTP doesn't: skip stepping while the host is
 # NTP-synchronized. Below this offset we never touch a free-running
 # clock either — REST + delta latency is ~1-2s and stepping the clock
@@ -43,6 +55,31 @@ log() { echo "$*"; }
 
 home_dir() { getent passwd "$SK_USER" | cut -d: -f6; }
 
+# Recreate signalk-server so a just-changed host zone reaches the running
+# container (fresh /etc/localtime via `Timezone=local`) and, through
+# signalk-container's TZ propagation, the containers it manages. The updater
+# owns the server lifecycle, so we go through its authenticated REST API —
+# the same posture install.sh and `signalk bluetooth` use, never a direct
+# unit control except as the documented fallback when the updater can't be
+# reached. Token + user session live under the SK user's home; we are root,
+# so drop to that user for the systemctl fallback (a --user unit is
+# unreachable from root without XDG_RUNTIME_DIR).
+restart_server() {
+    local hd token uid
+    hd=$(home_dir)
+    token=$(cat "$hd/.signalk-updater/token" 2>/dev/null || echo "")
+    if [[ -n "$token" ]] && curl -fsS -m 30 -X POST \
+        -H "Authorization: Bearer $token" \
+        "${UPDATER_URL}/api/signalk/restart" >/dev/null 2>&1; then
+        return 0
+    fi
+    log "updater REST restart unavailable — using systemctl fallback"
+    uid=$(id -u "$SK_USER")
+    runuser -u "$SK_USER" -- \
+        env "XDG_RUNTIME_DIR=/run/user/$uid" \
+        systemctl --user restart signalk-server.service
+}
+
 api() {
     curl -fsS -m 5 -H "Authorization: Bearer $TOKEN" \
         "$SK_URL/signalk/v1/api/vessels/self/$1" 2>/dev/null
@@ -52,6 +89,16 @@ api() {
 epoch() { date -u -d "$1" +%s 2>/dev/null || true; }
 
 cmd_run() {
+    # --confirm-restart: recreate signalk-server after a zone change even
+    # when SIGNALK_TIMESYNC_TZ_RESTART isn't set (crontab / manual use).
+    local confirm_restart=false
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --confirm-restart) confirm_restart=true ;;
+            *) echo "[ERR] unknown run option: $arg" >&2; exit 2 ;;
+        esac
+    done
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "run must execute as root (systemd timer does); use 'status' instead" >&2
         exit 1
@@ -129,7 +176,20 @@ cmd_run() {
     if [[ "$tz" != "$cur" ]]; then
         timedatectl set-timezone "$tz"
         log "timezone changed ${cur:-unknown} -> $tz (GPS position)"
-        log "note: the signalk-server container picks the new zone up on its next restart"
+        # A running signalk-server keeps its startup zone until recreated.
+        # Recreate only when the operator opted in (config flag or the
+        # --confirm-restart run option); otherwise leave the note so the
+        # gap is visible and picked up on the next restart.
+        if [[ "${SIGNALK_TIMESYNC_TZ_RESTART:-off}" == "on" || "$confirm_restart" == true ]]; then
+            if restart_server; then
+                log "recreated signalk-server to apply the new zone"
+            else
+                log "signalk-server restart failed — it picks the new zone up on its next restart"
+            fi
+        else
+            log "note: the signalk-server container picks the new zone up on its next restart"
+            log "  (enable SIGNALK_TIMESYNC_TZ_RESTART=on or run --confirm-restart to auto-recreate)"
+        fi
     fi
     exit 0
 }
@@ -149,6 +209,7 @@ cmd_status() {
     fi
     echo "ntp sync:   $(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"
     echo "timezone:   $(timedatectl show -p Timezone --value 2>/dev/null || echo unknown)"
+    echo "tz-restart: ${SIGNALK_TIMESYNC_TZ_RESTART:-off} (recreate signalk-server on zone change)"
     echo "clock (utc): $(date -u '+%Y-%m-%d %H:%M:%S')"
     echo
     echo "recent runs:"
@@ -163,17 +224,28 @@ signalk timesync — host clock + timezone from the boat's GPS
   signalk timesync status   timer state, NTP state, zone, recent runs
   signalk timesync run      one sync pass (root only; the systemd timer
                             runs this every 5 minutes)
+      --confirm-restart     on a zone change, recreate signalk-server so
+                            the new zone reaches it and its managed peers
 
 Clock: stepped from SignalK navigation.datetime only while the host has
 no NTP sync (offline passages, RTC-less cold boot). Timezone: follows
 navigation.position via tz-lookup. Disable via /etc/default/signalk-timesync
 (SIGNALK_TIMESYNC=off, or SIGNALK_TIMESYNC_TZ=off for clock-only), or
 stop the timer: sudo systemctl disable --now signalk-timesync.timer
+
+Mid-passage zone changes don't reach an already-running signalk-server
+(its zone is frozen at container-create). To auto-recreate it on a zone
+change, set SIGNALK_TIMESYNC_TZ_RESTART=on in /etc/default/signalk-timesync
+or pass `run --confirm-restart`. The recreate re-runs Timezone=local on
+signalk-server and, via signalk-container, its managed peers (questdb,
+grafana, Node-RED); the updater and doctor containers keep their own zone
+until they are themselves recreated. Off by default (a restart briefly
+drops WebSocket clients).
 EOF
 }
 
 case "${1:-status}" in
-    run)    cmd_run ;;
+    run)    shift; cmd_run "$@" ;;
     status) cmd_status ;;
     help|-h|--help) usage ;;
     *) echo "[ERR] unknown subcommand: $1" >&2; usage; exit 2 ;;

@@ -47,6 +47,9 @@ jobs:
       - name: hardware.json operator-toggle merge
         run: bash scripts/test/check-hardware-merge.sh
 
+      - name: timesync restart gating
+        run: bash scripts/test/check-timesync-restart.sh
+
       - name: orphan container detection
         run: bash scripts/test/check-orphan-detection.sh
 
