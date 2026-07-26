@@ -106,6 +106,7 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/lib/distro.sh \
         installer/linux/lib/http.sh \
         installer/linux/lib/ghcr.sh \
+        installer/linux/lib/hardware-merge.sh \
         quadlets/signalk-server.container.template \
         quadlets/signalk-updater-server.container.template \
         quadlets/signalk-doctor-server.container.template \
@@ -156,6 +157,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/http.sh"
 # shellcheck disable=SC1091
 . "$HERE/lib/ghcr.sh"
+# shellcheck disable=SC1091
+. "$HERE/lib/hardware-merge.sh"
 
 # Refuse root BEFORE the install-log tee below: run as root, the tee
 # would first create /root/.signalk-updater/install.log — a root-owned
@@ -1117,18 +1120,12 @@ section "Hardware detection"
 # passthrough and drop the socketcan candidate. Carry those fields over
 # from the previous hardware.json. Per-device serial/can enabled flags
 # are NOT carried (the device set itself may have changed; the updater's
-# hardware apply flow owns those).
+# hardware apply flow owns those). The merge filter — and why audio needs
+# an explicit has() check rather than jq's `//` — lives in
+# lib/hardware-merge.sh, shared with check-hardware-merge.sh.
 HW_FRESH=$("$HERE/detect-hardware.sh")
 if command -v jq >/dev/null 2>&1 && [[ -s "$UPDATER_DATA/hardware.json" ]]; then
-    HW_MERGED=$(jq -s '
-        .[0] as $old
-        | .[1]
-        | .bluetooth.enabled = ($old.bluetooth.enabled // false)
-        | .gpio.enabled = ($old.gpio.enabled // false)
-        | if $old.socketcanCandidate != null
-          then .socketcanCandidate = $old.socketcanCandidate
-          else . end
-    ' "$UPDATER_DATA/hardware.json" <(printf '%s' "$HW_FRESH") 2>/dev/null) \
+    HW_MERGED=$(hardware_merge "$UPDATER_DATA/hardware.json" <(printf '%s' "$HW_FRESH") 2>/dev/null) \
         && [[ -n "$HW_MERGED" ]] && HW_FRESH="$HW_MERGED"
 fi
 printf '%s\n' "$HW_FRESH" >"$UPDATER_DATA/hardware.json"
