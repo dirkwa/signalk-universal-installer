@@ -146,10 +146,16 @@ else
     echo "  [MISS] enabled audio did not emit the /dev/snd volume"
     fail=1
 fi
-out_audio_missing=$(AUDIO_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-audio.json" "$TEMPLATE" 2>/dev/null) || {
+err_audio_missing="$tmp/stderr-audio-missing.log"
+out_audio_missing=$(AUDIO_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-audio.json" "$TEMPLATE" 2>"$err_audio_missing") || {
     echo "  [MISS] render (audio enabled, path missing) exited non-zero"
     fail=1
 }
+if [[ -s "$err_audio_missing" ]]; then
+    echo "  [MISS] render (audio enabled, path missing) wrote to stderr:"
+    sed 's/^/         /' "$err_audio_missing"
+    fail=1
+fi
 if grep -q ':/dev/snd:ro' <<<"$out_audio_missing"; then
     echo "  [MISS] audio volume rendered although the host path is missing"
     fail=1

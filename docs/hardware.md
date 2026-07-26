@@ -61,7 +61,7 @@ Voice-assistant plugins (the [signalk-wyoming](https://github.com/hoeken/signalk
 
 What the installer contributes is one level of indirection up: signalk-container runs *inside* the signalk-server container and stats a plugin's requested device paths on its **own** filesystem before emitting them for the target container. The HARDWARE block's
 
-```
+```ini
 Volume=/dev/snd:/dev/snd:ro
 ```
 
