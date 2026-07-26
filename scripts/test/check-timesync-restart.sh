@@ -46,22 +46,33 @@ else
     [[ -n "$guard" ]] && printf '         %s\n' "$guard"
 fi
 
-# restart_server must go through the updater REST API first (the sanctioned
-# lifecycle path) and fall back to the drop-to-user systemctl --user restart
-# only when the updater is unreachable. Assert both are present. The grep
-# patterns are literal ($SK_USER / $UPDATER_URL are matched as text).
-# shellcheck disable=SC2016
-if grep -q '${UPDATER_URL}/api/signalk/restart' "$render"; then
-    ok "restart_server prefers the updater REST /api/signalk/restart"
+# restart_server must go through the updater REST API FIRST (the sanctioned
+# lifecycle path) and reach the drop-to-user systemctl --user restart only as
+# a fallback GATED by REST failure — not merely have both strings present
+# somewhere. Extract just the restart_server() body and assert the ordering:
+# the REST call and its success `return 0` come before the systemctl fallback.
+body=$(awk '/^restart_server\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$render")
+if [[ -z "$body" ]]; then
+    miss "restart_server() not found in the rendered agent"
 else
-    miss "restart_server does not call the updater REST /api/signalk/restart"
-fi
-# shellcheck disable=SC2016
-if grep -q 'runuser -u "$SK_USER"' "$render" \
-   && grep -q 'systemctl --user restart signalk-server.service' "$render"; then
-    ok "restart_server keeps the systemctl --user fallback when the updater is down"
-else
-    miss "restart_server is missing the systemctl --user fallback"
+    rest_line=$(grep -n '/api/signalk/restart' <<<"$body" | head -1 | cut -d: -f1)
+    # The success return that guards the fallback: the `return 0` that ends the
+    # REST `if`. Take the first return 0 after the REST call.
+    ret_line=$(awk -v r="${rest_line:-0}" 'NR>=r && /return 0/{print NR; exit}' <<<"$body")
+    sysd_line=$(grep -n 'systemctl --user restart signalk-server.service' <<<"$body" | head -1 | cut -d: -f1)
+    if [[ -n "$rest_line" && -n "$ret_line" && -n "$sysd_line" \
+          && "$rest_line" -lt "$ret_line" && "$ret_line" -lt "$sysd_line" ]]; then
+        ok "restart_server tries updater REST (return 0 on success) before the systemctl fallback"
+    else
+        miss "restart_server ordering wrong (REST=$rest_line return0=$ret_line systemctl=$sysd_line); fallback must be gated by REST failure"
+        printf '         %s\n' "$body" | sed -n '1,40p'
+    fi
+    # shellcheck disable=SC2016
+    if grep -q 'runuser -u "$SK_USER"' <<<"$body"; then
+        ok "systemctl fallback drops to the SK user (runuser + XDG_RUNTIME_DIR)"
+    else
+        miss "systemctl fallback does not drop to the SK user"
+    fi
 fi
 
 # restart_server must be invoked from INSIDE the opt-in conditional, not just
