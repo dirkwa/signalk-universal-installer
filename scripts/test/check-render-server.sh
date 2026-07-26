@@ -135,8 +135,11 @@ if out=$(run_render 2>&1); then
     else
         miss "idempotent path did work it shouldn't have"
         printf '         %s\n' "$out"
-        [[ -f "$root/marks/systemctl.log" ]] && echo "         systemctl WAS called"
-        [[ -f "$root/marks/restart.log" ]] && echo "         restart WAS called"
+        # Plain `if`, not `[[ … ]] && echo`: a trailing && that evaluates false
+        # would become the else-block's (and the whole if's) exit status and
+        # abort the harness under set -e before the remaining cases run.
+        if [[ -f "$root/marks/systemctl.log" ]]; then echo "         systemctl WAS called"; fi
+        if [[ -f "$root/marks/restart.log" ]]; then echo "         restart WAS called"; fi
     fi
 else
     miss "render-server errored on the already-current case"

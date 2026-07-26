@@ -449,8 +449,14 @@ cmd_render_server() {
     # Atomic write (temp + mv), 0644 — same as install.sh::atomic_write.
     local tmp
     tmp=$(mktemp "${live}.XXXXXX") || { echo "[ERR] mktemp failed for $live" >&2; return 1; }
-    printf '%s\n' "$rendered" >"$tmp"
-    chmod 0644 "$tmp"
+    # Handle the write/chmod failing (ENOSPC, EDQUOT) explicitly: without this,
+    # set -e would abort before the mv below and leave the temp file behind in
+    # the live Quadlet dir. Clean it up on failure, same as the mv path.
+    if ! printf '%s\n' "$rendered" >"$tmp" || ! chmod 0644 "$tmp"; then
+        echo "[ERR] Failed to stage the rendered Quadlet at $tmp." >&2
+        rm -f "$tmp"
+        return 1
+    fi
     if ! mv -f "$tmp" "$live"; then
         echo "[ERR] Failed to install rendered Quadlet to $live." >&2
         rm -f "$tmp"
