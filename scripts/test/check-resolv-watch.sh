@@ -69,11 +69,25 @@ else
     miss "unit files missing after first run"
 fi
 
-if grep -q '^PathChanged=/etc/resolv\.conf$' "$path_unit" 2>/dev/null \
+# /etc/resolv.conf alone is not enough: on symlink layouts the inotify
+# watch follows the link at setup time, so a dangling or rename-swapped
+# /run target escapes it. The unit must also watch the well-known
+# runtime targets of every mainstream resolver stack.
+watch_ok=1
+for p in \
+    /etc/resolv.conf \
+    /run/systemd/resolve/stub-resolv.conf \
+    /run/systemd/resolve/resolv.conf \
+    /run/NetworkManager/resolv.conf \
+    /run/resolvconf/resolv.conf; do
+    grep -q "^PathChanged=${p}\$" "$path_unit" 2>/dev/null || watch_ok=0
+done
+if [[ "$watch_ok" == 1 ]] \
     && grep -q '^WantedBy=default\.target$' "$path_unit" 2>/dev/null; then
-    ok "path unit watches /etc/resolv.conf and installs into default.target"
+    ok "path unit watches /etc/resolv.conf + all runtime resolver targets"
 else
-    miss "path unit content unexpected"
+    miss "path unit watch list incomplete"
+    grep '^PathChanged=' "$path_unit" 2>/dev/null | sed 's/^/         /'
 fi
 
 if grep -q 'daemon-reload' "$SYSTEMCTL_LOG" \

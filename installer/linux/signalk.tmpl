@@ -318,7 +318,24 @@ RESOLV_WATCH_PATH_UNIT='# Installed by signalk-universal-installer (signalk reso
 Description=Watch host DNS configuration for the SignalK container stack
 
 [Path]
+# Several watch points because resolver stacks differ in WHERE the file
+# that finally carries the nameservers lives. /etc/resolv.conf covers
+# the direct writers (dhcpcd, NetworkManager rc-manager=file), including
+# atomic rename-into-place — that fires the parent-directory watch
+# systemd keeps on /etc. The /run entries cover the symlink layouts
+# (systemd-resolved, NetworkManager rc-manager=symlink, resolvconf):
+# inotify follows the /etc/resolv.conf symlink at watch-setup time, so a
+# target that is dangling at boot or later replaced by rename can escape
+# that first watch entirely — watching the well-known runtime targets
+# directly closes the gap, because systemd watches the nearest existing
+# parent until the path appears. A path that never exists on a given
+# host is harmless (the watch stays dormant), and spurious triggers are
+# cheap — the oneshot guards exit without touching the server.
 PathChanged=/etc/resolv.conf
+PathChanged=/run/systemd/resolve/stub-resolv.conf
+PathChanged=/run/systemd/resolve/resolv.conf
+PathChanged=/run/NetworkManager/resolv.conf
+PathChanged=/run/resolvconf/resolv.conf
 
 [Install]
 WantedBy=default.target'
