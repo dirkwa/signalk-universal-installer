@@ -20,6 +20,11 @@
 #                          no-ops when the live Quadlet already matches the render. Use
 #                          it to pull in a template-only fix (e.g. Timezone=local) on an
 #                          existing box without re-running the installer.
+#   signalk resolv-watch   (re)install the signalk-resolv-watch systemd user units:
+#                          a path unit watching /etc/resolv.conf plus a oneshot
+#                          that recreates signalk-server when host DNS appeared
+#                          only after the container started (boot beat DHCP).
+#                          Idempotent; render-server runs it automatically.
 #   signalk resetadmin [user]
 #                          reset (or create) an admin user's password for the
 #                          Admin UI login (default user: admin). Prompts for the
@@ -136,7 +141,7 @@ usage() {
         # strip). A subcommand HEADER is "  signalk <name>"; CONTINUATION
         # lines are indented deeper and do not start a new "signalk" entry.
         printf '%s\n' "$help" | awk '
-            /^[[:space:]]*signalk (socketcan|bluetooth|timesync|render-server)( |$)/ { drop = 1; next }
+            /^[[:space:]]*signalk (socketcan|bluetooth|timesync|render-server|resolv-watch)( |$)/ { drop = 1; next }
             /^[[:space:]]*signalk / { drop = 0; print; next }
             drop { next }
             { print }
@@ -286,6 +291,102 @@ _signalk_restart_server() {
     return 1
 }
 
+# --- resolv-watch: container DNS self-heal --------------------------------
+# podman copies the host's /etc/resolv.conf into signalk-server once per
+# container CREATE. A boot that beats DHCP — Pi and router powered on
+# together, and the router can take minutes to serve leases — freezes an
+# EMPTY resolver list into the container: the app store and every other
+# outbound lookup stay dead until the container is recreated ("app store
+# offline after every reboot until I restart Signal K"). The server
+# Quadlet's short ExecStartPre wait covers fast DHCP; this pair of user
+# units covers the slow-router case: a path unit watches /etc/resolv.conf
+# and a oneshot recreates signalk-server ONLY when the host has a
+# nameserver and the running container has none. Self-limiting: after the
+# restart the container has the nameserver, so later triggers (DHCP
+# renews, VPN resolv rewrites) exit without touching the server.
+#
+# The unit content lives HERE as the single owner — same no-drift
+# rationale as reusing render-server-quadlet.sh verbatim: install.sh
+# calls `signalk resolv-watch` on a fresh install, and cmd_render_server
+# calls the same helper so existing boxes pick the units up on `signalk
+# update`. The oneshot restarts the unit via systemctl directly, not the
+# updater's REST API: it fires at boot when the updater container may
+# itself still be starting, and a unit-level self-heal must not depend on
+# a console container being healthy.
+RESOLV_WATCH_PATH_UNIT='# Installed by signalk-universal-installer (signalk resolv-watch)
+[Unit]
+Description=Watch host DNS configuration for the SignalK container stack
+
+[Path]
+PathChanged=/etc/resolv.conf
+
+[Install]
+WantedBy=default.target'
+# shellcheck disable=SC2016  # literal unit-file text; nothing may expand here
+RESOLV_WATCH_SERVICE_UNIT='# Installed by signalk-universal-installer (signalk resolv-watch)
+[Unit]
+Description=Recreate signalk-server when host DNS appeared after its start
+
+[Service]
+Type=oneshot
+# Ordered guards, each a clean no-op exit:
+#   1. host has no nameserver        -> nothing to heal towards
+#   2. container not running         -> its next start snapshots fresh
+#   3. container has a nameserver    -> healthy, nothing to do
+# Only then recreate the container — the unit restart re-runs
+# `podman run --replace`, which re-copies the host resolv.conf.
+# try-restart: never starts a unit the operator stopped.
+ExecStart=/bin/sh -c '\''grep -qs "^nameserver" /etc/resolv.conf || exit 0; podman exec signalk-server true 2>/dev/null || exit 0; podman exec signalk-server grep -qs "^nameserver" /etc/resolv.conf && exit 0; echo "host DNS configured but the signalk-server container has no nameserver - recreating it"; exec systemctl --user try-restart signalk-server.service'\'''
+
+_signalk_ensure_resolv_watch() {
+    local unit_dir="${HOME}/.config/systemd/user"
+    local path_file="${unit_dir}/signalk-resolv-watch.path"
+    local svc_file="${unit_dir}/signalk-resolv-watch.service"
+
+    if [[ "$(cat "$path_file" 2>/dev/null)" == "$RESOLV_WATCH_PATH_UNIT" ]] \
+        && [[ "$(cat "$svc_file" 2>/dev/null)" == "$RESOLV_WATCH_SERVICE_UNIT" ]] \
+        && systemctl --user is-enabled signalk-resolv-watch.path >/dev/null 2>&1; then
+        echo "[OK] signalk-resolv-watch units already installed."
+        return 0
+    fi
+
+    mkdir -p "$unit_dir"
+    # Atomic per-file (temp + mv), 0644 — same shape as the Quadlet writes.
+    local f content tmp
+    for f in "$path_file" "$svc_file"; do
+        if [[ "$f" == "$path_file" ]]; then
+            content="$RESOLV_WATCH_PATH_UNIT"
+        else
+            content="$RESOLV_WATCH_SERVICE_UNIT"
+        fi
+        tmp=$(mktemp "${f}.XXXXXX") || { echo "[ERR] mktemp failed for $f" >&2; return 1; }
+        if ! printf '%s\n' "$content" >"$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$f"; then
+            echo "[ERR] Failed to install $f." >&2
+            rm -f "$tmp"
+            return 1
+        fi
+    done
+
+    systemctl --user daemon-reload || {
+        echo "[ERR] systemctl --user daemon-reload failed; the resolv-watch units are" >&2
+        echo "      on disk but not parsed. Retry:  systemctl --user daemon-reload" >&2
+        return 1
+    }
+    systemctl --user enable --now signalk-resolv-watch.path >/dev/null 2>&1 || {
+        echo "[ERR] could not enable signalk-resolv-watch.path" >&2
+        return 1
+    }
+    echo "[OK] signalk-resolv-watch units installed and watching /etc/resolv.conf."
+}
+
+cmd_resolv_watch() {
+    if [[ $# -gt 0 ]]; then
+        echo "[ERR] Unknown resolv-watch argument: $1" >&2
+        return 1
+    fi
+    _signalk_ensure_resolv_watch
+}
+
 cmd_render_server() {
     # Rebuild the LIVE ~/.config/containers/systemd/signalk-server.container
     # from the staged template, so a template-only improvement (e.g.
@@ -313,6 +414,12 @@ cmd_render_server() {
             *) echo "[ERR] Unknown render-server argument: $1" >&2; return 1 ;;
         esac
     done
+
+    # The DNS self-heal units ride along with every render so existing
+    # boxes pick them up on `signalk update` without a separate step.
+    # Non-fatal: a failed unit install must not block a template render.
+    _signalk_ensure_resolv_watch \
+        || echo "[WARN] could not install the signalk-resolv-watch units (continuing)" >&2
 
     local payload_dir="${DOCTOR_DATA}/installer-payload"
     local renderer="${payload_dir}/render-server-quadlet.sh"
@@ -2216,6 +2323,7 @@ case "${1:-help}" in
     timesync)   shift; cmd_timesync "$@" ;;
     update)     shift; cmd_update "$@" ;;
     render-server) shift; cmd_render_server "$@" ;;
+    resolv-watch) shift; cmd_resolv_watch "$@" ;;
     resetadmin) shift; cmd_resetadmin "$@" ;;
     bug-report) shift; cmd_bug_report "$@" ;;
     stop)       cmd_stop ;;

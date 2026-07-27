@@ -1443,6 +1443,18 @@ INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
 bash "$HERE/install-socketcan-script.sh"
 bash "$HERE/install-bluetooth-script.sh"
 
+# Container DNS self-heal (signalk-resolv-watch.path/.service): recreates
+# signalk-server if the boot beat DHCP and the container snapshotted an
+# empty /etc/resolv.conf (app store offline until restart). The unit
+# content lives in the CLI as the single owner — same no-drift rationale
+# as render-server-quadlet.sh — so install the units by calling the
+# command installed just above. Existing boxes get the same call via
+# `signalk update` → render-server.
+if ! "$HOME/.local/bin/signalk" resolv-watch; then
+    warn "could not install the signalk-resolv-watch units; a boot that beats"
+    warn "DHCP may leave the app store offline until signalk-server restarts."
+fi
+
 # 11b. signalk-server drift apply
 # Re-runs of the installer may change PORT, the image tag (operator picks
 # standard ports at the prompt, or bumps the engine channel), or the image

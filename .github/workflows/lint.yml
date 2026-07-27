@@ -53,6 +53,9 @@ jobs:
       - name: timesync restart gating
         run: bash scripts/test/check-timesync-restart.sh
 
+      - name: resolv-watch DNS self-heal
+        run: bash scripts/test/check-resolv-watch.sh
+
       - name: orphan container detection
         run: bash scripts/test/check-orphan-detection.sh
 

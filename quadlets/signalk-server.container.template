@@ -145,6 +145,22 @@ Label=io.signalk.role=server
 # goes to `failed` state and stays there.
 Restart=always
 RestartSec=10
+# Give an early boot a short window for DNS configuration to land before
+# podman snapshots the host's /etc/resolv.conf into the container. That
+# snapshot happens once per container create: on hosts whose resolv.conf
+# lives under /run (systemd-resolved, resolvconf, NetworkManager in
+# symlink mode) a boot that beats DHCP hands the container an EMPTY
+# resolver list, and the app store — all outbound DNS in signalk-server —
+# stays dead until something recreates the container. Waiting up to 15s
+# covers the common case (router already up, DHCP lands seconds after
+# boot) without costing a restart. Always exits 0: a host with no
+# network at all (offline boat) must still get its server, just 15s
+# later; on a host that already has a nameserver the first check passes
+# and the wait is zero. The cold-power-on case — the router itself needs
+# minutes — is covered by the signalk-resolv-watch path unit, which
+# recreates the server once DNS configuration appears. Counts against
+# TimeoutStartSec=300 below, well inside that budget.
+ExecStartPre=/bin/sh -c 'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -qs "^nameserver" /etc/resolv.conf && break; sleep 1; done; exit 0'
 # 300s (was 180): on an SD-card host `podman run --replace --rm` can take
 # minutes just to CREATE the container under concurrent I/O (the cold plugin
 # `npm install` runs in the same window) — observed timing out at 180s, getting
