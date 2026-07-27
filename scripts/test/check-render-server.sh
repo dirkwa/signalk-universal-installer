@@ -125,12 +125,30 @@ run_render() {
     ' _ "$@"
 }
 
+# Prime the resolv-watch units once: cmd_render_server ensures them on every
+# run (that's the feature — they ride along with `signalk update`), so the
+# idempotency case below exercises the ALREADY-INSTALLED path, which is
+# read-only (a single `is-enabled` probe).
+HOME="$root" bash -c '
+    set -euo pipefail
+    systemctl() { return 0; }
+    # shellcheck source=/dev/null
+    . "'"$funcs"'"
+    _signalk_ensure_resolv_watch >/dev/null
+'
+
 # ── 1. Idempotent: live already matches the render ─────────────────────────
 canonical >"$live"
 rm -rf "$root/marks"
 if out=$(run_render 2>&1); then
+    # The resolv-watch ensure must have run — but only its read-only
+    # `is-enabled` probe (units were primed above). Requiring the log to be
+    # exactly that one line catches both regressions at once: cmd_render_server
+    # dropping the ensure entirely (empty log) and the ensure doing real work
+    # on the already-installed path (extra lines).
     if grep -q 'already matches' <<<"$out" \
-        && [[ ! -f "$root/marks/restart.log" && ! -f "$root/marks/systemctl.log" ]]; then
+        && [[ ! -f "$root/marks/restart.log" ]] \
+        && [[ "$(cat "$root/marks/systemctl.log" 2>/dev/null)" == "--user is-enabled signalk-resolv-watch.path" ]]; then
         ok "no-op when live Quadlet already matches the template (no restart, no daemon-reload)"
     else
         miss "idempotent path did work it shouldn't have"
