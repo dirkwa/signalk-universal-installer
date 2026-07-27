@@ -20,11 +20,14 @@
 #                          no-ops when the live Quadlet already matches the render. Use
 #                          it to pull in a template-only fix (e.g. Timezone=local) on an
 #                          existing box without re-running the installer.
-#   signalk resolv-watch   (re)install the signalk-resolv-watch systemd user units:
-#                          a path unit watching /etc/resolv.conf plus a oneshot
-#                          that recreates signalk-server when host DNS appeared
-#                          only after the container started (boot beat DHCP).
-#                          Idempotent; render-server runs it automatically.
+#   signalk resolv-watch [heal]
+#                          no argument: (re)install the signalk-resolv-watch
+#                          systemd user units — a path unit watching the host DNS
+#                          configuration plus a oneshot that recreates
+#                          signalk-server when DNS appeared only after the
+#                          container started (boot beat DHCP). Idempotent;
+#                          render-server runs it automatically. `heal` runs one
+#                          probe-and-recover pass now (what the oneshot calls).
 #   signalk resetadmin [user]
 #                          reset (or create) an admin user's password for the
 #                          Admin UI login (default user: admin). Prompts for the
@@ -309,10 +312,11 @@ _signalk_restart_server() {
 # rationale as reusing render-server-quadlet.sh verbatim: install.sh
 # calls `signalk resolv-watch` on a fresh install, and cmd_render_server
 # calls the same helper so existing boxes pick the units up on `signalk
-# update`. The oneshot restarts the unit via systemctl directly, not the
-# updater's REST API: it fires at boot when the updater container may
-# itself still be starting, and a unit-level self-heal must not depend on
-# a console container being healthy.
+# update`. The oneshot delegates to `signalk resolv-watch heal` so the
+# recovery goes through the sanctioned lifecycle path
+# (_signalk_restart_server: updater REST first, systemctl --user only as
+# the fallback — the same order the timesync agent uses); the unit text
+# itself carries no podman or systemctl calls.
 RESOLV_WATCH_PATH_UNIT='# Installed by signalk-universal-installer (signalk resolv-watch)
 [Unit]
 Description=Watch host DNS configuration for the SignalK container stack
@@ -339,21 +343,18 @@ PathChanged=/run/resolvconf/resolv.conf
 
 [Install]
 WantedBy=default.target'
-# shellcheck disable=SC2016  # literal unit-file text; nothing may expand here
 RESOLV_WATCH_SERVICE_UNIT='# Installed by signalk-universal-installer (signalk resolv-watch)
 [Unit]
 Description=Recreate signalk-server when host DNS appeared after its start
+# The probe + recovery logic lives in the CLI (`signalk resolv-watch
+# heal`) so the restart follows the sanctioned lifecycle path: the
+# updater REST API first, systemctl --user only as the fallback. The
+# unit is inert when the CLI is missing.
+ConditionPathExists=%h/.local/bin/signalk
 
 [Service]
 Type=oneshot
-# Ordered guards, each a clean no-op exit:
-#   1. host has no nameserver        -> nothing to heal towards
-#   2. container not running         -> its next start snapshots fresh
-#   3. container has a nameserver    -> healthy, nothing to do
-# Only then recreate the container — the unit restart re-runs
-# `podman run --replace`, which re-copies the host resolv.conf.
-# try-restart: never starts a unit the operator stopped.
-ExecStart=/bin/sh -c '\''grep -qs "^nameserver" /etc/resolv.conf || exit 0; podman exec signalk-server true 2>/dev/null || exit 0; podman exec signalk-server grep -qs "^nameserver" /etc/resolv.conf && exit 0; echo "host DNS configured but the signalk-server container has no nameserver - recreating it"; exec systemctl --user try-restart signalk-server.service'\'''
+ExecStart=%h/.local/bin/signalk resolv-watch heal'
 
 _signalk_ensure_resolv_watch() {
     local unit_dir="${HOME}/.config/systemd/user"
@@ -396,12 +397,32 @@ _signalk_ensure_resolv_watch() {
     echo "[OK] signalk-resolv-watch units installed and watching /etc/resolv.conf."
 }
 
+# The oneshot's entry point. Ordered guards, each a clean no-op exit:
+#   1. host has no nameserver     -> nothing to heal towards
+#   2. container not running      -> its next start snapshots fresh; this
+#                                    also gives try-restart semantics (never
+#                                    start a unit the operator stopped)
+#   3. container has a nameserver -> healthy, nothing to do
+# Only then recreate the container: _signalk_restart_server (updater REST
+# first, systemctl fallback) restarts the unit, whose `podman run
+# --replace` re-copies the host resolv.conf. The podman probes here are
+# read-only — lifecycle mutation stays on the sanctioned path.
+# SIGNALK_RESOLV_CONF is a test seam; production uses the real file.
+_signalk_resolv_heal() {
+    local resolv="${SIGNALK_RESOLV_CONF:-/etc/resolv.conf}"
+    grep -qs '^nameserver' "$resolv" || return 0
+    podman exec signalk-server true 2>/dev/null || return 0
+    podman exec signalk-server grep -qs '^nameserver' /etc/resolv.conf && return 0
+    echo "[i] Host DNS is configured but the signalk-server container has no nameserver — recreating it."
+    _signalk_restart_server
+}
+
 cmd_resolv_watch() {
-    if [[ $# -gt 0 ]]; then
-        echo "[ERR] Unknown resolv-watch argument: $1" >&2
-        return 1
-    fi
-    _signalk_ensure_resolv_watch
+    case "${1:-}" in
+        '') _signalk_ensure_resolv_watch ;;
+        heal) _signalk_resolv_heal ;;
+        *) echo "[ERR] Unknown resolv-watch argument: $1" >&2; return 1 ;;
+    esac
 }
 
 cmd_render_server() {

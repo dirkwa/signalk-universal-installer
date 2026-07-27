@@ -6,8 +6,10 @@
 #   1. `signalk resolv-watch` lays down both user units (content + enable
 #      --now) against a sandbox HOME with systemctl stubbed, and a second
 #      run is idempotent (no rewrite, no second enable).
-#   2. The oneshot's guard chain runs in the safe order: host-nameserver →
-#      container-running → container-nameserver, and only then try-restart.
+#   2. The oneshot delegates to `signalk resolv-watch heal` (no podman or
+#      systemctl in the unit text), and the heal's guard chain — exercised
+#      with stubs — restarts only when the host has DNS and the running
+#      container has none, via the sanctioned restart helper.
 #   3. The server Quadlet template carries the bounded ExecStartPre resolv
 #      wait and always exits 0 (an offline host must still start).
 #
@@ -98,18 +100,75 @@ else
     sed 's/^/         /' "$SYSTEMCTL_LOG"
 fi
 
-# ── 2. Oneshot guard chain, in order ────────────────────────────────────────
+# ── 2. Oneshot delegates to the CLI — no direct lifecycle calls ─────────────
+# The unit text must carry no podman/systemctl of its own: recovery goes
+# through `signalk resolv-watch heal`, which routes the restart via the
+# sanctioned path (updater REST first, systemctl fallback).
 
-execline=$(grep '^ExecStart=' "$svc_unit" 2>/dev/null || true)
-if printf '%s' "$execline" | grep -Eq \
-    'nameserver" /etc/resolv\.conf \|\| exit 0;.*podman exec signalk-server true.*\|\| exit 0;.*podman exec signalk-server grep.*nameserver.*&& exit 0;.*try-restart signalk-server\.service'; then
-    ok "oneshot guards: host-DNS → container-running → container-DNS → try-restart"
+if grep -q '^ExecStart=%h/\.local/bin/signalk resolv-watch heal$' "$svc_unit" 2>/dev/null \
+    && grep -q '^ConditionPathExists=%h/\.local/bin/signalk$' "$svc_unit" 2>/dev/null \
+    && ! grep -v '^#' "$svc_unit" | grep -Eq 'podman|systemctl'; then
+    ok "oneshot delegates to 'signalk resolv-watch heal'; unit text has no podman/systemctl"
 else
-    miss "oneshot ExecStart guard chain not in the expected order"
-    printf '         %s\n' "$execline"
+    miss "oneshot must delegate to the CLI without direct podman/systemctl calls"
+    sed 's/^/         /' "$svc_unit" 2>/dev/null || true
 fi
 
-# ── 3. Second run is idempotent ─────────────────────────────────────────────
+# ── 3. Heal guard chain (behavioral, stubbed) ───────────────────────────────
+# Source the CLI functions with the dispatcher stripped (same technique as
+# check-render-server.sh), stub podman + the restart helper, and drive the
+# guards through the resolv-conf test seam. The restart must fire ONLY when
+# the host has a nameserver and the running container has none.
+
+funcs="$tmp/funcs.sh"
+sed '/^case "${1:-help}" in/,$d' "$CLI_TMPL" | sed 's/__SK_VERSION__/test/g' >"$funcs"
+if ! grep -q '^_signalk_resolv_heal()' "$funcs"; then
+    echo "[ERR] _signalk_resolv_heal not found after stripping the dispatcher." >&2
+    exit 2
+fi
+
+resolv_ok="$tmp/resolv-ok"
+echo "nameserver 192.168.0.1" >"$resolv_ok"
+resolv_empty="$tmp/resolv-empty"
+: >"$resolv_empty"
+
+run_heal() {
+    # $1 = resolv fixture, $2 = container state: down | nodns | dns
+    rm -f "$tmp/restart.log"
+    SIGNALK_RESOLV_CONF="$1" CONTAINER_STATE="$2" MARK="$tmp" bash -c '
+        set -euo pipefail
+        # shellcheck source=/dev/null
+        . "'"$funcs"'"
+        # Stubs AFTER the source, or the real definitions would clobber them.
+        podman() {
+            case "$*" in
+                "exec signalk-server true") [[ "$CONTAINER_STATE" != down ]] ;;
+                *grep*) [[ "$CONTAINER_STATE" == dns ]] ;;
+                *) return 0 ;;
+            esac
+        }
+        _signalk_restart_server() { echo restart >>"$MARK/restart.log"; }
+        _signalk_resolv_heal
+    ' >/dev/null
+}
+
+heal_case() {
+    local desc="$1" resolv="$2" state="$3" want_restart="$4" got=0
+    run_heal "$resolv" "$state"
+    [[ -f "$tmp/restart.log" ]] && got=1
+    if [[ "$got" == "$want_restart" ]]; then
+        ok "heal: $desc"
+    else
+        miss "heal: $desc (restart fired: $got, want $want_restart)"
+    fi
+}
+
+heal_case "no host nameserver → no restart" "$resolv_empty" nodns 0
+heal_case "container not running → no restart" "$resolv_ok" down 0
+heal_case "container already has DNS → no restart" "$resolv_ok" dns 0
+heal_case "container missing DNS → restart fires" "$resolv_ok" nodns 1
+
+# ── 4. Second run is idempotent ─────────────────────────────────────────────
 
 out2=$(bash "$CLI_TMPL" resolv-watch 2>&1) || {
     echo "[ERR] second 'signalk resolv-watch' run failed" >&2
@@ -128,7 +187,7 @@ else
     miss "enable --now issued $enables times (want 1)"
 fi
 
-# ── 4. Server Quadlet template carries the bounded pre-start wait ───────────
+# ── 5. Server Quadlet template carries the bounded pre-start wait ───────────
 
 # One directive, and that same directive must be a BOUNDED wait (a finite
 # `for` list, not an open-ended loop) that always exits 0 — an unbounded or
