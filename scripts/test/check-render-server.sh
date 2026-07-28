@@ -64,13 +64,25 @@ fi
 # fixture). Enough to exercise the hardware block; the point here is the file
 # lifecycle, not the block contents. cmd_render_server reads it from
 # $HOME/.signalk-updater/hardware.json, so it must live there under $root.
+#
+# Serial devices are existence-guarded at render time, so the fixture's by-id
+# path must exist for the AddDevice= line to render (otherwise the block would
+# be empty and the lifecycle assertions, while still valid, wouldn't exercise
+# a serial device at all). Point SERIAL_DIR at a seeded temp node; the export
+# reaches both canonical() and the renderer spawned inside run_render.
+serialdir="$root/serial-by-id"
+mkdir -p "$serialdir"
+serial_byid="$serialdir/usb-FTDI_TEST-if00-port0"
+: >"$serial_byid"
+export SERIAL_DIR="$serialdir"
+
 mkdir -p "$root/.signalk-updater"
 hw="$root/.signalk-updater/hardware.json"
-cat >"$hw" <<'JSON'
+cat >"$hw" <<JSON
 {
   "detectedAt": "2026-01-01T00:00:00Z",
   "serial": [
-    {"byId":"/dev/serial/by-id/usb-FTDI_TEST-if00-port0","vendor":"FTDI","product":"UART","enabled":true}
+    {"byId":"$serial_byid","vendor":"FTDI","product":"UART","enabled":true}
   ],
   "can": [],
   "bluetooth": { "dbusAvailable": false, "enabled": false },

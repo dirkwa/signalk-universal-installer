@@ -13,6 +13,11 @@ TEMPLATE="${2:-}"
 # Host path probed/mounted for the audio class; overridable so the render
 # test can exercise both the present and missing cases deterministically.
 AUDIO_DIR="${AUDIO_DIR:-/dev/snd}"
+# Directory the serial AddDevice= existence guard stats against. Real serial
+# by-id symlinks live under /dev/serial/by-id; overridable (like AUDIO_DIR)
+# so the render test can seed present/absent device nodes deterministically
+# without touching the host's /dev.
+SERIAL_DIR="${SERIAL_DIR:-/dev/serial/by-id}"
 
 if [[ -z "$TEMPLATE" ]]; then
     # Default: look next to this script (../../quadlets/...)
@@ -29,6 +34,43 @@ if [[ ! -f "$HW_FILE" ]]; then
     exit 1
 fi
 
+# Drop serial AddDevice= lines whose device node is absent at render time.
+# hardware.json records what detect-hardware.sh saw at DETECT time, but a
+# USB-serial adapter can disappear between detect and render — physically
+# unplugged, or a flaky device that re-enumerates (a CH340/ACM adapter drops
+# its /dev/serial/by-id symlink while it re-enumerates). An AddDevice= pointing
+# at a path podman can't stat fails container creation hard (exit 125) BEFORE
+# the app starts, so one absent optional serial device crashloops the whole
+# server. This mirrors the render-time existence guard the audio (/dev/snd)
+# and avahi-socket lines below already have: emit the line only when the
+# device node exists, otherwise silently drop it (the server still starts;
+# that one input source is just absent) rather than bricking.
+#
+# Scope is deliberately SERIAL ONLY — matched by the /dev/serial/by-id/
+# prefix. CAN's AddDevice=/dev/<iface> is left untouched: socketcan is a
+# network device, not a /dev node, so an existence test on /dev/<iface>
+# would strip every legitimate CAN line. (signalk-server runs Network=host,
+# so the CAN interface is reachable regardless; guarding it correctly is a
+# separate concern and out of scope here.) Volume= and every other line
+# pass through untouched. Reads stdin, writes stdout.
+guard_adddevice() {
+    local line dev
+    while IFS= read -r line; do
+        case "$line" in
+            "AddDevice=${SERIAL_DIR}/"*)
+                # Strip the "AddDevice=" prefix, then any ":perms" suffix
+                # (e.g. AddDevice=/dev/foo:rwm) to get the host path to stat.
+                dev=${line#AddDevice=}
+                dev=${dev%%:*}
+                [ -e "$dev" ] && printf '%s\n' "$line"
+                ;;
+            *)
+                printf '%s\n' "$line"
+                ;;
+        esac
+    done
+}
+
 # Build the AddDevice/Volume block from hardware.json. We use jq if present
 # (best); otherwise fall back to a sed-based extractor that handles the
 # narrow shape detect-hardware.sh emits.
@@ -42,6 +84,7 @@ fi
 # rewrites the AUTH uid in transit — see
 # quadlets/signalk-dbus-proxy.container.template for the full mechanism.
 hardware_block() {
+    {
     if command -v jq >/dev/null 2>&1; then
         # Each clause is parenthesized so its `|` pipeline stays local to
         # the array element. Without the parens, jq's `|` binds across the
@@ -61,6 +104,7 @@ hardware_block() {
         # CAN/BLE/GPIO require jq.
         grep -oE '"byId":"[^"]+"' "$HW_FILE" | sed 's/.*"byId":"\(.*\)"$/AddDevice=\1/'
     fi
+    } | guard_adddevice
 
     # ALSA /dev/snd view (the `audio` class in hardware.json). This is NOT
     # audio access for signalk-server itself: signalk-container runs INSIDE
