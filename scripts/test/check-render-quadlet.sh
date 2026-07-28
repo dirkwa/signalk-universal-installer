@@ -36,14 +36,25 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+# Serial devices are existence-guarded at render time (a missing device node
+# would fail container creation with exit 125), so the fixture's by-id path
+# must actually exist for the "emitted" assertions to hold. Point SERIAL_DIR
+# at a temp dir and create the node there; the fixture byId lives under it.
+# All render invocations below inherit this export.
+serialdir="$tmp/serial-by-id"
+mkdir -p "$serialdir"
+serial_byid="$serialdir/usb-FTDI_TEST-if00-port0"
+: >"$serial_byid"
+export SERIAL_DIR="$serialdir"
+
 # Fixture mirroring the real detect-hardware.sh shape: an enabled serial
 # device, plus disabled CAN/BLE/GPIO. The comma-list bug fired regardless of
 # enabled state — having a present serial entry is enough to reproduce it.
-cat >"$tmp/hardware.json" <<'JSON'
+cat >"$tmp/hardware.json" <<JSON
 {
   "detectedAt": "2026-01-01T00:00:00Z",
   "serial": [
-    {"byId":"/dev/serial/by-id/usb-FTDI_TEST-if00-port0","vendor":"FTDI","product":"UART","enabled":true}
+    {"byId":"$serial_byid","vendor":"FTDI","product":"UART","enabled":true}
   ],
   "can": [
     {"interface":"can0","enabled":false}
@@ -71,8 +82,8 @@ else
     echo "  [OK]   render produced no stderr output"
 fi
 
-# 2. The enabled serial device is present.
-if grep -qF 'AddDevice=/dev/serial/by-id/usb-FTDI_TEST-if00-port0' <<<"$out"; then
+# 2. The enabled serial device is present (its node exists under SERIAL_DIR).
+if grep -qF "AddDevice=$serial_byid" <<<"$out"; then
     echo "  [OK]   enabled serial device emitted"
 else
     echo "  [MISS] enabled serial device missing from output"
@@ -161,6 +172,84 @@ if grep -q ':/dev/snd:ro' <<<"$out_audio_missing"; then
     fail=1
 else
     echo "  [OK]   missing host path suppresses the audio volume"
+fi
+
+# 6. Serial existence guard: an enabled serial device whose node has vanished
+#    between detect and render (unplugged / re-enumerating flaky ACM adapter)
+#    must be DROPPED, not emitted. An AddDevice= pointing at a missing node
+#    fails container creation with exit 125 and crashloops the whole server,
+#    so one absent optional serial device must never brick it. Fixture: a
+#    second by-id path under SERIAL_DIR that we never create.
+missing_byid="$serialdir/usb-GONE_ADAPTER-if00-port0"
+# The absent device is listed LAST so the guard's final loop iteration is a
+# skip — the shape that trips the exit-status trap checked directly in case 7.
+cat >"$tmp/hardware-serial-missing.json" <<JSON
+{
+  "detectedAt": "2026-01-01T00:00:00Z",
+  "serial": [
+    {"byId":"$serial_byid","vendor":"FTDI","product":"UART","enabled":true},
+    {"byId":"$missing_byid","vendor":"GONE","product":"UART","enabled":true}
+  ],
+  "can": [],
+  "bluetooth": { "dbusAvailable": false, "enabled": false },
+  "audio": { "present": false, "enabled": false },
+  "gpio": { "platform": "none", "enabled": false }
+}
+JSON
+err_missing="$tmp/stderr-serial-missing.log"
+out_missing=$(bash "$RENDER" "$tmp/hardware-serial-missing.json" "$TEMPLATE" 2>"$err_missing") || {
+    echo "  [MISS] render (serial node missing) exited non-zero"
+    fail=1
+}
+if [[ -s "$err_missing" ]]; then
+    echo "  [MISS] render (serial node missing) wrote to stderr:"
+    sed 's/^/         /' "$err_missing"
+    fail=1
+fi
+if grep -qF "AddDevice=$missing_byid" <<<"$out_missing"; then
+    echo "  [MISS] absent serial device leaked into output (would crashloop the server, exit 125)"
+    fail=1
+else
+    echo "  [OK]   absent serial device dropped (server not bricked)"
+fi
+# The present device must still survive the same render — the guard drops only
+# the missing one, never the whole serial class.
+if grep -qF "AddDevice=$serial_byid" <<<"$out_missing"; then
+    echo "  [OK]   present serial device kept alongside the dropped one"
+else
+    echo "  [MISS] guard dropped the present serial device too"
+    fail=1
+fi
+
+# 7. guard_adddevice must EXIT 0 when its last action is skipping an absent
+#    device. It runs as `... | guard_adddevice` under set -euo pipefail; a
+#    short-circuited `[ -e ] && printf` leaves the function at status 1 on a
+#    trailing skip, failing the pipeline. (The renderer's own call site happens
+#    to mask this — hardware_block runs inside a command substitution where
+#    set -e doesn't propagate — so this asserts the function contract directly,
+#    the level where the trap actually bites and a refactor would expose it.)
+guard_fn="$tmp/guard.sh"
+# Extract the guard_adddevice function definition from the renderer verbatim.
+sed -n '/^guard_adddevice() {/,/^}/p' "$RENDER" >"$guard_fn"
+if ! grep -q '^guard_adddevice() {' "$guard_fn"; then
+    echo "  [MISS] could not extract guard_adddevice from $RENDER (renamed?)"
+    fail=1
+else
+    guard_rc=0
+    SERIAL_DIR="$serialdir" bash -c '
+        set -euo pipefail
+        # shellcheck source=/dev/null
+        . "'"$guard_fn"'"
+        # Present line, then an absent one LAST — the failing shape.
+        printf "AddDevice=%s\nAddDevice=%s\n" "'"$serial_byid"'" "'"$missing_byid"'" \
+            | guard_adddevice >/dev/null
+    ' || guard_rc=$?
+    if [[ "$guard_rc" -eq 0 ]]; then
+        echo "  [OK]   guard_adddevice exits 0 after a trailing skip (no set -e abort)"
+    else
+        echo "  [MISS] guard_adddevice exited $guard_rc on a trailing skip — would abort rendering under set -e"
+        fail=1
+    fi
 fi
 
 if (( fail )); then
