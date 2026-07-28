@@ -62,7 +62,15 @@ guard_adddevice() {
                 # (e.g. AddDevice=/dev/foo:rwm) to get the host path to stat.
                 dev=${line#AddDevice=}
                 dev=${dev%%:*}
-                [ -e "$dev" ] && printf '%s\n' "$line"
+                # Explicit if, not `[ -e ] && printf`: the guard runs in a
+                # `... | guard_adddevice` pipe under set -euo pipefail, and a
+                # short-circuited && leaves the loop (and the function) with
+                # status 1 on a skipped device — the very case this exists to
+                # handle — which would abort rendering. An if makes the skip a
+                # success.
+                if [ -e "$dev" ]; then
+                    printf '%s\n' "$line"
+                fi
                 ;;
             *)
                 printf '%s\n' "$line"

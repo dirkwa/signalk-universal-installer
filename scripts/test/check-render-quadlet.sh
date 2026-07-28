@@ -181,6 +181,8 @@ fi
 #    so one absent optional serial device must never brick it. Fixture: a
 #    second by-id path under SERIAL_DIR that we never create.
 missing_byid="$serialdir/usb-GONE_ADAPTER-if00-port0"
+# The absent device is listed LAST so the guard's final loop iteration is a
+# skip — the shape that trips the exit-status trap checked directly in case 7.
 cat >"$tmp/hardware-serial-missing.json" <<JSON
 {
   "detectedAt": "2026-01-01T00:00:00Z",
@@ -217,6 +219,37 @@ if grep -qF "AddDevice=$serial_byid" <<<"$out_missing"; then
 else
     echo "  [MISS] guard dropped the present serial device too"
     fail=1
+fi
+
+# 7. guard_adddevice must EXIT 0 when its last action is skipping an absent
+#    device. It runs as `... | guard_adddevice` under set -euo pipefail; a
+#    short-circuited `[ -e ] && printf` leaves the function at status 1 on a
+#    trailing skip, failing the pipeline. (The renderer's own call site happens
+#    to mask this — hardware_block runs inside a command substitution where
+#    set -e doesn't propagate — so this asserts the function contract directly,
+#    the level where the trap actually bites and a refactor would expose it.)
+guard_fn="$tmp/guard.sh"
+# Extract the guard_adddevice function definition from the renderer verbatim.
+sed -n '/^guard_adddevice() {/,/^}/p' "$RENDER" >"$guard_fn"
+if ! grep -q '^guard_adddevice() {' "$guard_fn"; then
+    echo "  [MISS] could not extract guard_adddevice from $RENDER (renamed?)"
+    fail=1
+else
+    guard_rc=0
+    SERIAL_DIR="$serialdir" bash -c '
+        set -euo pipefail
+        # shellcheck source=/dev/null
+        . "'"$guard_fn"'"
+        # Present line, then an absent one LAST — the failing shape.
+        printf "AddDevice=%s\nAddDevice=%s\n" "'"$serial_byid"'" "'"$missing_byid"'" \
+            | guard_adddevice >/dev/null
+    ' || guard_rc=$?
+    if [[ "$guard_rc" -eq 0 ]]; then
+        echo "  [OK]   guard_adddevice exits 0 after a trailing skip (no set -e abort)"
+    else
+        echo "  [MISS] guard_adddevice exited $guard_rc on a trailing skip — would abort rendering under set -e"
+        fail=1
+    fi
 fi
 
 if (( fail )); then
