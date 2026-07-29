@@ -70,3 +70,6 @@ jobs:
 
       - name: tmpfs /tmp warning decision table
         run: bash scripts/test/check-tmpfs-warn.sh
+
+      - name: dbus-auth-proxy image pin sync
+        run: bash scripts/test/check-proxy-image-sync.sh
