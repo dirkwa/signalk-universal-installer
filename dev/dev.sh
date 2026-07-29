@@ -205,16 +205,27 @@ demo() {
 #
 # It needs the same listener/mDNS guard as demo() — an e2e run must not
 # fight the production stack for :8375/:10110 or announce itself either.
-# The guarded copy goes to /tmp rather than into the package tree, which is
-# an image directory: SIGNALK_NODE_SETTINGS overrides the settings FILE
-# without touching config-dir resolution. `-s` therefore stays, unused for
-# its filename but still required: getConfigDirectory() reads it as the
+# The guarded copy goes to a temp dir rather than into the package tree,
+# which is an image directory: SIGNALK_NODE_SETTINGS overrides the settings
+# FILE without touching config-dir resolution. `-s` therefore stays, unused
+# for its filename but still required: getConfigDirectory() reads it as the
 # "use appPath as the config dir" signal, and dropping it would fall
 # through to ${HOME}/.signalk — the dev config this variant exists to
-# avoid. Regenerated every run: e2e must not inherit yesterday's edits.
+# avoid.
+#
+# mktemp, not a fixed name: a predictable path in a world-writable /tmp can
+# be pre-created as a symlink that the redirect below then follows. Also
+# gives a fresh file per run, so e2e never inherits yesterday's edits. We
+# exec, so no trap can clean up — the file has to outlive this shell for the
+# server to read it. Sweep older copies instead, and only ones a day old:
+# a concurrent run on another E2E_PORT must keep its own file, which it may
+# not have finished reading yet.
 demo_fg() {
   ensure_port_free
-  local settings="/tmp/signalk-dev-e2e-settings-${PORT}.json"
+  local settings tmpdir="${TMPDIR:-/tmp}"
+  find "${tmpdir}" -maxdepth 1 -name 'signalk-dev-e2e-settings-*.json' \
+    -user "$(id -u)" -mtime +0 -delete 2>/dev/null || true
+  settings="$(mktemp "${tmpdir}/signalk-dev-e2e-settings-XXXXXX.json")"
   sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
     "${SERVER_ROOT}/settings/volare-file-settings.json" \
     > "${settings}"
