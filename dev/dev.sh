@@ -86,8 +86,15 @@ ensure_port_free() {
     for pid in "${pids[@]}"; do
       printf '    %s %s\n' "${pid}" "$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)" >&2
     done
+    echo "  Stop the listener (kill the pid above), or use PORT=<other> $0 <command>." >&2
+  else
+    # pgrep only sees our own uid, so an empty list is itself the answer: the
+    # listener belongs to another user — under host networking that is the
+    # production stack, which must NOT be killed to free a dev port.
+    echo "  No signalk-server is running as $(id -un), so the listener belongs to" >&2
+    echo "  another user — most likely the production stack. Do not stop it for a" >&2
+    echo "  dev run: use PORT=<other> $0 <command> instead." >&2
   fi
-  echo "  Stop the listener (kill the pid above), or use PORT=<other> $0 <command>." >&2
   exit 1
 }
 
