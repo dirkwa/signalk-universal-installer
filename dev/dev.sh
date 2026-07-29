@@ -8,7 +8,7 @@
 #   ./dev.sh restart   stop + start (picks up plugin code changes!)
 #   ./dev.sh link      build + link dev/plugins/* into the dev config (no restart)
 #   ./dev.sh logs      tail the server log
-#   ./dev.sh status    is it running?
+#   ./dev.sh status    is it running? — and if it died, what killed it
 #
 # start/demo/restart auto-link every plugin under dev/plugins/ when launching
 # the server (via link-plugins.sh), so a freshly cloned plugin just works.
@@ -54,12 +54,48 @@ is_running() {
 
 # Refuse to start when something else already answers on ${PORT} —
 # otherwise verify_up would happily attribute a foreign listener to us.
+#
+# Report what is actually known rather than asserting the listener is
+# foreign. "not managed by this script" was a guess, and the likeliest cause
+# is our OWN server with the pidfile out from under it (a cleared /tmp, a
+# pidfile removed by hand, a pid recorded wrong) — which sent people hunting
+# for a second install that does not exist.
 ensure_port_free() {
-  if curl -sf -o /dev/null "http://localhost:${PORT}/signalk" 2>/dev/null; then
-    echo "Port ${PORT} is already serving a SignalK instance that is not managed by this script." >&2
-    echo "Stop it first, or use PORT=<other> $0 ..." >&2
-    exit 1
+  curl -sf -o /dev/null "http://localhost:${PORT}/signalk" 2>/dev/null || return 0
+  local recorded pid pids=()
+  echo "Port ${PORT} already answers as a SignalK server, and this script is not tracking it." >&2
+  if [ -f "${PIDFILE}" ]; then
+    recorded="$(cat "${PIDFILE}" 2>/dev/null || true)"
+    echo "  ${PIDFILE} records pid ${recorded:-<empty>}, which is not a live signalk-server." >&2
+  else
+    echo "  There is no ${PIDFILE}, so this instance's pid was never recorded or has been cleaned up." >&2
   fi
+  # No ss/lsof in the image, so name the candidates by process rather than by
+  # listening socket — enough to tell "my own orphan" from "the production
+  # stack" at a glance. Keep only the node processes: a reaper shell's command
+  # line necessarily contains the server's too, and listing those buries the
+  # answer under the reaper body. Discriminate on the exe link, NOT on
+  # /proc/<pid>/comm — node renames its main thread, so comm reads
+  # "MainThread" and never matches.
+  while read -r pid; do
+    [ "$(basename "$(readlink -f "/proc/${pid}/exe" 2>/dev/null)" 2>/dev/null)" = node ] \
+      && pids+=("${pid}")
+  done < <(pgrep -u "$(id -u)" -f 'bin/signalk-server' 2>/dev/null || true)
+  if [ "${#pids[@]}" -gt 0 ]; then
+    echo "  signalk-server processes running as $(id -un):" >&2
+    for pid in "${pids[@]}"; do
+      printf '    %s %s\n' "${pid}" "$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)" >&2
+    done
+    echo "  Stop the listener (kill the pid above), or use PORT=<other> $0 <command>." >&2
+  else
+    # pgrep only sees our own uid, so an empty list is itself the answer: the
+    # listener belongs to another user — under host networking that is the
+    # production stack, which must NOT be killed to free a dev port.
+    echo "  No signalk-server is running as $(id -un), so the listener belongs to" >&2
+    echo "  another user — most likely the production stack. Do not stop it for a" >&2
+    echo "  dev run: use PORT=<other> $0 <command> instead." >&2
+  fi
+  exit 1
 }
 
 # launch <cmd...>: run the server detached from ${SERVER_ROOT}, record its
@@ -79,13 +115,53 @@ ensure_port_free() {
 # last line is verify_up's own successful probe. Its own session has no
 # controlling terminal, so no SIGHUP is ever delivered.
 #
-# set +m keeps $! pointing at the server: setsid(1) forks only when its
-# caller is already a process-group leader, which the backgrounded subshell
-# of a job-control-less shell never is.
+# set +m keeps the exec chain in our process group: setsid(1) forks only when
+# its caller is already a process-group leader, which the backgrounded
+# subshell of a job-control-less shell never is.
+#
+# The server runs under a small reaper shell rather than being exec'd
+# directly, so that a death is never silent: the reaper waits for the server
+# and appends WHY it went — exit status, or the signal that killed it — to
+# ${LOGFILE}. Before this, a server that died on its own left only a stale
+# pidfile and a log whose last line was verify_up's successful probe, which
+# is indistinguishable from a clean stop (issue #223 took a reproduction to
+# diagnose for exactly this reason). The reaper is nohup'd bash, which really
+# does honour SIG_IGN for SIGHUP, so it outlives the server and records the
+# cause even when the server is signalled out from under it.
+#
+# The reaper writes ${PIDFILE} itself: it holds the SERVER's pid (not the
+# reaper's), so is_running() and stop() keep working on the node process
+# exactly as before.
 launch() {
   set +m
-  ( cd "${SERVER_ROOT}" && exec setsid nohup "$@" ) > "${LOGFILE}" 2>&1 &
-  echo $! > "${PIDFILE}"
+  # Drop a stale pidfile first — the spin below waits for the reaper to
+  # write the new one and must not accept a previous run's pid.
+  rm -f "${PIDFILE}"
+  # The reaper body is single-quoted on purpose: every expansion in it must
+  # happen when the reaper RUNS, not when dev.sh builds the command line.
+  # shellcheck disable=SC2016
+  ( cd "${SERVER_ROOT}" && exec setsid nohup bash -c '
+      pidfile=$1; shift
+      "$@" & pid=$!
+      echo "${pid}" > "${pidfile}"
+      wait "${pid}"; s=$?
+      if [ "${s}" -gt 128 ]; then why="killed by SIG$(kill -l $((s - 128)) 2>/dev/null)"
+      else why="exited with status ${s}"; fi
+      printf "\n*** signalk-server (pid %s) %s at %s ***\n" "${pid}" "${why}" "$(date -Is)"
+    ' bash "${PIDFILE}" "$@" ) > "${LOGFILE}" 2>&1 &
+  # Do not return before the pid is on disk: verify_up() calls is_running()
+  # immediately, and stop() must be able to find the server.
+  for _ in $(seq 1 100); do
+    [ -s "${PIDFILE}" ] && return 0
+    sleep 0.05
+  done
+  echo "WARNING: server pid not recorded in ${PIDFILE} — stop/status cannot track it" >&2
+  # Report the failure in the exit status too, so a caller that checks it is
+  # not told the launch succeeded. Both current callers deliberately ignore
+  # it (`|| true`) and fall through to verify_up(), which produces the better
+  # error: it probes the port, and its is_running() check fails on the very
+  # missing pidfile we are reporting, so it exits non-zero with the log tail.
+  return 1
 }
 
 # The server catches uncaught exceptions (e.g. EADDRINUSE) and keeps the
@@ -122,7 +198,9 @@ start() {
   ensure_port_free
   link_plugins || echo "WARNING: plugin linking reported errors — starting anyway" >&2
   echo "Starting SignalK dev server on port ${PORT} — ${SERVER_FLAVOR}..."
-  launch env PORT="${PORT}" ./bin/signalk-server -c "${CONFIG_DIR}"
+  # `|| true`: an unrecorded pid must not abort us under `set -e` — the server
+  # may well be up, and verify_up() below reports the failure better anyway.
+  launch env PORT="${PORT}" ./bin/signalk-server -c "${CONFIG_DIR}" || true
   verify_up
 }
 
@@ -234,8 +312,10 @@ demo() {
   link_plugins || echo "WARNING: plugin linking reported errors — starting anyway" >&2
   seed_demo_settings
   echo "Starting SignalK dev server with sample NMEA data on port ${PORT} — ${SERVER_FLAVOR}..."
+  # `|| true` for the same reason as in start(): verify_up() is the better
+  # reporter of an unrecorded pid than an abort here would be.
   launch env PORT="${PORT}" ./bin/signalk-server \
-    -c "${CONFIG_DIR}" -s settings/volare-file-settings.json
+    -c "${CONFIG_DIR}" -s settings/volare-file-settings.json || true
   verify_up
 }
 
@@ -277,6 +357,31 @@ demo_fg() {
     -s settings/volare-file-settings.json
 }
 
+# stop() always removes the pidfile, so a pidfile with no live server behind
+# it means the server died on its own. Say so, and surface the cause the
+# reaper recorded — plain "stopped" made a crash look like a clean stop.
+status() {
+  if is_running; then
+    echo "running (pid $(cat "${PIDFILE}"), port ${PORT}, ${SERVER_FLAVOR})"
+    return 0
+  fi
+  if [ -f "${PIDFILE}" ]; then
+    local cause
+    echo "died — pid $(cat "${PIDFILE}" 2>/dev/null || echo '?') is gone but ${PIDFILE} remains, so it exited on its own (not via '$0 stop')."
+    cause="$(grep -aF '*** signalk-server (pid ' "${LOGFILE}" 2>/dev/null | tail -n 1 || true)"
+    if [ -n "${cause}" ]; then
+      echo "  ${cause}"
+    else
+      # No record means the reaper died too — the whole process group went at
+      # once (SIGKILL, or the container/session being torn down).
+      echo "  No exit record in ${LOGFILE} — the reaper went with it, so the whole process group was killed. Last log lines:"
+      tail -n 5 "${LOGFILE}" 2>/dev/null | sed 's/^/    /'
+    fi
+    return 0
+  fi
+  echo "stopped"
+}
+
 stop() {
   if is_running; then
     pid="$(cat "${PIDFILE}")"
@@ -303,6 +408,6 @@ case "${1:-}" in
   restart) stop; start ;;
   link)    link_plugins ;;
   logs)    tail -f "${LOGFILE}" ;;
-  status)  is_running && echo "running (pid $(cat "${PIDFILE}"), port ${PORT}, ${SERVER_FLAVOR})" || echo "stopped" ;;
+  status)  status ;;
   *) grep '^#   ' "$0" | sed 's/^#   //'; exit 1 ;;
 esac
