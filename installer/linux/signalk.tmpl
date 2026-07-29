@@ -677,11 +677,17 @@ cmd_update() {
     # -w writes the HTTP code separately so we can branch on it. -m 60
     # because the doctor fetches 6 artifacts from Pages and snapshots
     # each that changed — bounded but not instant.
+    #
+    # `|| http_code="000"` OUTSIDE the substitution, not `|| echo "000"` inside
+    # it: on a connection failure curl still prints its own "000" via -w AND
+    # exits non-zero, so an inner echo APPENDS and yields "000000" — which
+    # matches no case arm below and skips the 000) branch that prints the
+    # bash one-liner recovery floor, exactly when the doctor is unreachable.
     http_code=$(curl -sS -o "$body_file" -w '%{http_code}' \
         -m 60 \
         -X POST \
         -H "Authorization: Bearer $token" \
-        "$DOCTOR_URL/api/installer/refresh" || echo "000")
+        "$DOCTOR_URL/api/installer/refresh") || http_code="000"
 
     case "$http_code" in
         000)
@@ -935,9 +941,16 @@ _signalk_lifecycle() {
     [[ -f "$token_path" ]] && token=$(<"$token_path")
     local http
     if [[ -n "$token" ]]; then
+        # `|| http="000"` OUTSIDE the substitution, not `|| echo "000"` inside
+        # it: on a connection failure curl still prints its own "000" via -w AND
+        # exits non-zero, so an inner echo APPENDS and yields "000000". That
+        # matches no case arm below, so the updater-unreachable branch — the
+        # documented systemctl fallback that returns rc 3 — was skipped and
+        # stop/start died with "Updater returned HTTP 000000" instead, in
+        # exactly the situation the fallback exists for.
         http=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
             -X POST -H "Authorization: Bearer $token" \
-            "${UPDATER_URL}/api/signalk/${op}" 2>/dev/null || echo "000")
+            "${UPDATER_URL}/api/signalk/${op}" 2>/dev/null) || http="000"
     else
         http="000"
     fi
