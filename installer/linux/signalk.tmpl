@@ -43,6 +43,9 @@
 #                          across reboots until 'signalk start'. (On Windows this
 #                          stops the whole VM instead.)
 #   signalk start          start signalk-server again after 'signalk stop'
+#   signalk restart        restart signalk-server (picks up config changes).
+#                          Unlike stop/start this does not change whether the
+#                          server comes back at boot.
 #   signalk devpod [up|ssh|stop|delete|list]
 #                          zero-setup dev environment (devcontainer, host
 #                          networking). Browser IDE on http://<box>:10800,
@@ -1024,6 +1027,64 @@ cmd_start() {
         2) exit 1 ;; # message already printed by _signalk_lifecycle
         *)
             echo "[ERR] Could not start signalk-server (see above)." >&2
+            exit 1
+            ;;
+    esac
+}
+
+# Restart signalk-server in place — the verb that completes start/stop (#222).
+#
+# Deliberately NOT routed through _signalk_lifecycle: that helper exists to
+# drive the DURABLE pause/resume pair, whose whole point is rewriting the
+# Quadlet's `[Install] WantedBy=` so a stop survives a reboot. A restart must
+# leave boot-start exactly as it found it, so it uses the updater's plain
+# /api/signalk/restart instead. That also means the "updater too old" refusal
+# does not apply here: there is no durability to fail to deliver, so an old
+# updater (or an unreachable one) can fall back to systemctl and still be
+# completely correct.
+#
+# A restart of a STOPPED server would start it, silently undoing a durable
+# `signalk stop` for this boot while leaving WantedBy= removed — an
+# inconsistent state that is nobody's intent. Refuse and point at `start`.
+cmd_restart() {
+    if ! systemctl --user is-active --quiet signalk-server.service; then
+        echo "[ERR] signalk-server is not running, so there is nothing to restart." >&2
+        echo "      Start it with: signalk start" >&2
+        exit 1
+    fi
+    echo "Restarting SignalK (signalk-server)..."
+    local token_path="$HOME/.signalk-updater/token"
+    local token="" http="000"
+    [[ -f "$token_path" ]] && token=$(<"$token_path")
+    if [[ -n "$token" ]]; then
+        # `|| http="000"` OUTSIDE the substitution, not `|| echo "000"` inside
+        # it: on a connection failure curl still prints its own "000" via -w AND
+        # exits non-zero, so an inner `echo` APPENDS, yielding "000000" — which
+        # matches no case arm below and lands in the catch-all error instead of
+        # the systemctl fallback. That would break restart in exactly the
+        # situation the fallback exists for.
+        http=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 \
+            -X POST -H "Authorization: Bearer $token" \
+            "${UPDATER_URL}/api/signalk/restart" 2>/dev/null) || http="000"
+    fi
+    case "$http" in
+        2??)
+            echo "[OK] SignalK restarted. Check it with: signalk health"
+            ;;
+        000|404)
+            # Unreachable or an updater predating the route. Unlike pause/resume
+            # there is nothing durable to lose, so the direct unit restart is a
+            # complete answer rather than a degraded one.
+            echo "[i] Updater API unavailable; restarting the unit directly." >&2
+            if systemctl --user restart signalk-server.service; then
+                echo "[OK] SignalK restarted. Check it with: signalk health"
+            else
+                echo "[ERR] systemctl --user restart signalk-server.service failed." >&2
+                exit 1
+            fi
+            ;;
+        *)
+            echo "[ERR] Updater returned HTTP $http for /api/signalk/restart." >&2
             exit 1
             ;;
     esac
@@ -2366,6 +2427,7 @@ case "${1:-help}" in
     bug-report) shift; cmd_bug_report "$@" ;;
     stop)       cmd_stop ;;
     start)      cmd_start ;;
+    restart)    cmd_restart ;;
     devpod)     shift; cmd_devpod "$@" ;;
     uninstall)  cmd_uninstall ;;
     version|--version|-v) cmd_version ;;

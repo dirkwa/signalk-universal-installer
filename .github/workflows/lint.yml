@@ -73,3 +73,6 @@ jobs:
 
       - name: dbus-auth-proxy image pin sync
         run: bash scripts/test/check-proxy-image-sync.sh
+
+      - name: signalk restart verb
+        run: bash scripts/test/check-signalk-restart.sh
