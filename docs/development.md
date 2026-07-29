@@ -77,14 +77,18 @@ or `:3000` depending on what you chose at install time), log in, and click
 **Restart** in the top-right corner. When the server comes back, go to
 **Server → Plugin Config**, find your plugin and enable it.
 
-(If you're already in an SSH session, `systemctl --user restart
-signalk-server` does the same thing.)
-
 ### The edit cycle
 
-Node caches loaded code, so after every code change restart the server —
-the **Restart** button in the admin UI, or `systemctl --user restart
-signalk-server` from a shell.
+Node caches loaded code, so after every code change restart the server with
+the **Restart** button in the admin UI.
+
+Restart it that way, not with `systemctl --user restart signalk-server`. In
+this stack the updater container owns the server's lifecycle — it is what
+version switching and `signalk stop` / `signalk start` drive, and reaching
+past it can leave its idea of the server out of step with what is actually
+running. (If you have no admin UI to click — a crashed server, a broken
+plugin that won't load — the Updater Console at `http://<box-ip>:3003` has
+its own restart control on the Dashboard.)
 
 Toggling the plugin off/on in the admin UI is **not** enough. If your
 plugin is TypeScript, run its build (`npm run build` in the repo) before
@@ -176,10 +180,23 @@ cd ..
 ./dev.sh restart
 ```
 
-That's the whole install: on every start/restart, the dev server
-automatically finds, builds, and links every plugin under `dev/plugins/`.
-No `npm install` step. (After editing a TypeScript plugin, restart with
-`SK_DEV_PLUGIN_BUILD=1 ./dev.sh restart` so it gets rebuilt.)
+That's the whole install: on every start/restart, the dev server finds every
+plugin under `dev/plugins/` and links it into the server. There's no
+`npm install` step for you to run — a plugin with no `node_modules/` yet
+gets its dependencies installed on the next start.
+
+Building is deliberately *not* automatic on every restart — that would make
+each one slow. A plugin is built only when its compiled entry point (the
+`main` in its `package.json`) is missing, which covers a fresh TypeScript
+checkout, or when you ask for it explicitly. So after editing a TypeScript
+plugin, restart with:
+
+```bash
+SK_DEV_PLUGIN_BUILD=1 ./dev.sh restart
+```
+
+Skip that and your edits never get compiled — the server keeps loading the
+previous build, and it looks like your change did nothing.
 
 Your plugin checkouts survive even if you delete and recreate the
 workspace — they live in a persistent volume on the box.
@@ -226,6 +243,11 @@ bash .devcontainer/post-create.sh   # installs dependencies + builds (takes a wh
 Then the cycle is: edit → `npm run build` (in `dev/signalk-server`) →
 `dev/dev.sh restart`.
 
+`npm run build` compiles the server itself. If you changed the admin UI or
+one of the workspace packages under `packages/`, use `npm run build:all`
+instead — it also builds those, and it's the same build the setup script
+above runs.
+
 ### Using your own fork
 
 Clone your fork instead of the upstream repo, and keep upstream as a
@@ -244,6 +266,7 @@ rebuild and restart:
 cd dev/signalk-server
 git fetch upstream
 git checkout <branch-or-tag>
+npm install          # only needed if the branch changed dependencies
 npm run build
 cd .. && ./dev.sh restart
 ```
