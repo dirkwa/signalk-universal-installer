@@ -76,3 +76,6 @@ jobs:
 
       - name: signalk restart verb
         run: bash scripts/test/check-signalk-restart.sh
+
+      - name: curl HTTP-status capture
+        run: bash scripts/test/check-curl-status-capture.sh

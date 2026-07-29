@@ -131,7 +131,13 @@ if (( CHECK_REMOTE )); then
     echo
     echo "[i] checking $BASE_URL"
     for p in "${paths[@]}"; do
-        code=$(curl -fsS -o /dev/null -w '%{http_code}' "${BASE_URL}/${p}" || echo "000")
+        # Assign outside the substitution: curl prints its own status via -w and
+        # ALSO exits non-zero on failure, so `|| echo "000"` inside would append
+        # (see #229). No -f: it makes curl exit non-zero on 4xx/5xx too, so the
+        # fallback would overwrite a real 404 with "000" and the diagnostic
+        # below would lose the status it exists to report. Without -f only a
+        # genuine connection failure trips the fallback.
+        code=$(curl -sS -o /dev/null -w '%{http_code}' "${BASE_URL}/${p}") || code="000"
         if [[ "$code" == "200" ]]; then
             printf '  [%s] %s\n' "$code" "$p"
         else
