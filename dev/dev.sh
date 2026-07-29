@@ -126,6 +126,36 @@ start() {
   verify_up
 }
 
+# Write the sample settings to $1 with the sample-log path pinned to the
+# server's own copy: the path in the file is relative and would otherwise
+# resolve against the config dir.
+#
+# jq --arg, not sed: SERVER_ROOT derives from the script's location, and an
+# `&`, `\` or `|` anywhere in that path is replacement-expression syntax to
+# sed — `&` silently interpolates the whole match, `|` (the delimiter here)
+# aborts with "unknown option to `s'". jq takes the value as data, so no
+# escaping is needed. A wrong path here is quiet: the feed just never
+# arrives. jq is already required (link-plugins.sh hard-fails without it).
+#
+# Generate then rename, rather than redirecting onto the destination: a
+# failure mid-write would otherwise leave a truncated settings file behind,
+# and reseeding only triggers when the sample log goes missing — so an empty
+# one would persist.
+pin_sample_path() {
+  local dest="$1" tmp
+  tmp="$(mktemp "${dest}.XXXXXX")" || return 1
+  if jq --arg root "${SERVER_ROOT}" \
+    '(.. | objects | select(.filename == "samples/plaka.log") | .filename)
+       |= $root + "/samples/plaka.log"' \
+    "${SERVER_ROOT}/settings/volare-file-settings.json" > "${tmp}"; then
+    mv "${tmp}" "${dest}"
+    return 0
+  fi
+  rm -f "${tmp}" 2>/dev/null || true
+  echo "ERROR: could not generate demo settings from ${SERVER_FLAVOR}" >&2
+  return 1
+}
+
 # Demo mode: the DEV CONFIG DIR with the sample-data settings — linked
 # plugins stay loaded (issue #192: demo previously ran on an isolated
 # config and "removed" every plugin). The sample settings file is copied
@@ -135,7 +165,7 @@ start() {
 # undeclared bin/ scripts).
 seed_demo_settings() {
   local copy="${CONFIG_DIR}/settings/volare-file-settings.json"
-  local sample
+  local sample reseed=1
   if [ -f "${copy}" ]; then
     # Keep an existing copy (local tweaks survive) — but only while the
     # sample file it references still exists. The pinned absolute path
@@ -143,16 +173,59 @@ seed_demo_settings() {
     # checkout), and a dead feed is silent — reseed instead.
     sample="$(jq -r 'first(.. | .filename? // empty)' "${copy}" 2>/dev/null || true)"
     if [ -n "${sample}" ] && [ -f "${sample}" ]; then
-      return 0
+      reseed=0
+    else
+      echo "Demo settings referenced a missing sample log — reseeding from ${SERVER_FLAVOR}."
     fi
-    echo "Demo settings referenced a missing sample log — reseeding from ${SERVER_FLAVOR}."
   fi
-  mkdir -p "${CONFIG_DIR}/settings"
-  # The sample-log path inside the settings is relative and would now
-  # resolve against the config dir — pin it to the server's copy.
-  sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
-    "${SERVER_ROOT}/settings/volare-file-settings.json" \
-    > "${copy}"
+  if [ "${reseed}" -eq 1 ]; then
+    mkdir -p "${CONFIG_DIR}/settings"
+    pin_sample_path "${copy}"
+  fi
+  # Also guard an existing copy, not just a fresh seed: every volume created
+  # before this change holds an unguarded one, and reseeding only happens
+  # when the sample log goes missing.
+  guard_demo_settings "${copy}" || true
+}
+
+# The settings file passed with -s REPLACES settings.json — signalk-server
+# resolves one or the other (config.js::getSettingsFilename), never merges —
+# so none of the dev config's defaults reach a demo run. Left alone, demo
+# mode therefore claims the Signal K TCP (:8375) and inbound NMEA0183
+# (:10110) ports the production stack already holds under host networking,
+# and announces THIS instance over mDNS so nav apps find two servers. Those
+# are exactly the three keys post-create.sh seeds off in settings.json;
+# stamp them into the demo settings too.
+#
+# Unset keys only, so a developer who deliberately re-enabled a listener on
+# a free port keeps it — the same rule post-create.sh's migration follows.
+# "Unset" means null as well as absent: `has()` reports true for an explicit
+# null, so a null would have been left in place. Harmless for the listeners
+# (the server treats null as off) but it left `mdns: null` where the seed
+# writes false, so the migrated file did not match a fresh one.
+# Non-fatal by design: a demo server that binds a busy port still comes up
+# (the server logs EADDRINUSE and carries on), so a jq problem here must not
+# block the sample feed.
+guard_demo_settings() {
+  local file="$1" tmp
+  command -v jq >/dev/null 2>&1 || {
+    echo "WARNING: jq unavailable — demo may bind :8375/:10110 and announce mDNS" >&2
+    return 1
+  }
+  tmp="$(mktemp "${file}.XXXXXX")" || return 1
+  if jq '.interfaces //= {}
+    | if (.interfaces.tcp != null) then . else .interfaces.tcp = false end
+    | if (.interfaces["nmea-tcp"] != null) then . else .interfaces["nmea-tcp"] = false end
+    | if (.mdns != null) then . else .mdns = false end' \
+    "${file}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
+    # Carry the original mode over — mktemp made the temp 0600.
+    chmod --reference="${file}" "${tmp}" 2>/dev/null || true
+    mv "${tmp}" "${file}"
+    return 0
+  fi
+  rm -f "${tmp}" 2>/dev/null || true
+  echo "WARNING: could not guard ${file##*/} — demo may bind :8375/:10110 and announce mDNS" >&2
+  return 1
 }
 
 demo() {
@@ -172,10 +245,35 @@ demo() {
 # stays on the isolated package config (SIGNALK_NODE_CONFIG_DIR unset):
 # e2e must be deterministic and independent of whatever plugins a
 # developer has linked into the dev config.
+#
+# It needs the same listener/mDNS guard as demo() — an e2e run must not
+# fight the production stack for :8375/:10110 or announce itself either.
+# The guarded copy goes to a temp dir rather than into the package tree,
+# which is an image directory: SIGNALK_NODE_SETTINGS overrides the settings
+# FILE without touching config-dir resolution. `-s` therefore stays, unused
+# for its filename but still required: getConfigDirectory() reads it as the
+# "use appPath as the config dir" signal, and dropping it would fall
+# through to ${HOME}/.signalk — the dev config this variant exists to
+# avoid.
+#
+# mktemp, not a fixed name: a predictable path in a world-writable /tmp can
+# be pre-created as a symlink that the redirect below then follows. Also
+# gives a fresh file per run, so e2e never inherits yesterday's edits. We
+# exec, so no trap can clean up — the file has to outlive this shell for the
+# server to read it. Sweep older copies instead, and only ones a day old:
+# a concurrent run on another E2E_PORT must keep its own file, which it may
+# not have finished reading yet.
 demo_fg() {
   ensure_port_free
+  local settings tmpdir="${TMPDIR:-/tmp}"
+  find "${tmpdir}" -maxdepth 1 -name 'signalk-dev-e2e-settings-*.json' \
+    -user "$(id -u)" -mtime +0 -delete 2>/dev/null || true
+  settings="$(mktemp "${tmpdir}/signalk-dev-e2e-settings-XXXXXX.json")"
+  pin_sample_path "${settings}"
+  guard_demo_settings "${settings}" || true
   cd "${SERVER_ROOT}"
-  exec env -u SIGNALK_NODE_CONFIG_DIR PORT="${PORT}" ./bin/signalk-server \
+  exec env -u SIGNALK_NODE_CONFIG_DIR PORT="${PORT}" \
+    SIGNALK_NODE_SETTINGS="${settings}" ./bin/signalk-server \
     -s settings/volare-file-settings.json
 }
 
