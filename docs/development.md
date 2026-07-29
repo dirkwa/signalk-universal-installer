@@ -149,10 +149,21 @@ open in your browser:
 - **Editor:** `http://<box-ip>:10800/?folder=/workspaces/signalk-universal-installer`
 - **Dev SignalK server:** `http://<box-ip>:4000`
 
-Heads-up: both of those are visible to everyone on your boat/home network
-and have **no password**. Fine on a network you control; see
-[devcontainer.md](devcontainer.md#working-from-another-machine-headless-box)
-for how to secure them (short version: Tailscale).
+Heads-up, and worth taking seriously: both of those are visible to everyone
+on your boat/home network and have **no password**. The editor is a shell on
+the box for anyone who opens it. This default assumes a network you control
+and no untrusted devices on it — on a marina wifi, a shared network, or
+anything you don't own, secure them before you start working:
+
+- **Editor (:10800):** `tailscale serve --bg 10800`, then use only the
+  tailnet HTTPS URL. If Tailscale is already up on the box, `signalk devpod
+  up` does this for you and prints the URL — use that one.
+- **Dev server (:4000):** enable security in its admin UI.
+
+Each measure covers only its own port, and `tailscale serve` is a proxy, not
+a firewall — the plain ports stay reachable on the LAN either way. Full
+detail in
+[devcontainer.md](devcontainer.md#working-from-another-machine-headless-box).
 
 ### Option B: DevPod Desktop on your laptop (native VS Code)
 
