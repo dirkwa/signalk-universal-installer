@@ -156,6 +156,10 @@ seed_demo_settings() {
 #
 # Unset keys only, so a developer who deliberately re-enabled a listener on
 # a free port keeps it — the same rule post-create.sh's migration follows.
+# "Unset" means null as well as absent: `has()` reports true for an explicit
+# null, so a null would have been left in place. Harmless for the listeners
+# (the server treats null as off) but it left `mdns: null` where the seed
+# writes false, so the migrated file did not match a fresh one.
 # Non-fatal by design: a demo server that binds a busy port still comes up
 # (the server logs EADDRINUSE and carries on), so a jq problem here must not
 # block the sample feed.
@@ -167,9 +171,9 @@ guard_demo_settings() {
   }
   tmp="$(mktemp "${file}.XXXXXX")" || return 1
   if jq '.interfaces //= {}
-    | if (.interfaces | has("tcp")) then . else .interfaces.tcp = false end
-    | if (.interfaces | has("nmea-tcp")) then . else .interfaces["nmea-tcp"] = false end
-    | if has("mdns") then . else .mdns = false end' \
+    | if (.interfaces.tcp != null) then . else .interfaces.tcp = false end
+    | if (.interfaces["nmea-tcp"] != null) then . else .interfaces["nmea-tcp"] = false end
+    | if (.mdns != null) then . else .mdns = false end' \
     "${file}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
     # Carry the original mode over — mktemp made the temp 0600.
     chmod --reference="${file}" "${tmp}" 2>/dev/null || true

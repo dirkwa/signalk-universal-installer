@@ -54,11 +54,14 @@ else
   # Existing volumes predate the listener-off/mdns-off defaults and would
   # recreate the collisions on rebuild. Idempotent migration: fill ONLY
   # the missing keys — a value the user has set (either way) is never
-  # touched. Best-effort: a parse failure leaves the file alone.
+  # touched. "Missing" means null as well as absent: `has()` reports true
+  # for an explicit null, which would leave `mdns: null` where the seed
+  # above writes false. Best-effort: a parse failure leaves the file alone.
+  # Keep this filter identical to dev.sh::guard_demo_settings.
   migrated="$(jq '.interfaces //= {}
-    | if (.interfaces | has("tcp")) then . else .interfaces.tcp = false end
-    | if (.interfaces | has("nmea-tcp")) then . else .interfaces["nmea-tcp"] = false end
-    | if has("mdns") then . else .mdns = false end' \
+    | if (.interfaces.tcp != null) then . else .interfaces.tcp = false end
+    | if (.interfaces["nmea-tcp"] != null) then . else .interfaces["nmea-tcp"] = false end
+    | if (.mdns != null) then . else .mdns = false end' \
     "${SK_CONFIG_DIR}/settings.json" 2>/dev/null || true)"
   if [ -n "${migrated}" ] \
       && ! printf '%s\n' "${migrated}" | cmp -s - "${SK_CONFIG_DIR}/settings.json"; then
