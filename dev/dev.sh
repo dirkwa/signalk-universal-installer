@@ -149,6 +149,12 @@ launch() {
     sleep 0.05
   done
   echo "WARNING: server pid not recorded in ${PIDFILE} — stop/status cannot track it" >&2
+  # Report the failure in the exit status too, so a caller that checks it is
+  # not told the launch succeeded. Both current callers deliberately ignore
+  # it (`|| true`) and fall through to verify_up(), which produces the better
+  # error: it probes the port, and its is_running() check fails on the very
+  # missing pidfile we are reporting, so it exits non-zero with the log tail.
+  return 1
 }
 
 # The server catches uncaught exceptions (e.g. EADDRINUSE) and keeps the
@@ -185,7 +191,9 @@ start() {
   ensure_port_free
   link_plugins || echo "WARNING: plugin linking reported errors — starting anyway" >&2
   echo "Starting SignalK dev server on port ${PORT} — ${SERVER_FLAVOR}..."
-  launch env PORT="${PORT}" ./bin/signalk-server -c "${CONFIG_DIR}"
+  # `|| true`: an unrecorded pid must not abort us under `set -e` — the server
+  # may well be up, and verify_up() below reports the failure better anyway.
+  launch env PORT="${PORT}" ./bin/signalk-server -c "${CONFIG_DIR}" || true
   verify_up
 }
 
@@ -224,8 +232,10 @@ demo() {
   link_plugins || echo "WARNING: plugin linking reported errors — starting anyway" >&2
   seed_demo_settings
   echo "Starting SignalK dev server with sample NMEA data on port ${PORT} — ${SERVER_FLAVOR}..."
+  # `|| true` for the same reason as in start(): verify_up() is the better
+  # reporter of an unrecorded pid than an abort here would be.
   launch env PORT="${PORT}" ./bin/signalk-server \
-    -c "${CONFIG_DIR}" -s settings/volare-file-settings.json
+    -c "${CONFIG_DIR}" -s settings/volare-file-settings.json || true
   verify_up
 }
 
