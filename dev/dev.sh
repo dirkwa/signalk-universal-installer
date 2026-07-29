@@ -118,7 +118,7 @@ start() {
 # undeclared bin/ scripts).
 seed_demo_settings() {
   local copy="${CONFIG_DIR}/settings/volare-file-settings.json"
-  local sample
+  local sample reseed=1
   if [ -f "${copy}" ]; then
     # Keep an existing copy (local tweaks survive) — but only while the
     # sample file it references still exists. The pinned absolute path
@@ -126,16 +126,59 @@ seed_demo_settings() {
     # checkout), and a dead feed is silent — reseed instead.
     sample="$(jq -r 'first(.. | .filename? // empty)' "${copy}" 2>/dev/null || true)"
     if [ -n "${sample}" ] && [ -f "${sample}" ]; then
-      return 0
+      reseed=0
+    else
+      echo "Demo settings referenced a missing sample log — reseeding from ${SERVER_FLAVOR}."
     fi
-    echo "Demo settings referenced a missing sample log — reseeding from ${SERVER_FLAVOR}."
   fi
-  mkdir -p "${CONFIG_DIR}/settings"
-  # The sample-log path inside the settings is relative and would now
-  # resolve against the config dir — pin it to the server's copy.
-  sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
-    "${SERVER_ROOT}/settings/volare-file-settings.json" \
-    > "${copy}"
+  if [ "${reseed}" -eq 1 ]; then
+    mkdir -p "${CONFIG_DIR}/settings"
+    # The sample-log path inside the settings is relative and would now
+    # resolve against the config dir — pin it to the server's copy.
+    sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
+      "${SERVER_ROOT}/settings/volare-file-settings.json" \
+      > "${copy}"
+  fi
+  # Also guard an existing copy, not just a fresh seed: every volume created
+  # before this change holds an unguarded one, and reseeding only happens
+  # when the sample log goes missing.
+  guard_demo_settings "${copy}" || true
+}
+
+# The settings file passed with -s REPLACES settings.json — signalk-server
+# resolves one or the other (config.js::getSettingsFilename), never merges —
+# so none of the dev config's defaults reach a demo run. Left alone, demo
+# mode therefore claims the Signal K TCP (:8375) and inbound NMEA0183
+# (:10110) ports the production stack already holds under host networking,
+# and announces THIS instance over mDNS so nav apps find two servers. Those
+# are exactly the three keys post-create.sh seeds off in settings.json;
+# stamp them into the demo settings too.
+#
+# Unset keys only, so a developer who deliberately re-enabled a listener on
+# a free port keeps it — the same rule post-create.sh's migration follows.
+# Non-fatal by design: a demo server that binds a busy port still comes up
+# (the server logs EADDRINUSE and carries on), so a jq problem here must not
+# block the sample feed.
+guard_demo_settings() {
+  local file="$1" tmp
+  command -v jq >/dev/null 2>&1 || {
+    echo "WARNING: jq unavailable — demo may bind :8375/:10110 and announce mDNS" >&2
+    return 1
+  }
+  tmp="$(mktemp "${file}.XXXXXX")" || return 1
+  if jq '.interfaces //= {}
+    | if (.interfaces | has("tcp")) then . else .interfaces.tcp = false end
+    | if (.interfaces | has("nmea-tcp")) then . else .interfaces["nmea-tcp"] = false end
+    | if has("mdns") then . else .mdns = false end' \
+    "${file}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
+    # Carry the original mode over — mktemp made the temp 0600.
+    chmod --reference="${file}" "${tmp}" 2>/dev/null || true
+    mv "${tmp}" "${file}"
+    return 0
+  fi
+  rm -f "${tmp}" 2>/dev/null || true
+  echo "WARNING: could not guard ${file##*/} — demo may bind :8375/:10110 and announce mDNS" >&2
+  return 1
 }
 
 demo() {
@@ -155,10 +198,26 @@ demo() {
 # stays on the isolated package config (SIGNALK_NODE_CONFIG_DIR unset):
 # e2e must be deterministic and independent of whatever plugins a
 # developer has linked into the dev config.
+#
+# It needs the same listener/mDNS guard as demo() — an e2e run must not
+# fight the production stack for :8375/:10110 or announce itself either.
+# The guarded copy goes to /tmp rather than into the package tree, which is
+# an image directory: SIGNALK_NODE_SETTINGS overrides the settings FILE
+# without touching config-dir resolution. `-s` therefore stays, unused for
+# its filename but still required: getConfigDirectory() reads it as the
+# "use appPath as the config dir" signal, and dropping it would fall
+# through to ${HOME}/.signalk — the dev config this variant exists to
+# avoid. Regenerated every run: e2e must not inherit yesterday's edits.
 demo_fg() {
   ensure_port_free
+  local settings="/tmp/signalk-dev-e2e-settings-${PORT}.json"
+  sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
+    "${SERVER_ROOT}/settings/volare-file-settings.json" \
+    > "${settings}"
+  guard_demo_settings "${settings}" || true
   cd "${SERVER_ROOT}"
-  exec env -u SIGNALK_NODE_CONFIG_DIR PORT="${PORT}" ./bin/signalk-server \
+  exec env -u SIGNALK_NODE_CONFIG_DIR PORT="${PORT}" \
+    SIGNALK_NODE_SETTINGS="${settings}" ./bin/signalk-server \
     -s settings/volare-file-settings.json
 }
 
