@@ -66,8 +66,25 @@ ensure_port_free() {
 # REAL pid. The exec is essential — without it the recorded pid is the
 # wrapper subshell, not the node process, and stop()/is_running() silently
 # operate on the wrong (dead) pid while old servers pile up on the port.
+#
+# setsid is equally essential: nohup alone does NOT survive the launching
+# terminal for a NODE process. nohup only sets SIGHUP to SIG_IGN, and node
+# re-arms the signal after exec, so the SIGHUP the kernel delivers when the
+# controlling terminal goes away still terminates the server (a plain
+# `sleep`, which keeps the inherited SIG_IGN, does survive — which is what
+# made this look like it should already work). Launched from a VS Code task
+# terminal — the status-bar Start/Restart/Demo buttons — the server
+# therefore died seconds after that terminal was disposed: nothing left on
+# ${PORT}, a stale ${PIDFILE} so `status` reports "stopped", and a log whose
+# last line is verify_up's own successful probe. Its own session has no
+# controlling terminal, so no SIGHUP is ever delivered.
+#
+# set +m keeps $! pointing at the server: setsid(1) forks only when its
+# caller is already a process-group leader, which the backgrounded subshell
+# of a job-control-less shell never is.
 launch() {
-  ( cd "${SERVER_ROOT}" && exec nohup "$@" ) > "${LOGFILE}" 2>&1 &
+  set +m
+  ( cd "${SERVER_ROOT}" && exec setsid nohup "$@" ) > "${LOGFILE}" 2>&1 &
   echo $! > "${PIDFILE}"
 }
 
