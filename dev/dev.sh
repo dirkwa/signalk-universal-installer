@@ -109,6 +109,36 @@ start() {
   verify_up
 }
 
+# Write the sample settings to $1 with the sample-log path pinned to the
+# server's own copy: the path in the file is relative and would otherwise
+# resolve against the config dir.
+#
+# jq --arg, not sed: SERVER_ROOT derives from the script's location, and an
+# `&`, `\` or `|` anywhere in that path is replacement-expression syntax to
+# sed — `&` silently interpolates the whole match, `|` (the delimiter here)
+# aborts with "unknown option to `s'". jq takes the value as data, so no
+# escaping is needed. A wrong path here is quiet: the feed just never
+# arrives. jq is already required (link-plugins.sh hard-fails without it).
+#
+# Generate then rename, rather than redirecting onto the destination: a
+# failure mid-write would otherwise leave a truncated settings file behind,
+# and reseeding only triggers when the sample log goes missing — so an empty
+# one would persist.
+pin_sample_path() {
+  local dest="$1" tmp
+  tmp="$(mktemp "${dest}.XXXXXX")" || return 1
+  if jq --arg root "${SERVER_ROOT}" \
+    '(.. | objects | select(.filename == "samples/plaka.log") | .filename)
+       |= $root + "/samples/plaka.log"' \
+    "${SERVER_ROOT}/settings/volare-file-settings.json" > "${tmp}"; then
+    mv "${tmp}" "${dest}"
+    return 0
+  fi
+  rm -f "${tmp}" 2>/dev/null || true
+  echo "ERROR: could not generate demo settings from ${SERVER_FLAVOR}" >&2
+  return 1
+}
+
 # Demo mode: the DEV CONFIG DIR with the sample-data settings — linked
 # plugins stay loaded (issue #192: demo previously ran on an isolated
 # config and "removed" every plugin). The sample settings file is copied
@@ -133,11 +163,7 @@ seed_demo_settings() {
   fi
   if [ "${reseed}" -eq 1 ]; then
     mkdir -p "${CONFIG_DIR}/settings"
-    # The sample-log path inside the settings is relative and would now
-    # resolve against the config dir — pin it to the server's copy.
-    sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
-      "${SERVER_ROOT}/settings/volare-file-settings.json" \
-      > "${copy}"
+    pin_sample_path "${copy}"
   fi
   # Also guard an existing copy, not just a fresh seed: every volume created
   # before this change holds an unguarded one, and reseeding only happens
@@ -226,9 +252,7 @@ demo_fg() {
   find "${tmpdir}" -maxdepth 1 -name 'signalk-dev-e2e-settings-*.json' \
     -user "$(id -u)" -mtime +0 -delete 2>/dev/null || true
   settings="$(mktemp "${tmpdir}/signalk-dev-e2e-settings-XXXXXX.json")"
-  sed "s|samples/plaka.log|${SERVER_ROOT}/samples/plaka.log|" \
-    "${SERVER_ROOT}/settings/volare-file-settings.json" \
-    > "${settings}"
+  pin_sample_path "${settings}"
   guard_demo_settings "${settings}" || true
   cd "${SERVER_ROOT}"
   exec env -u SIGNALK_NODE_CONFIG_DIR PORT="${PORT}" \
