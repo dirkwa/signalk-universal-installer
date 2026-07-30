@@ -28,17 +28,29 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The label comes from the COMMIT, not from the ref that triggered this
+      # run — see scripts/installer-version.sh for why (a release publishes the
+      # same commit twice, and the two runs must agree or the last writer
+      # mislabels the release). Shared with check-pages-version.sh so the test
+      # exercises this logic rather than a copy of it.
+      #
+      # GITHUB_REF_NAME wins when a tag triggered the run: that run is
+      # authoritative by definition, and it closes the residual window where a
+      # master run started before the tag reached the remote and so cannot see
+      # it even after fetching.
       - name: Compute installer version
         id: ver
         run: |
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+          set -euo pipefail
+          # Ask the helper what counts as a release tag rather than restating
+          # the rule here — one definition, nothing to drift.
+          release_re="$(bash scripts/installer-version.sh --release-tag-pattern)"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "$GITHUB_REF_NAME" =~ $release_re ]]; then
             v="${GITHUB_REF_NAME#v}"
           else
-            v="$(git describe --tags --always --dirty 2>/dev/null || echo dev-${GITHUB_SHA::7})"
-            # Strip leading `v` so install.sh's `v${INSTALLER_VERSION}` doesn't
-            # render as `vv0.1.0-NN-gXXXXXXX`. Tag branch already strips.
-            v="${v#v}"
+            v="$(bash scripts/installer-version.sh)"
           fi
+          echo "Installer version: $v"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Stage dist/
