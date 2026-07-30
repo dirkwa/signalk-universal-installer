@@ -17,6 +17,7 @@ story (networking modes, volumes, troubleshooting), see the reference:
 | Try a different server version (beta, master) on my live server | [2. Switching server versions on your live server](#2-switching-server-versions-on-your-live-server) |
 | Develop plugins in a safe, separate dev server | [3. Plugin development in a dev environment (DevPod)](#3-plugin-development-in-a-dev-environment-devpod) |
 | Change the SignalK server's own source code | [4. SignalK server development in the dev environment](#4-signalk-server-development-in-the-dev-environment) |
+| Pick up the latest changes in my dev environment | [5. Keeping the dev environment up to date](#5-keeping-the-dev-environment-up-to-date) |
 
 Sections 1–2 work directly on your **production** install — quick, and you
 see real boat data, but a broken plugin breaks your real server. Sections
@@ -293,3 +294,159 @@ dev/dev.sh restart
 
 For debugging with breakpoints, launch configurations are included — see
 ["Developing the server" in devcontainer.md](devcontainer.md#developing-the-server).
+
+---
+
+## 5. Keeping the dev environment up to date
+
+This section assumes the dev environment from
+[section 3](#3-plugin-development-in-a-dev-environment-devpod) — created
+with `signalk devpod up`.
+
+Four things update on their own schedule, and confusing them is the usual
+source of "I pulled but nothing changed":
+
+| What changed | What to do |
+|---|---|
+| Scripts, tests, docs in the workspace | `git pull` (+ `./dev.sh restart`) |
+| Anything under `.devcontainer/` | `signalk devpod up --recreate` on the box |
+| The pre-built SignalK server in the image | pull the image, then `--recreate` |
+| Your own plugin / server checkouts | `git pull` in each of them |
+
+### The everyday update
+
+In a terminal **inside the IDE**:
+
+```bash
+cd /workspaces/signalk-universal-installer
+git pull
+cd dev && ./dev.sh restart
+```
+
+That's the whole update for almost everything: `dev.sh` and the plugin
+linker, the e2e tests, the installer scripts and Quadlet templates, the
+docs. None of it is baked into the container — it's a checkout on the box
+that the container simply reads, so a pull takes effect on the next
+restart.
+
+Two occasional extras:
+
+- If the pull touched `dev/package.json`: `cd dev && npm install`.
+- If it touched `.vscode/tasks.json`: reload the IDE window (*Developer:
+  Reload Window*) so the status-bar buttons pick up the new task list.
+
+A workspace created by `signalk devpod up` tracks the **`release`**
+branch, so a pull always lands on the latest tagged release, never on a
+half-finished master. See
+["Release channel" in devcontainer.md](devcontainer.md#release-channel).
+
+### When the container needs rebuilding
+
+The files that *define* the container — `.devcontainer/Dockerfile`,
+`devcontainer.json`, `host-prepare.sh` — are only read when the container
+is built. Pulling them changes nothing until you rebuild.
+
+Check before you pull:
+
+```bash
+git fetch
+git diff --stat HEAD @{u} -- .devcontainer
+```
+
+No output means no rebuild is needed. If there is output, pull as above,
+then run this **from an SSH session on the box** — not from the IDE
+terminal, which lives inside the container being replaced:
+
+```bash
+signalk devpod up --recreate
+```
+
+It rebuilds the image and re-runs the setup script, so give it a few
+minutes. The IDE URL doesn't change; reload the browser tab when it's
+done.
+
+Nothing of yours is lost. Your dev SignalK config and installed plugins,
+your Claude Code / CodeRabbit / `gh` logins, and your plugin checkouts
+under `dev/plugins/` all live in named volumes on the box that survive
+rebuilds. The workspace itself stays put too, uncommitted edits included
+— it's on the box, not in the container.
+
+One shortcut: if the only thing that changed is `post-create.sh` or
+`post-start.sh`, run that script by hand inside the container instead of
+rebuilding. Both are safe to re-run — they install what's missing and never
+clobber existing config — but they are separate scripts, so run the one that
+actually changed:
+
+```bash
+bash .devcontainer/post-create.sh   # one-time setup: deps, plugin links, logins
+bash .devcontainer/post-start.sh    # every-start work: probes, seeds, dev server
+```
+
+`post-create.sh` does not call `post-start.sh`, so running the first does
+not apply changes to the second.
+
+### Getting a newer pre-built SignalK server
+
+The dev environment is built on the stack's own server image, and it
+tracks a channel (`:dirkwa`) rather than a fixed version. Git knows
+nothing about that image, and a rebuild happily reuses the copy already on
+the box — so a newer server build needs an explicit pull first, on the
+box:
+
+```bash
+podman pull ghcr.io/dirkwa/signalk-server:dirkwa   # or docker pull
+signalk devpod up --recreate
+```
+
+This is only about the *pre-built* server. If you have a source checkout
+at `dev/signalk-server/` — see
+[section 4](#4-signalk-server-development-in-the-dev-environment) — that
+one wins and the image copy is unused.
+
+### Your own checkouts
+
+Plugin repos under `dev/plugins/` and a server checkout at
+`dev/signalk-server/` are separate git repositories — the workspace pull
+never touches them. Update each one where it lives:
+
+```bash
+cd dev/plugins/my-signalk-plugin && git pull
+cd ../.. && SK_DEV_PLUGIN_BUILD=1 ./dev.sh restart
+```
+
+For the server checkout, the fetch/build/restart cycle is the one in
+[section 4](#using-your-own-fork).
+
+### Keeping the `signalk` command itself current
+
+`signalk devpod up` comes from the installer's `signalk` command on the
+box, which is separate from the dev workspace. Refresh it with:
+
+```bash
+signalk update
+```
+
+This is a production-side command — it updates `~/.local/bin/signalk` and
+the recovery script, and doesn't touch the dev environment. Worth doing
+before a `--recreate` if your `signalk` command is old.
+
+### Starting over
+
+A delete and recreate gets you back to a known-good environment, and is also
+how you switch channels (for instance to test unreleased master). Unlike a
+`--recreate`, it **deletes the workspace checkout** — so commit and push
+anything you still want before you start:
+
+```bash
+signalk devpod delete
+signalk devpod up                              # latest release
+SIGNALK_DEVPOD_REF=master signalk devpod up    # or unreleased master
+```
+
+The named volumes — dev config, plugin checkouts under `dev/plugins/`,
+logins — do survive the delete. Only the workspace itself, including any
+uncommitted edits, is lost.
+
+(The channel is read when the workspace is created, so switching it needs
+this delete-and-recreate; `--recreate` on an existing workspace keeps the
+clone it already has.)
