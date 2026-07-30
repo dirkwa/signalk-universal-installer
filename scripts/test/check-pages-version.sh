@@ -63,6 +63,18 @@ if grep -qE '^[^#]*v="\$\(git describe' "$WF"; then
 else
     ok "$WF does not compute the version inline"
 fi
+# The release-tag rule has one home. The workflow needs it too (to decide when
+# GITHUB_REF_NAME is authoritative) and must ask for it, not restate it.
+if grep -qE '^[^#]*\[1-9\]\[0-9\]' "$WF"; then
+    miss "$WF re-declares the release-tag regex — ask the helper via --release-tag-pattern instead"
+else
+    ok "$WF does not re-declare the release-tag regex"
+fi
+if bash "$HELPER_ABS" --release-tag-pattern >/dev/null 2>&1; then
+    ok "$HELPER exposes --release-tag-pattern for callers to share"
+else
+    miss "$HELPER does not support --release-tag-pattern"
+fi
 
 # The helper itself must not branch on the trigger ref: that is the bug. (The
 # workflow may consult GITHUB_REF_NAME to treat a tag run as authoritative,
@@ -133,9 +145,12 @@ if [[ -z "$latest_tag" ]]; then
 else
     tag_commit="$(git rev-parse "${latest_tag}^{commit}")"
     # The regression: the release commit must label bare, and must label the
-    # SAME whether reached via the tag or via a branch at that commit.
-    run_at "tagged release commit ($latest_tag)" "$tag_commit" exact "${latest_tag#v}"
-    run_at "same commit via its raw sha (branch-push view)" "$tag_commit" exact "${latest_tag#v}"
+    # SAME whether the checkout resolved the tag name (what the tag-triggered
+    # run does) or a bare sha (what the branch push does). Passing the same
+    # committish twice would be one test written out twice, so these
+    # deliberately differ: the tag REF first, then the raw SHA.
+    run_at "checked out by tag name ($latest_tag)" "$latest_tag" exact "${latest_tag#v}"
+    run_at "same commit by raw sha (branch-push view)" "$tag_commit" exact "${latest_tag#v}"
 
     # An untagged commit must fall back — pick one that genuinely carries no
     # version tag rather than assuming HEAD~1 is untagged.
@@ -164,17 +179,23 @@ else
         if git rev-parse -q --verify "refs/tags/${zerotag}" >/dev/null 2>&1; then
             ok "skipped leading-zero case (${zerotag} already exists in this clone)"
         elif git tag "$zerotag" "$untagged" 2>/dev/null; then
-            got_zero="$(bash "$HELPER_ABS" "$(git rev-parse --show-toplevel)" 2>/dev/null || true)"
-            # Run it at the tagged commit itself via a worktree.
+            # Must run AT the tagged commit. A worktree failure has to be
+            # reported, not silently fall through to a value computed
+            # somewhere else — that would assert against the wrong commit and
+            # pass for the wrong reason.
             wtz="$tmp/wtz-$$"
             if git worktree add -q --detach "$wtz" "$untagged" 2>/dev/null; then
                 got_zero="$(bash "$HELPER_ABS" "$wtz" 2>/dev/null || true)"
                 git worktree remove --force "$wtz" 2>/dev/null || true
-            fi
-            if [[ "$got_zero" == "09.9.9" ]]; then
-                miss "leading-zero tag ${zerotag} was adopted as the bare version '09.9.9'"
+                if [[ -z "$got_zero" ]]; then
+                    miss "leading-zero case: helper produced no output at ${untagged:0:7}"
+                elif [[ "$got_zero" == "09.9.9" ]]; then
+                    miss "leading-zero tag ${zerotag} was adopted as the bare version '09.9.9'"
+                else
+                    ok "leading-zero tag ${zerotag} is not treated as a release -> ${got_zero}"
+                fi
             else
-                ok "leading-zero tag ${zerotag} is not treated as a release -> ${got_zero}"
+                miss "leading-zero case: could not create a worktree at ${untagged:0:7}"
             fi
             git tag -d "$zerotag" >/dev/null 2>&1 || true
         else

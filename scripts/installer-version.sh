@@ -27,8 +27,20 @@
 #
 # Usage: installer-version.sh [<git-dir-or-worktree>]
 #   With no argument, operates on the current directory.
+#   --release-tag-pattern  print the release-tag regex and exit, so callers
+#                          that need the same rule (pages.yml) share it rather
+#                          than re-declaring a copy that can drift.
 
 set -euo pipefail
+
+# Strict semver, no leading zeros in any component: `v01.2.3` is not a release
+# tag. Single definition — see --release-tag-pattern above.
+RELEASE_TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+if [[ "${1:-}" == "--release-tag-pattern" ]]; then
+    printf '%s\n' "$RELEASE_TAG_RE"
+    exit 0
+fi
 
 if [[ $# -gt 0 && -n "$1" ]]; then
     cd "$1"
@@ -37,12 +49,11 @@ fi
 # Best-effort: an offline or credential-less checkout must still yield a label.
 git fetch --tags --quiet 2>/dev/null || true
 
-# Strict semver only, and no leading zeros in any component — `v01.2.3` is not
-# a release tag. Newest first, so a commit carrying several version tags takes
-# the highest rather than an arbitrary one. `|| true` keeps `pipefail` from
-# aborting when grep matches nothing, which is the normal untagged case.
+# Newest first, so a commit carrying several version tags takes the highest
+# rather than an arbitrary one. `|| true` keeps `pipefail` from aborting when
+# grep matches nothing, which is the normal untagged case.
 tag="$(git tag --points-at HEAD --sort=-v:refname 2>/dev/null \
-       | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+       | grep -E "$RELEASE_TAG_RE" \
        | head -1 || true)"
 
 if [[ -n "$tag" ]]; then
