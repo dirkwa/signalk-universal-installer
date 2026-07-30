@@ -371,14 +371,19 @@ under `dev/plugins/` all live in named volumes on the box that survive
 rebuilds. The workspace itself stays put too, uncommitted edits included
 — it's on the box, not in the container.
 
-One shortcut: if the only thing that changed is
-`.devcontainer/post-create.sh` or `post-start.sh`, you can run the script
-by hand inside the container instead of rebuilding — both are safe to
-re-run (they install what's missing and never clobber existing config):
+One shortcut: if the only thing that changed is `post-create.sh` or
+`post-start.sh`, run that script by hand inside the container instead of
+rebuilding. Both are safe to re-run — they install what's missing and never
+clobber existing config — but they are separate scripts, so run the one that
+actually changed:
 
 ```bash
-bash .devcontainer/post-create.sh
+bash .devcontainer/post-create.sh   # one-time setup: deps, plugin links, logins
+bash .devcontainer/post-start.sh    # every-start work: probes, seeds, dev server
 ```
+
+`post-create.sh` does not call `post-start.sh`, so running the first does
+not apply changes to the second.
 
 ### Getting a newer pre-built SignalK server
 
@@ -427,8 +432,10 @@ before a `--recreate` if your `signalk` command is old.
 
 ### Starting over
 
-A delete and recreate is always safe, and is also how you switch channels
-(for instance to test unreleased master):
+A delete and recreate gets you back to a known-good environment, and is also
+how you switch channels (for instance to test unreleased master). Unlike a
+`--recreate`, it **deletes the workspace checkout** — so commit and push
+anything you still want before you start:
 
 ```bash
 signalk devpod delete
@@ -436,6 +443,10 @@ signalk devpod up                              # latest release
 SIGNALK_DEVPOD_REF=master signalk devpod up    # or unreleased master
 ```
 
-The volumes — dev config, plugin checkouts, logins — survive the delete.
-The workspace checkout does **not**, so commit and push anything you
-still want first.
+The named volumes — dev config, plugin checkouts under `dev/plugins/`,
+logins — do survive the delete. Only the workspace itself, including any
+uncommitted edits, is lost.
+
+(The channel is read when the workspace is created, so switching it needs
+this delete-and-recreate; `--recreate` on an existing workspace keeps the
+clone it already has.)
