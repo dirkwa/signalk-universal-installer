@@ -137,8 +137,16 @@ run_at() {
     ok "$label -> $got"
 }
 
+# Ask the helper for the rule rather than restating it — the same single-owner
+# principle the workflow follows, so this test cannot drift from what it tests.
+release_re="$(bash "$HELPER_ABS" --release-tag-pattern 2>/dev/null || true)"
+if [[ -z "$release_re" ]]; then
+    miss "could not read the release-tag pattern from $HELPER"
+    release_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+fi
+
 latest_tag=$(git tag --sort=-v:refname 2>/dev/null |
-             grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | head -1 || true)
+             grep -E "$release_re" | head -1 || true)
 
 if [[ -z "$latest_tag" ]]; then
     ok "no vX.Y.Z tag in this clone — skipping the tagged-commit cases"
@@ -157,8 +165,7 @@ else
     untagged=""
     for c in $(git rev-list -n 25 "$tag_commit" 2>/dev/null); do
         [[ "$c" == "$tag_commit" ]] && continue
-        if ! git tag --points-at "$c" 2>/dev/null |
-             grep -qE '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+        if ! git tag --points-at "$c" 2>/dev/null | grep -qE "$release_re"; then
             untagged="$c"
             break
         fi
@@ -179,25 +186,59 @@ else
         if git rev-parse -q --verify "refs/tags/${zerotag}" >/dev/null 2>&1; then
             ok "skipped leading-zero case (${zerotag} already exists in this clone)"
         elif git tag "$zerotag" "$untagged" 2>/dev/null; then
-            # Must run AT the tagged commit. A worktree failure has to be
+            # Must run AT the commit under test. A worktree failure has to be
             # reported, not silently fall through to a value computed
             # somewhere else — that would assert against the wrong commit and
             # pass for the wrong reason.
-            wtz="$tmp/wtz-$$"
-            if git worktree add -q --detach "$wtz" "$untagged" 2>/dev/null; then
-                got_zero="$(bash "$HELPER_ABS" "$wtz" 2>/dev/null || true)"
-                git worktree remove --force "$wtz" 2>/dev/null || true
-                if [[ -z "$got_zero" ]]; then
-                    miss "leading-zero case: helper produced no output at ${untagged:0:7}"
-                elif [[ "$got_zero" == "09.9.9" ]]; then
-                    miss "leading-zero tag ${zerotag} was adopted as the bare version '09.9.9'"
-                else
-                    ok "leading-zero tag ${zerotag} is not treated as a release -> ${got_zero}"
+            #
+            # $1 label | $2 committish. Fails if the label is derived from
+            # ${zerotag} at all: bare `09.9.9` at the tag itself, or
+            # `09.9.9-<n>-g<sha>` at a descendant, since `git describe` names
+            # the nearest matching tag and its glob cannot exclude leading
+            # zeros.
+            assert_not_zero_derived() {
+                local label="$1" ref="$2" wtz got
+                wtz="$tmp/wtz-$$-$RANDOM"
+                if ! git worktree add -q --detach "$wtz" "$ref" 2>/dev/null; then
+                    miss "$label: could not create a worktree at ${ref:0:7}"
+                    return
                 fi
-            else
-                miss "leading-zero case: could not create a worktree at ${untagged:0:7}"
-            fi
+                got="$(bash "$HELPER_ABS" "$wtz" 2>/dev/null || true)"
+                git worktree remove --force "$wtz" 2>/dev/null || true
+                if [[ -z "$got" ]]; then
+                    miss "$label: helper produced no output at ${ref:0:7}"
+                elif [[ "$got" == "09.9.9" || "$got" == 09.9.9-* ]]; then
+                    miss "$label: label '$got' is derived from ${zerotag}, which is not a valid release tag"
+                else
+                    ok "$label -> $got"
+                fi
+            }
+
+            assert_not_zero_derived \
+                "leading-zero tag ${zerotag} is not treated as a release" "$untagged"
+
             git tag -d "$zerotag" >/dev/null 2>&1 || true
+
+            # A DESCENDANT is the case a bare-version check alone misses:
+            # describe yields `09.9.9-<n>-g<sha>`, which is not bare and so
+            # slipped through until the helper validated the tag prefix.
+            #
+            # Build the scenario rather than hunting for it in history: tag an
+            # OLDER commit so $untagged becomes its descendant. Hunting depends
+            # on repo shape and silently skipped when the only descendant was
+            # the tagged release itself.
+            ancestor="$(git rev-list -n 1 "${untagged}~3" 2>/dev/null || true)"
+            if [[ -z "$ancestor" ]]; then
+                ok "skipped descendant case (not enough history behind ${untagged:0:7})"
+            elif git tag "$zerotag" "$ancestor" 2>/dev/null; then
+                # $untagged carries no release tag (selected above), so the
+                # helper must fall through to describe — which names $zerotag.
+                assert_not_zero_derived \
+                    "descendant of ${zerotag} is not labelled from it" "$untagged"
+                git tag -d "$zerotag" >/dev/null 2>&1 || true
+            else
+                ok "skipped descendant case (could not tag ${ancestor:0:7})"
+            fi
         else
             ok "skipped leading-zero case (could not create a throwaway tag)"
         fi

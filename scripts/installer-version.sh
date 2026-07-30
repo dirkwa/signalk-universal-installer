@@ -78,12 +78,28 @@ if [[ -z "$v" ]]; then
     v="dev-${GITHUB_SHA:-unknown}"
     v="${v:0:11}"
 fi
-# Strip a leading `v` so install.sh's `v${INSTALLER_VERSION}` does not render
+# `describe` names the nearest tag matching the glob, and the glob cannot
+# express "no leading zeros" — so `v09.9.9` and its descendants still get
+# through as `09.9.9` / `09.9.9-3-gabc1234`. Validate the tag PREFIX (the part
+# before describe's `-<n>-g<sha>` suffix, if any) against the one release-tag
+# rule; anything it rejects is not a version we may publish.
+# Strip `-dirty` first: on a tagged commit with a dirty tree describe emits
+# `v0.4.0-dirty` with no `-<n>-g<sha>` part, so the suffix trim below would
+# leave it attached and reject an otherwise valid tag.
+described_tag="${v%-dirty}"
+described_tag="${described_tag%%-[0-9]*-g*}"
+if [[ ! "$described_tag" =~ $RELEASE_TAG_RE ]]; then
+    v="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    printf '%s\n' "$v"
+    exit 0
+fi
+
+# Strip the leading `v` so install.sh's `v${INSTALLER_VERSION}` does not render
 # as `vv0.1.0-NN-gXXXXXXX`.
 v="${v#v}"
-# Belt and braces: if a describe result still reads as a bare release version,
-# this commit is not that release (the tag lookup above would have returned).
-# Fall back to the bare sha rather than mislabel it.
+# A bare release version here would mean this commit IS that release — but then
+# the tag lookup above would already have returned. Fall back rather than
+# mislabel it.
 if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     v="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 fi
