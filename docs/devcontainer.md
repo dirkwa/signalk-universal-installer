@@ -436,3 +436,29 @@ in `dev/e2e/` — your dev instance on 4000 is neither reused nor touched.
 The Playwright version is pinned in two places that must stay in sync:
 `.devcontainer/Dockerfile` (baked browser) and `dev/package.json`
 (`@playwright/test`).
+
+## signalk-server unit tests
+
+With a server source checkout under `dev/signalk-server/`, its mocha
+suites run in this container — but they must not inherit the dev
+instance's environment. Unset the dev vars per invocation:
+
+```bash
+cd dev/signalk-server
+env -u PORT -u SIGNALK_NODE_CONFIG_DIR -u SIGNALK_SERVER_IS_UPDATABLE \
+  NODE_ENV=test npx mocha test/deltacache.js
+```
+
+One upstream quirk: `test/subscriptions.js` fails 2 tests when run as a
+single file — it relies on another suite in the same mocha process
+calling `chai.should()`. Run it together with a suite that installs it,
+under the same `env -u … NODE_ENV=test` prefix as above, e.g.
+`npx mocha test/chart-tile-regex.ts test/subscriptions.js`; see
+"Server tests" in `dev/CLAUDE.md`.
+
+The container also presets `TS_NODE_IGNORE` to keep ts-node from
+recompiling the server's pre-built `dist/` tree during test runs —
+without it, full-server suites blow mocha's 20 s hook timeout on
+ARM hardware. Containers built before the variable was added can
+export it manually:
+`export TS_NODE_IGNORE='(?:^|/)node_modules/,(?:^|/)dist/'`.

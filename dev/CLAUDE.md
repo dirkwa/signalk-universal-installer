@@ -47,6 +47,41 @@ LAN/tailscale IP — `localhost` is SSRF-blocked by the server (127/8).
   built plugin is not rebuilt automatically; after editing a **TypeScript**
   plugin's source: `SK_DEV_PLUGIN_BUILD=1 ./dev.sh restart`.
 
+## Server tests (signalk-server checkout)
+
+Running signalk-server's mocha suites from `signalk-server/` needs two
+adjustments to this container's environment:
+
+- **Unset the dev-instance vars.** The shell exports `PORT=4000`,
+  `SIGNALK_NODE_CONFIG_DIR` and `SIGNALK_SERVER_IS_UPDATABLE` for the dev
+  instance; test servers inherit them and fail (EADDRINUSE on 4000,
+  wrong config dir). Invoke as:
+
+  ```bash
+  env -u PORT -u SIGNALK_NODE_CONFIG_DIR -u SIGNALK_SERVER_IS_UPDATABLE \
+    NODE_ENV=test npx mocha test/deltacache.js
+  ```
+
+- **`TS_NODE_IGNORE` must include `dist/`** — preset in
+  `.devcontainer/devcontainer.json` `containerEnv` (see the comment
+  there for the value and the mechanism; in a container built before
+  it was added, export the same value manually). Without it,
+  full-server suites time out in their before hooks on ARM boxes.
+
+Known upstream quirk: `test/subscriptions.js` fails 2 tests when run as
+a **single file** — it uses chai `.should` without calling
+`chai.should()`, relying on another suite in the same mocha process to
+install it. Not an environment problem; run it together with a suite
+that installs it — same `env -u … NODE_ENV=test` invocation as above,
+with `npx mocha test/chart-tile-regex.ts test/subscriptions.js` (the
+first file calls `chai.should()` at module load) — or fix upstream.
+
+Expect the test server's tcp interface to log `EADDRINUSE :::8375` when
+a production stack shares the host — under host networking the
+production signalk-server holds that port (the dev instance's own tcp
+listener is seeded off). No suite asserts on the tcp interface; the
+tests themselves are unaffected.
+
 ## Container-runtime plugins
 
 The host's podman socket dir is mounted at `/run/host-podman/` (probe-and-

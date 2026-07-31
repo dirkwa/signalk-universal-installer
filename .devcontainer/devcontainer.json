@@ -68,6 +68,15 @@
   "containerEnv": {
     "PORT": "4000",
     "SIGNALK_NODE_CONFIG_DIR": "/home/node/.signalk",
+    // signalk-server's mocha setup registers ts-node with type-checking
+    // and allowJs, so every require() of its pre-built dist/*.js goes
+    // through the TypeScript compiler. On the ARM boxes this container
+    // targets that adds 15-22s to test-server startup — past mocha's
+    // 20s hook timeout, so full-server suites fail before they start.
+    // Ignoring dist/ (plus the node_modules default) keeps ts-node
+    // compiling only the test sources. See "Server tests" in
+    // dev/CLAUDE.md.
+    "TS_NODE_IGNORE": "(?:^|/)node_modules/,(?:^|/)dist/",
     // Container runtime access for signalk-container-based plugins.
     // Points at the host socket dir mounted above; the image's
     // containers.conf is repointed to the same path at build time.
