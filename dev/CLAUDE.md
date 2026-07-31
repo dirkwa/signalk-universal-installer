@@ -59,7 +59,7 @@ adjustments to this container's environment:
 
   ```bash
   env -u PORT -u SIGNALK_NODE_CONFIG_DIR -u SIGNALK_SERVER_IS_UPDATABLE \
-    NODE_ENV=test npx mocha test/<file>
+    NODE_ENV=test npx mocha test/deltacache.js
   ```
 
 - **`TS_NODE_IGNORE` must include `dist/`** — preset in
@@ -71,11 +71,15 @@ adjustments to this container's environment:
 Known upstream quirk: `test/subscriptions.js` fails 2 tests when run as
 a **single file** — it uses chai `.should` without calling
 `chai.should()`, relying on another suite in the same mocha process to
-install it. Not an environment problem; run it together with another
-suite or fix upstream.
+install it. Not an environment problem; run it together with a suite
+that installs it (e.g.
+`npx mocha test/chart-tile-regex.ts test/subscriptions.js` — the first
+file calls `chai.should()` at module load) or fix upstream.
 
-Expect the tcp interface to log `EADDRINUSE :::8375` during test runs
-while the dev instance is up — the dev server holds that port; the
+Expect the test server's tcp interface to log `EADDRINUSE :::8375` when
+a production stack shares the host — under host networking the
+production signalk-server holds that port (the dev instance's own tcp
+listener is seeded off). No suite asserts on the tcp interface; the
 tests themselves are unaffected.
 
 ## Container-runtime plugins

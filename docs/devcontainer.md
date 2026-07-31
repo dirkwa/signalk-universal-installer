@@ -444,13 +444,15 @@ suites run in this container — but they must not inherit the dev
 instance's environment. Unset the dev vars per invocation:
 
 ```bash
+cd dev/signalk-server
 env -u PORT -u SIGNALK_NODE_CONFIG_DIR -u SIGNALK_SERVER_IS_UPDATABLE \
-  NODE_ENV=test npx mocha test/<file>
+  NODE_ENV=test npx mocha test/deltacache.js
 ```
 
 One upstream quirk: `test/subscriptions.js` fails 2 tests when run as a
 single file — it relies on another suite in the same mocha process
-calling `chai.should()`. Run it together with another suite; see
+calling `chai.should()`. Run it together with a suite that installs it,
+e.g. `npx mocha test/chart-tile-regex.ts test/subscriptions.js`; see
 "Server tests" in `dev/CLAUDE.md`.
 
 The container also presets `TS_NODE_IGNORE` to keep ts-node from
