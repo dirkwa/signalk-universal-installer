@@ -448,9 +448,14 @@ env -u PORT -u SIGNALK_NODE_CONFIG_DIR -u SIGNALK_SERVER_IS_UPDATABLE \
   NODE_ENV=test npx mocha test/<file>
 ```
 
+One upstream quirk: `test/subscriptions.js` fails 2 tests when run as a
+single file — it relies on another suite in the same mocha process
+calling `chai.should()`. Run it together with another suite; see
+"Server tests" in `dev/CLAUDE.md`.
+
 The container also presets `TS_NODE_IGNORE` to keep ts-node from
 recompiling the server's pre-built `dist/` tree during test runs —
 without it, full-server suites blow mocha's 20 s hook timeout on
 ARM hardware. Containers built before the variable was added can
 export it manually:
-`TS_NODE_IGNORE='(?:^|/)node_modules/,(?:^|/)dist/'`.
+`export TS_NODE_IGNORE='(?:^|/)node_modules/,(?:^|/)dist/'`.

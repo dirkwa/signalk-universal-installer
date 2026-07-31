@@ -57,7 +57,7 @@ adjustments to this container's environment:
   instance; test servers inherit them and fail (EADDRINUSE on 4000,
   wrong config dir). Invoke as:
 
-  ```
+  ```bash
   env -u PORT -u SIGNALK_NODE_CONFIG_DIR -u SIGNALK_SERVER_IS_UPDATABLE \
     NODE_ENV=test npx mocha test/<file>
   ```
