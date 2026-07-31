@@ -72,9 +72,9 @@ Known upstream quirk: `test/subscriptions.js` fails 2 tests when run as
 a **single file** — it uses chai `.should` without calling
 `chai.should()`, relying on another suite in the same mocha process to
 install it. Not an environment problem; run it together with a suite
-that installs it (e.g.
-`npx mocha test/chart-tile-regex.ts test/subscriptions.js` — the first
-file calls `chai.should()` at module load) or fix upstream.
+that installs it — same `env -u … NODE_ENV=test` invocation as above,
+with `npx mocha test/chart-tile-regex.ts test/subscriptions.js` (the
+first file calls `chai.should()` at module load) — or fix upstream.
 
 Expect the test server's tcp interface to log `EADDRINUSE :::8375` when
 a production stack shares the host — under host networking the

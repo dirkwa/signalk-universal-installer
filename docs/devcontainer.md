@@ -452,7 +452,8 @@ env -u PORT -u SIGNALK_NODE_CONFIG_DIR -u SIGNALK_SERVER_IS_UPDATABLE \
 One upstream quirk: `test/subscriptions.js` fails 2 tests when run as a
 single file — it relies on another suite in the same mocha process
 calling `chai.should()`. Run it together with a suite that installs it,
-e.g. `npx mocha test/chart-tile-regex.ts test/subscriptions.js`; see
+under the same `env -u … NODE_ENV=test` prefix as above, e.g.
+`npx mocha test/chart-tile-regex.ts test/subscriptions.js`; see
 "Server tests" in `dev/CLAUDE.md`.
 
 The container also presets `TS_NODE_IGNORE` to keep ts-node from
