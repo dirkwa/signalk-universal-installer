@@ -78,3 +78,33 @@ jobs:
           else
             gh release create "$TAG" --verify-tag --generate-notes
           fi
+
+  # Tag-ref Pages deployments never reach the serving origin — observed
+  # on v0.4.0 and again on v0.4.1, where five successful tag-ref deploys
+  # over 12h changed nothing while one master-ref dispatch served within
+  # seconds. Until GitHub fixes that, a release lands its version label
+  # by re-deploying Pages from master. Deliberately NOT pinned to the
+  # tagged commit: Pages is a rolling master publisher (every master
+  # push deploys), so if master has already moved past the tag, a
+  # tag-pinned deploy would roll the live site BACK over the newer
+  # build. --ref master can at worst re-deploy what is already live,
+  # and the label stays truthful either way because it derives from
+  # the COMMIT (scripts/installer-version.sh): at the tagged head it
+  # bakes the clean X.Y.Z, past it the honest describe label.
+  # GITHUB_TOKEN can fire this because workflow_dispatch is exempt
+  # from the no-cascade rule.
+  # Push-gated: a manual rollback dispatch repoints the release branch
+  # at an old tag and must not redeploy current master in its name.
+  redeploy-pages:
+    needs: advance
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Job-scoped like advance, and the minimum for creating the
+    # pages.yml workflow_dispatch event.
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch Pages deploy from master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref master --repo "$GITHUB_REPOSITORY"
