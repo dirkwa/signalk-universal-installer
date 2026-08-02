@@ -90,13 +90,23 @@ reviews:
         - `signalk-doctor-server.container` is dropped by the installer
           and is **not** re-rendered at runtime — once written, the doctor
           owns its own quadlet (see signalk-doctor-server AGENTS.md CC-1).
-        - **Restart policy:** all engine quadlets must use
+        - **Restart policy (engines):** the ENGINE quadlets
+          (`signalk-updater-server`, `signalk-doctor-server`) must use
           `Restart=on-failure` with `StartLimitIntervalSec=300` and
           `StartLimitBurst=5`, and `StartLimit*` MUST be in `[Unit]`, not
           `[Service]` (systemd applies them only from `[Unit]`). This is
           required by signalk-doctor-server CC-4 ("`Restart=always` is
-          banned") — flag any quadlet that sets `Restart=always` or moves
-          `StartLimit*` to `[Service]`.
+          banned") — flag an engine quadlet that sets `Restart=always` or
+          any quadlet that moves `StartLimit*` to `[Service]`.
+        - **Restart policy (server):** `signalk-server.container.template`
+          is the deliberate opposite (#235): `Restart=always` (the admin
+          UI's Restart button is a clean `exit(0)`; `on-failure` would
+          strand the user with a stopped server) and
+          `StartLimitIntervalSec=0` — the data plane must NEVER latch into
+          `failed (start-limit-hit)`, because systemd's start limiter
+          cannot tell a crashloop from plugin-dev restarts or OOM kills of
+          a healthy server. Flag any change that re-introduces a start
+          limit or switches the server to `Restart=on-failure`.
         - Use `%h` and `%t` specifiers for host paths, never hard-coded
           `/home/$USER` or `/run/user/1000`.
 
