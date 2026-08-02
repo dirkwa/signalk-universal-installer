@@ -176,27 +176,41 @@ TimeoutStartSec=300
 # silently clamps this to DefaultLimitNOFILE (524288).
 LimitNOFILE=1048576
 
-# Make signalk-server the preferred OOM victim so memory pressure spares the
-# recovery surface (the doctor + updater consoles). On a low-RAM Pi a cold
-# first boot can pin RAM — observed signalk-server peaking ~1.1G and getting
-# OOM-killed (exit 137) while the doctor's probe/bug-report calls, proxied
-# THROUGH the dying server, returned a storm of 502s. signalk-server carries
-# Restart=always (above) and self-recovers in seconds; the doctor and updater
-# do not, and losing them is losing the recovery surface exactly when it is
-# needed. A HIGHER oom_score_adj means killed FIRST, so floating this unit
-# above its siblings (which stay at whatever the user manager hands down) lets
-# the kernel sacrifice the self-healing server instead of the recovery consoles.
+# Deliberately NO OOMScoreAdjust here. An earlier revision set
+# OOMScoreAdjust=500 to make signalk-server the preferred OOM victim so
+# memory pressure would spare the recovery surface (the doctor + updater
+# consoles). Issue #236 showed that in practice the setting was a blunt
+# instrument that backfired:
 #
-# This is a plain systemd [Service] property, NOT a Quadlet [Container] key:
-# podman 5.4.2's Quadlet generator has no OOMScoreAdjust → --oom-score-adj
-# mapping, but systemd applies the [Service] value to the unit cgroup and the
-# conmon → crun → container PID 1 chain inherits it (verified: a unit showing
-# OOMScoreAdjust=N has its container payload at /proc/<pid>/oom_score_adj=N).
-# Positive-only by necessity: under rootless podman a process can only RAISE
-# its oom_score_adj, never lower it, so protecting the doctor/updater with a
-# negative score would be silently clamped back up — raising the server is the
-# only direction that actually reorders the kill preference.
-OOMScoreAdjust=500
+#   - oom_badness() adds adj × totalpages / 1000, so +500 is a phantom
+#     footprint of HALF the host's RAM. On any host with real memory the
+#     adjustment, not actual usage, picks the victim: a 16 GB box killed
+#     a ~430 MB signalk-server (and even an 8 MB podman) ahead of an
+#     unrelated workload holding 12 GB at adj 0.
+#   - The consoles were NOT saved: once pressure persisted the kernel
+#     reached them anyway (at podman's rootless default of 200, holding
+#     under 1 MB each). The +500 bought them ~90 seconds.
+#   - The repeated sacrifice consumed signalk-server's restart budget and
+#     latched the unit off permanently (issue #235) — a transient,
+#     externally caused spike became a durable outage of the nav server.
+#
+# Without the key the container payload sits at whatever podman hands
+# rootless containers (oom_score_adj=200 on the supported podman ≥5.3 —
+# confirmed live on the doctor/updater payloads in #236), level with the
+# consoles, and the kernel ranks by ACTUAL footprint. signalk-server is
+# far larger than the
+# consoles in any real deployment, so within the stack it is still the
+# first killed — the original intent — while no longer volunteering ahead
+# of whatever external process is genuinely responsible for the pressure.
+#
+# (Mechanism note, if a bias is ever reconsidered: OOMScoreAdjust is a
+# plain systemd [Service] property — podman 5.4.2's Quadlet generator has
+# no [Container] mapping for it — and the conmon → crun → container PID 1
+# chain inherits the unit value. Under rootless podman a process can only
+# RAISE its oom_score_adj, never lower it, so the consoles cannot be
+# protected with a negative score; and any positive bias must be weighed
+# against adj × totalpages / 1000 phantom pages, which dwarfs real usage
+# even at small values.)
 
 [Install]
 WantedBy=default.target
