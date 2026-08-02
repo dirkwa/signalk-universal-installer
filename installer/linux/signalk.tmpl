@@ -184,6 +184,7 @@ cmd_health() {
     # clean bill of health — usually a microSD root (see 'signalk recover
     # doctor' → the Host root storage probe). An SSD removes it.
     local slow_secs=1.5
+    local server_down=0
     echo "=== SignalK Stack Health ==="
     for entry in \
         "signalk-server  $SIGNALK_URL" \
@@ -196,12 +197,42 @@ cmd_health() {
         read -r status secs < <(health_probe "$url")
         if [[ "$status" != "ok" ]]; then
             printf '  [FAIL] %-20s %s\n' "$name" "$disp"
+            [[ "$name" == signalk-server* ]] && server_down=1
         elif awk -v s="$secs" -v lim="$slow_secs" 'BEGIN{exit !(s>lim)}'; then
             printf '  [SLOW] %-20s %s  (%ss — likely disk I/O; an SSD helps)\n' "$name" "$disp" "$secs"
         else
             printf '  [OK]   %-20s %s\n' "$name" "$disp"
         fi
     done
+
+    # Name the failure mode instead of leaving a bare [FAIL] (#235/#236).
+    # The two states operators actually hit here and cannot see without
+    # reading journals by hand: the start-limit latch (systemd refuses every
+    # start; nothing else in the stack clears it) and an OOM kill (only
+    # recorded in the KERNEL journal). Best-effort — `show` on a missing
+    # unit just yields empty values and prints nothing.
+    if (( server_down )); then
+        local result main_status
+        result=$(systemctl --user show signalk-server.service \
+            -p Result --value 2>/dev/null || true)
+        main_status=$(systemctl --user show signalk-server.service \
+            -p ExecMainStatus --value 2>/dev/null || true)
+        if [[ "$result" == "start-limit-hit" ]]; then
+            echo
+            echo "  signalk-server is LATCHED OFF by systemd's start rate limiter"
+            echo "  (start-limit-hit): too many starts in a short window — plugin-dev"
+            echo "  restarts and OOM kills count too. It will NOT come back on its own."
+            echo "  Clear the latch and start it with:  signalk start"
+        elif [[ "$main_status" == "137" ]]; then
+            # 128+9: the main process died to SIGKILL. When nobody sent one by
+            # hand, that is most often the kernel OOM killer under host-wide
+            # memory pressure (#236).
+            echo
+            echo "  signalk-server's last exit was SIGKILL (137) — commonly the kernel"
+            echo "  OOM killer under host memory pressure. Confirm with:"
+            echo "    journalctl -k | grep -i 'out of memory'"
+        fi
+    fi
 
     echo
     echo "=== systemd-user units ==="
@@ -911,6 +942,42 @@ cmd_resetadmin() {
     echo "     Existing API tokens (doctor, updater) remain valid: the secretKey was preserved."
 }
 
+# Clear a start-limit latch before asking for a start. Quadlets rendered
+# before StartLimitIntervalSec=0 landed (#235) park the unit in
+# `failed (start-limit-hit)` after 5 starts in 30 minutes — plugin-dev
+# restarts and OOM kills count too — and systemd then refuses EVERY start
+# request, including the updater's, until reset-failed. Safe to call
+# unconditionally: reset-failed on a healthy unit is a no-op.
+_clear_start_limit() {
+    systemctl --user reset-failed signalk-server.service 2>/dev/null || true
+}
+
+# Wait for signalk-server.service to actually come up after a start request.
+# The updater's 2xx on /api/signalk/resume means "request accepted", NOT
+# "unit is up": when systemd refuses the start (start-limit latch on an old
+# Quadlet) or the container fails to create, an unconditional [OK] lies to
+# the operator (#235). Mirrors install.sh's unit_recovered_within():
+# `is-active` is a non-blocking state query, so the loop never hangs.
+#   returns 0 — unit reached `active`
+#   returns 1 — unit reached `failed` (a refused or dead start; Restart=
+#               always won't rescue `failed`, so stop waiting immediately)
+#   returns 2 — window expired while still activating. On an SD-card host a
+#               cold `podman run --replace` create can take minutes
+#               (TimeoutStartSec=300), so this means "still starting", not
+#               "down" — callers must not report it as a failure.
+_wait_server_active() {
+    local secs=${1:-60} start=$SECONDS active
+    while (( SECONDS - start < secs )); do
+        active=$(systemctl --user is-active signalk-server.service 2>/dev/null || true)
+        case "$active" in
+            active) return 0 ;;
+            failed) return 1 ;;
+        esac
+        sleep 3
+    done
+    return 2
+}
+
 # Drive a DURABLE signalk-server lifecycle op through the updater's REST API,
 # the sanctioned control path (the installer/CLI never start/stop signalk-server
 # directly except as a documented fallback when the updater is unreachable).
@@ -1025,24 +1092,52 @@ cmd_stop() {
 # already running and restores WantedBy only if it was removed).
 cmd_start() {
     echo "Starting SignalK (signalk-server)..."
+    # Clear any start-limit latch BEFORE the start request: while latched,
+    # systemd refuses the start the updater is about to issue, the updater
+    # still answers 2xx, and this command used to print [OK] over a server
+    # that never came up (#235).
+    _clear_start_limit
     # `|| rc=$?` so `set -e` does not abort on the non-zero returns before the
     # case runs (see cmd_stop).
     local rc=0
     _signalk_lifecycle resume start || rc=$?
     case "$rc" in
-        0) echo "[OK] SignalK started and will auto-start at boot. Check it with: signalk health" ;;
-        3)
-            # Non-durable fallback (updater was unreachable): started now, but
-            # boot-start may not be re-armed.
-            echo "[OK] SignalK started NOW, but auto-start at boot may not be re-armed (the"
-            echo "     updater was unreachable). Re-run 'signalk start' once it is back."
-            ;;
+        0|3) : ;; # start issued — verified below before claiming anything
         2) exit 1 ;; # message already printed by _signalk_lifecycle
         *)
             echo "[ERR] Could not start signalk-server (see above)." >&2
             exit 1
             ;;
     esac
+    # The updater's 2xx (or the systemctl fallback returning) only means the
+    # request was issued. Verify the unit before reporting.
+    local wait_rc=0
+    _wait_server_active 60 || wait_rc=$?
+    if (( wait_rc == 1 )); then
+        echo "[ERR] The start was issued but signalk-server entered 'failed'." >&2
+        echo "      Inspect it with: systemctl --user status signalk-server" >&2
+        echo "                       journalctl --user -u signalk-server -n 50" >&2
+        exit 1
+    fi
+    if (( wait_rc == 2 )); then
+        # Still activating — normal on slow SD-card storage, where the cold
+        # container create alone can take minutes. Not a failure; say so.
+        echo "[i] Start issued; signalk-server has not reported 'active' yet (a cold"
+        echo "    start on slow storage can take a few minutes). Watch it with: signalk health"
+        if (( rc == 3 )); then
+            echo "    Auto-start at boot may not be re-armed (the updater was unreachable);"
+            echo "    re-run 'signalk start' once it is back."
+        fi
+        return 0
+    fi
+    if (( rc == 3 )); then
+        # Non-durable fallback (updater was unreachable): started now, but
+        # boot-start may not be re-armed.
+        echo "[OK] SignalK started NOW, but auto-start at boot may not be re-armed (the"
+        echo "     updater was unreachable). Re-run 'signalk start' once it is back."
+    else
+        echo "[OK] SignalK started and will auto-start at boot. Check it with: signalk health"
+    fi
 }
 
 # Restart signalk-server in place — the verb that completes start/stop (#222).
