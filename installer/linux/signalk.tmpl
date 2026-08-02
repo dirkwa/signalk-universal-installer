@@ -223,12 +223,31 @@ cmd_health() {
             echo "  (start-limit-hit): too many starts in a short window — plugin-dev"
             echo "  restarts and OOM kills count too. It will NOT come back on its own."
             echo "  Clear the latch and start it with:  signalk start"
-        elif [[ "$main_status" == "137" ]]; then
-            # 128+9: the main process died to SIGKILL. When nobody sent one by
-            # hand, that is most often the kernel OOM killer under host-wide
-            # memory pressure (#236).
+        elif [[ -f "$QUADLET_DIR/signalk-server.container" ]] \
+            && grep -qE '^[[:space:]]*#SK-PAUSED#' "$QUADLET_DIR/signalk-server.container"; then
+            # Durably paused: the updater's /api/signalk/pause comments the
+            # [Install] WantedBy= line out with its #SK-PAUSED# marker
+            # (signalk-updater-server src/quadlet/rewriter.ts). Check this
+            # BEFORE reading exit codes — a CLEAN stop also records
+            # ExecMainStatus=137/Result=exit-code (the in-container PID 1
+            # ignores untrapped SIGTERM, so podman's follow-up SIGKILL after
+            # StopTimeout is how every stop ends; verified against systemd
+            # 257), and reading that as an OOM kill would misdiagnose every
+            # 'signalk stop'.
             echo
-            echo "  signalk-server's last exit was SIGKILL (137) — commonly the kernel"
+            echo "  signalk-server is durably stopped (via 'signalk stop'). Start it"
+            echo "  again with:  signalk start"
+        elif [[ "$result" == "exit-code" && "$main_status" == "137" ]] \
+            || [[ "$result" == "signal" && "$main_status" == "9" ]]; then
+            # Two SIGKILL shapes, both typical of the kernel OOM killer under
+            # host memory pressure (#236): the container payload killed (podman
+            # run exits carrying 128+9=137), or podman run itself killed
+            # (Result=signal, SIGKILL). An operator stop is excluded by the
+            # WantedBy branch above; a hand-rolled `systemctl --user stop` can
+            # still land here, which is why this is phrased as a lead with a
+            # confirmation step, not a verdict.
+            echo
+            echo "  signalk-server's last exit was a SIGKILL — commonly the kernel"
             echo "  OOM killer under host memory pressure. Confirm with:"
             echo "    journalctl -k | grep -i 'out of memory'"
         fi
@@ -1121,9 +1140,15 @@ cmd_start() {
     fi
     if (( wait_rc == 2 )); then
         # Still activating — normal on slow SD-card storage, where the cold
-        # container create alone can take minutes. Not a failure; say so.
-        echo "[i] Start issued; signalk-server has not reported 'active' yet (a cold"
-        echo "    start on slow storage can take a few minutes). Watch it with: signalk health"
+        # container create alone can take minutes. Not a failure; say so, and
+        # print the actual unit state: 'activating' really is a slow start,
+        # while 'inactive' means the updater answered 2xx but no start ever
+        # reached systemd — worth the operator seeing rather than papering
+        # over with "still starting".
+        local state
+        state=$(systemctl --user is-active signalk-server.service 2>/dev/null || true)
+        echo "[i] Start issued; signalk-server is not 'active' yet (state: ${state:-unknown})."
+        echo "    A cold start on slow storage can take a few minutes. Watch it with: signalk health"
         if (( rc == 3 )); then
             echo "    Auto-start at boot may not be re-armed (the updater was unreachable);"
             echo "    re-run 'signalk start' once it is back."
