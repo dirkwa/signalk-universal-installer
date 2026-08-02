@@ -17,22 +17,36 @@ After=podman.socket signalk-updater-server.service signalk-doctor-server.service
 # unconditional — the HARDWARE block itself is what gates the feature.
 Wants=signalk-dbus-proxy.service
 After=signalk-dbus-proxy.service
-# Crashloop guard. Belongs in [Unit] — systemd silently ignores these
-# keys when placed in [Service], which is how they got dropped on the
-# 0.5.x installs (journal logged `Unknown key 'StartLimitIntervalSec'
-# in section [Service], ignoring.` and the unit retried forever).
+# Start rate limiting is DISABLED: this unit must never latch into
+# `failed (start-limit-hit)`. systemd's limiter counts EVERY start in the
+# window and cannot tell a crashloop from ordinary operation — the admin
+# UI's "Restart" button is a clean exit(0) that Restart=always brings
+# back, plugin development means restarting often, and an OOM kill of a
+# healthy server is not the server's fault. Any budget tight enough to
+# catch a real crashloop is also exhausted by those (issue #235: five
+# plugin-dev restarts in sixteen minutes; issue #236: four OOM kills in
+# ninety seconds), and once tripped the unit stays down — long after the
+# cause has passed — until someone SSHes in and runs
+# `systemctl --user reset-failed`. A transient event permanently taking
+# down the navigation server is the worst outcome this stack can produce,
+# so the guard is gone rather than tuned.
 #
-# Interval widened to 1800s to match TimeoutStartSec=300 below. On an
-# SD-card host `podman run --replace` can take the full start timeout to
-# create the container under I/O contention; a failed attempt then costs
-# up to TimeoutStartSec + RestartSec = 310s. For the guard to allow all
-# BURST=5 genuine (slow-but-eventually-good) attempts before declaring
-# `failed`, the window must exceed (5-1)×310 = 1240s — rounded to 1800s
-# (30 min). A real crashloop exits in seconds, so it still trips the
-# guard long before 30 min; the wider window only stops penalizing a
-# slow-but-recovering start, it does not weaken genuine-failure detection.
-StartLimitIntervalSec=1800
-StartLimitBurst=5
+# What replaces it: a true crashloop now retries forever, but at a
+# bounded, cheap cadence — RestartSec=10 in [Service] caps it at a
+# handful of attempts per minute — and stays VISIBLE (unit cycling in
+# `signalk health`, doctor probes failing) instead of parked in `failed`.
+# On a boat, a server that keeps trying beats one that is silently off.
+#
+# History, to prevent re-tuning: the guard was first placed in [Service],
+# where systemd silently ignores it (journal: `Unknown key
+# 'StartLimitIntervalSec' in section [Service], ignoring.`); once moved
+# here it was widened to 1800s on inverted reasoning — the window was
+# sized to "fit" five slow SD-card start attempts (~310 s each,
+# TimeoutStartSec + RestartSec), but StartLimit latches precisely when
+# the burst FITS the window, so the wide window GUARANTEED that five slow
+# attempts (or five ordinary restarts) latched the unit off. The
+# slow-start case never needed a wide window at all; it needed no latch.
+StartLimitIntervalSec=0
 
 # Suppress Quadlet's implicit network-readiness dependency. podman 5.x
 # adds a Wants/After on its user-session network-wait shim to EVERY
@@ -139,10 +153,11 @@ Label=io.signalk.role=server
 # Restart=always rather than on-failure: the SignalK admin UI's "Restart"
 # button calls process.exit(0) on the server, which is a CLEAN exit
 # (status=0/SUCCESS). Restart=on-failure would not bring it back, and
-# the user would be stranded with a stopped unit. The crashloop guard
-# (StartLimitIntervalSec/StartLimitBurst, in [Unit] above) still kicks
-# in for genuine failure loops — after 5 starts in 30 minutes the unit
-# goes to `failed` state and stays there.
+# the user would be stranded with a stopped unit. There is deliberately
+# no start-limit latch (StartLimitIntervalSec=0 in [Unit] above, #235):
+# a genuine failure loop keeps retrying at this RestartSec cadence and
+# stays visible in `signalk health`, rather than parking the unit in
+# `failed` where only an SSH `reset-failed` can revive it.
 Restart=always
 RestartSec=10
 # Give an early boot a short window for DNS configuration to land before
