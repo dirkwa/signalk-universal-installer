@@ -304,10 +304,13 @@ cmd_doctor() {
     # behind a stuck c/storage lock -- the exact fault an operator runs this
     # command to investigate -- and the dump never reaches the rest of its
     # sections. Name the condition and point at the fix instead.
+    # -k is load-bearing, not defensive: a podman wedged on the storage lock
+    # ignores SIGTERM, and timeout(1) then waits for the child anyway -- so a
+    # plain `timeout` still hangs this dump for as long as podman feels like it.
     local rc=0
-    timeout "$PODMAN_TIMEOUT" podman ps -a \
+    timeout -k "$PODMAN_KILL_AFTER" "$PODMAN_TIMEOUT" podman ps -a \
         --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>&1 || rc=$?
-    if [[ $rc -eq 124 ]]; then
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
         echo "  [FAIL] podman did not answer within ${PODMAN_TIMEOUT}s —"
         echo "         c/storage lock held. Recover with:"
         echo "           signalk-recovery unwedge-podman"

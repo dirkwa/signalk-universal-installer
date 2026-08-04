@@ -32,8 +32,14 @@ check() {
     fi
 }
 
-# Seconds to wait on podman before declaring it wedged.
+# Seconds to wait on podman before declaring it wedged, and how long after
+# SIGTERM to escalate to SIGKILL. The escalation is load-bearing: a podman
+# wedged on the c/storage lock spins in kernel space and IGNORES SIGTERM, and
+# timeout(1) then waits for the child rather than returning -- so a plain
+# `timeout` bounds nothing at all. Measured against a SIGTERM-ignoring stub,
+# `timeout 3` returned only after 121s; `timeout -k 2 3` returned after 5s.
 PODMAN_TIMEOUT=${PODMAN_TIMEOUT:-15}
+PODMAN_KILL_AFTER=${PODMAN_KILL_AFTER:-5}
 
 # Every podman call here is timeout-guarded, because podman has a failure mode
 # where it blocks FOREVER rather than erroring: a SIGKILLed container create
@@ -47,7 +53,8 @@ PODMAN_TIMEOUT=${PODMAN_TIMEOUT:-15}
 # together. A wedged podman is a finding; report it as one.
 container_snapshot() {
     local out rc=0
-    out=$(timeout "$PODMAN_TIMEOUT" podman ps -a --filter 'name=signalk-' \
+    out=$(timeout -k "$PODMAN_KILL_AFTER" "$PODMAN_TIMEOUT" \
+        podman ps -a --filter 'name=signalk-' \
         --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>/dev/null) || rc=$?
     if [[ $rc -eq 0 ]]; then
         if [[ -n "$out" ]]; then
@@ -57,8 +64,9 @@ container_snapshot() {
         fi
         return
     fi
-    # 124 is timeout(1)'s "the command was still running" status.
-    if [[ $rc -eq 124 ]]; then
+    # 124 = timeout(1) gave up; 137 = 128+SIGKILL, the escalation landed
+    # because podman ignored SIGTERM. Both mean the same thing to an operator.
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
         echo "  [FAIL] podman did not answer within ${PODMAN_TIMEOUT}s"
         echo "         The c/storage lock is held, usually by a stuck cleanup of an"
         echo "         incomplete layer left behind by a SIGKILLed container create."
