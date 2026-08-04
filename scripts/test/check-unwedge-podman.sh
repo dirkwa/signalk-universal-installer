@@ -40,10 +40,17 @@ fail=0
 # Drive the detector off fixture text instead of the host journal: override
 # journalctl for the duration, and point STORAGE_ROOT at an empty dir so the
 # optional jq source contributes nothing.
+#
+# The stub records its argv to a FILE, not a variable: incomplete_layer_ids runs
+# it inside a `{ ... } | sort -u` pipeline, so the stub executes in a subshell
+# and any variable it sets is lost on return.
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+STORAGE_ROOT="$WORK/store"
+mkdir -p "$STORAGE_ROOT"
+JOURNAL_ARGV="$WORK/journal-argv"
 FIXTURE=""
-journalctl() { printf '%s\n' "$FIXTURE"; }
-STORAGE_ROOT=$(mktemp -d)
-trap 'rm -rf "$STORAGE_ROOT"' EXIT
+journalctl() { printf '%s\n' "$*" >"$JOURNAL_ARGV"; printf '%s\n' "$FIXTURE"; }
 
 assert_ids() {
     local label=$1 expected=$2 got
@@ -86,6 +93,83 @@ assert_ids "unrelated journal lines" ""
 #    contain hex letters. Neither may be mistaken for a layer ID.
 FIXTURE='time="2026-08-04T17:15:45+12:00" level=warning msg="deadbeefcafe accede facade"'
 assert_ids "no false positive without the phrase" ""
+
+# 6. The journal scan must stay bounded. Without this the 7-day window is
+#    untested: every case above passes just as happily against an unbounded
+#    read, which on a busy journal costs minutes on an SD card — in the one
+#    tool an operator runs when the box is already broken.
+FIXTURE=''
+incomplete_layer_ids >/dev/null
+if grep -q -- '--since' "$JOURNAL_ARGV" 2>/dev/null; then
+    echo "  [OK]   journal scan passes --since"
+else
+    echo "  [MISS] journal scan is unbounded (no --since in: $(cat "$JOURNAL_ARGV" 2>/dev/null))"
+    fail=1
+fi
+
+# --- effective storage root ------------------------------------------------
+# Against the wrong graphroot every unmount is a silent no-op. These pin the
+# containers-storage.conf(5) precedence the resolver implements.
+assert_root() {
+    local label=$1 expected=$2 got
+    shift 2
+    got=$(env "$@" bash -c "source '$RECOVERY'; default_storage_root")
+    if [[ "$got" == "$expected" ]]; then
+        echo "  [OK]   $label"
+    else
+        echo "  [MISS] $label"
+        echo "         expected: [$expected]"
+        echo "         got:      [$got]"
+        fail=1
+    fi
+}
+
+CONF_DIR="$WORK/xdgconf"; mkdir -p "$CONF_DIR/containers"
+ETC_STYLE="$WORK/pinned.conf"
+
+printf 'graphroot = "/mnt/ssd/store"
+' > "$CONF_DIR/containers/storage.conf"
+assert_root "graphroot from XDG_CONFIG_HOME" "/mnt/ssd/store" \
+    "HOME=$WORK/home" "XDG_CONFIG_HOME=$CONF_DIR" "CONTAINERS_STORAGE_CONF="
+
+# rootless_storage_path wins over graphroot in the same file — we are always
+# resolving a rootless store here.
+printf 'graphroot = "/mnt/ssd/store"
+rootless_storage_path = "/mnt/ssd/rootless"
+' \
+    > "$CONF_DIR/containers/storage.conf"
+assert_root "rootless_storage_path beats graphroot" "/mnt/ssd/rootless" \
+    "HOME=$WORK/home" "XDG_CONFIG_HOME=$CONF_DIR" "CONTAINERS_STORAGE_CONF="
+
+# CONTAINERS_STORAGE_CONF pins one file outright, ignoring the search path.
+printf 'graphroot = "/mnt/pinned"
+' > "$ETC_STYLE"
+assert_root "CONTAINERS_STORAGE_CONF pins the file" "/mnt/pinned" \
+    "HOME=$WORK/home" "XDG_CONFIG_HOME=$CONF_DIR" "CONTAINERS_STORAGE_CONF=$ETC_STYLE"
+
+# THE STOCK-INSTALL TRAP. Debian and Pi OS ship
+# /usr/share/containers/storage.conf with graphroot = "/var/lib/containers/storage"
+# — the ROOTFUL store, which a rootless podman ignores. An earlier revision of
+# the resolver honoured it and would have pointed this tool at the wrong store
+# on a DEFAULT install. Only rootless_storage_path may carry from a system file.
+SYS_DIR="$WORK/sys"; mkdir -p "$SYS_DIR"
+printf 'graphroot = "/var/lib/containers/storage"\n' > "$SYS_DIR/storage.conf"
+assert_root "system graphroot is ignored for a rootless store" \
+    "$WORK/data/containers/storage" \
+    "HOME=$WORK/home" "XDG_CONFIG_HOME=$WORK/empty" "XDG_DATA_HOME=$WORK/data" \
+    "CONTAINERS_STORAGE_CONF="
+
+# $HOME inside a value is expanded by podman; mirror that.
+# shellcheck disable=SC2016  # the literal $HOME is the fixture's whole point
+printf 'graphroot = "$HOME/relocated"
+' > "$ETC_STYLE"
+assert_root "expands \$HOME in a config value" "$WORK/home/relocated" \
+    "HOME=$WORK/home" "XDG_CONFIG_HOME=$CONF_DIR" "CONTAINERS_STORAGE_CONF=$ETC_STYLE"
+
+# No config anywhere: fall back through XDG_DATA_HOME, not a hardcoded path.
+assert_root "XDG_DATA_HOME fallback" "$WORK/data/containers/storage" \
+    "HOME=$WORK/home" "XDG_CONFIG_HOME=$WORK/empty" "XDG_DATA_HOME=$WORK/data" \
+    "CONTAINERS_STORAGE_CONF="
 
 if [[ $fail -ne 0 ]]; then
     echo "[FAIL] incomplete-layer detector"
