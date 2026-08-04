@@ -24,7 +24,34 @@ QUADLETS=(signalk-server signalk-updater-server signalk-doctor-server)
 # invocation in this script is guarded: the failure mode below blocks them
 # forever, and a recovery tool that hangs is worse than useless.
 PODMAN_TIMEOUT=${PODMAN_TIMEOUT:-15}
-STORAGE_ROOT=${STORAGE_ROOT:-${HOME}/.local/share/containers/storage}
+
+# How long to wait after SIGTERM before sending SIGKILL. This is NOT belt and
+# braces: a podman wedged on the c/storage lock is spinning in kernel space and
+# does NOT respond to SIGTERM — plain `timeout` returns while the process keeps
+# burning a core. Without the follow-up kill, every guarded probe (and every
+# re-run of this script) leaks another spinning podman onto an already-sick box.
+PODMAN_KILL_AFTER=${PODMAN_KILL_AFTER:-5}
+
+# How far back to scan the journal for podman's incomplete-layer marker. The
+# wedge is live *now*, so the line is recent, and an unbounded read of a busy
+# journal costs minutes on an SD card — the opposite of what a recovery tool
+# should do. Widen it for a host that sat wedged longer than this. The layer
+# store (jq path below) carries no time bound at all.
+UNWEDGE_SINCE=${UNWEDGE_SINCE:--7 days}
+
+# c/storage's graphroot. Honour a relocated store (`graphroot=` in
+# storage.conf, common when the store was moved to an SSD) before falling back
+# to the rootless default — against the wrong root every unmount is a silent
+# no-op, and this is the tool of last resort.
+default_storage_root() {
+    local conf="${HOME}/.config/containers/storage.conf" root=''
+    if [[ -r "$conf" ]]; then
+        root=$(sed -n 's/^[[:space:]]*graphroot[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$conf" | tail -1)
+    fi
+    printf '%s' "${root:-${HOME}/.local/share/containers/storage}"
+}
+STORAGE_ROOT=${STORAGE_ROOT:-$(default_storage_root)}
 
 usage() {
     cat <<EOF
@@ -146,7 +173,8 @@ cmd_rollback_all() {
 # its next invocation and removes the layer.
 
 podman_responds() {
-    timeout "$PODMAN_TIMEOUT" podman ps --format '{{.Names}}' >/dev/null 2>&1
+    timeout -k "$PODMAN_KILL_AFTER" "$PODMAN_TIMEOUT" \
+        podman ps --format '{{.Names}}' >/dev/null 2>&1
 }
 
 # Layer IDs podman itself has declared incomplete.
@@ -166,7 +194,7 @@ incomplete_layer_ids() {
         # escaped inside msg="...": `Found incomplete layer \"<id>\", deleting`.
         # Match the phrase, drop everything before it, then take the hex run --
         # matching a literal quote here silently finds nothing.
-        journalctl --user --no-pager -o cat 2>/dev/null \
+        journalctl --user --no-pager -o cat --since "$UNWEDGE_SINCE" 2>/dev/null \
             | grep -o 'Found incomplete layer.*' \
             | grep -oE '[0-9a-f]{12,}' || true
         if command -v jq >/dev/null 2>&1; then
@@ -188,8 +216,18 @@ layer_is_mounted() {
 }
 
 cmd_unwedge_podman() {
+    # Validate rather than ignore. This command SIGKILLs a service and unmounts
+    # filesystems; a typo ("--dryrun", "-n") silently falling through to the
+    # real action is not an acceptable failure mode for a recovery tool.
     local dry=0
-    [[ "${1:-}" == "--dry-run" ]] && dry=1
+    case "${1:-}" in
+        '') ;;
+        --dry-run) dry=1 ;;
+        *)
+            echo "unwedge-podman: unknown argument '${1}' (expected --dry-run)" >&2
+            return 1
+            ;;
+    esac
 
     echo "=== podman unwedge ==="
     if podman_responds; then
@@ -241,7 +279,7 @@ cmd_unwedge_podman() {
         # Lazy: something may still hold a reference into the tree. `podman
         # unshare` joins the existing rootless namespace without taking the
         # storage lock, which is why it still works while podman is wedged.
-        timeout "$PODMAN_TIMEOUT" podman unshare \
+        timeout -k "$PODMAN_KILL_AFTER" "$PODMAN_TIMEOUT" podman unshare \
             umount -l "$STORAGE_ROOT/overlay/${id}/merged" 2>/dev/null \
             || echo "  [WARN] could not unmount ${id:0:12}"
     done
