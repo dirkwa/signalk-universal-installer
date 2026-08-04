@@ -108,8 +108,14 @@ else
 fi
 
 # --- effective storage root ------------------------------------------------
-# Against the wrong graphroot every unmount is a silent no-op. These pin the
-# containers-storage.conf(5) precedence the resolver implements.
+# Against the wrong store every unmount is a silent no-op. These pin the rules
+# verified against real `podman info` with a pinned CONTAINERS_STORAGE_CONF:
+#
+#   * `rootless_storage_path` is the ONLY key that moves a rootless store.
+#     `graphroot` is ignored outright, wherever it appears.
+#   * Exactly one config file is consulted -- the first that exists -- never a
+#     merge across files.
+#   * Both TOML string forms are valid, and $HOME / $UID expand.
 assert_root() {
     local label=$1 expected=$2 got
     shift 2
@@ -125,51 +131,100 @@ assert_root() {
 }
 
 CONF_DIR="$WORK/xdgconf"; mkdir -p "$CONF_DIR/containers"
-ETC_STYLE="$WORK/pinned.conf"
+USER_CONF="$CONF_DIR/containers/storage.conf"
+PINNED="$WORK/pinned.conf"
+SYS_HI="$WORK/sys-etc.conf"
+SYS_LO="$WORK/sys-usrshare.conf"
+BASE_ENV=("HOME=$WORK/home" "XDG_DATA_HOME=$WORK/data" "CONTAINERS_STORAGE_CONF=")
+DEFAULT_ROOT="$WORK/data/containers/storage"
 
-printf 'graphroot = "/mnt/ssd/store"
-' > "$CONF_DIR/containers/storage.conf"
-assert_root "graphroot from XDG_CONFIG_HOME" "/mnt/ssd/store" \
-    "HOME=$WORK/home" "XDG_CONFIG_HOME=$CONF_DIR" "CONTAINERS_STORAGE_CONF="
+# THE STOCK-INSTALL TRAP, and the reason graphroot is never read: Debian and Pi
+# OS ship /usr/share/containers/storage.conf with
+# graphroot = "/var/lib/containers/storage" -- the ROOTFUL store. Honouring it
+# would aim this tool at the wrong place on a DEFAULT install.
+printf 'graphroot = "/var/lib/containers/storage"\n' > "$SYS_LO"
+: > "$SYS_HI"; rm -f "$SYS_HI"
+assert_root "system graphroot ignored (stock install)" "$DEFAULT_ROOT" \
+    "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$WORK/empty" "SYS_STORAGE_CONFS=$SYS_LO"
 
-# rootless_storage_path wins over graphroot in the same file — we are always
-# resolving a rootless store here.
-printf 'graphroot = "/mnt/ssd/store"
-rootless_storage_path = "/mnt/ssd/rootless"
-' \
-    > "$CONF_DIR/containers/storage.conf"
-assert_root "rootless_storage_path beats graphroot" "/mnt/ssd/rootless" \
-    "HOME=$WORK/home" "XDG_CONFIG_HOME=$CONF_DIR" "CONTAINERS_STORAGE_CONF="
+# ...but graphroot in the USER's own config IS honoured. Measured, not assumed:
+# rootless podman substitutes its own default only for a graphroot that came
+# from a "default" config location, and the user's own file is not one.
+printf 'graphroot = "/mnt/ssd/store"\n' > "$USER_CONF"
+assert_root "user graphroot IS honoured" "/mnt/ssd/store" \
+    "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$CONF_DIR" "SYS_STORAGE_CONFS="
+
+# Pinning the very same file via CONTAINERS_STORAGE_CONF makes it the "default"
+# config, and podman then drops its graphroot. Same bytes, different answer.
+printf 'graphroot = "/mnt/ssd/store"\n' > "$PINNED"
+assert_root "pinned-file graphroot is ignored" "$DEFAULT_ROOT" \
+    "HOME=$WORK/home" "XDG_DATA_HOME=$WORK/data" "XDG_CONFIG_HOME=$WORK/empty" \
+    "CONTAINERS_STORAGE_CONF=$PINNED" "SYS_STORAGE_CONFS="
+
+# rootless_storage_path does NOT outrank graphroot -- it fills in where
+# graphroot did not already set the store. In the user's own file graphroot
+# survives, so it wins. Measured against podman info; the reverse looks more
+# natural and is wrong.
+printf 'graphroot = "/mnt/ssd/store"\nrootless_storage_path = "/mnt/ssd/rootless"\n' \
+    > "$USER_CONF"
+assert_root "user file: graphroot beats rootless path" "/mnt/ssd/store" \
+    "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$CONF_DIR" "SYS_STORAGE_CONFS="
+
+# Same two lines in a PINNED file invert the answer: graphroot is discarded
+# first, so rootless_storage_path is what remains.
+printf 'graphroot = "/mnt/ssd/store"\nrootless_storage_path = "/mnt/ssd/rootless"\n' \
+    > "$PINNED"
+assert_root "pinned file: rootless path is what is left" "/mnt/ssd/rootless" \
+    "HOME=$WORK/home" "XDG_DATA_HOME=$WORK/data" "XDG_CONFIG_HOME=$WORK/empty" \
+    "CONTAINERS_STORAGE_CONF=$PINNED" "SYS_STORAGE_CONFS="
+
+printf 'rootless_storage_path = "/mnt/ssd/rootless"\n' > "$USER_CONF"
+assert_root "rootless_storage_path from XDG_CONFIG_HOME" "/mnt/ssd/rootless" \
+    "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$CONF_DIR" "SYS_STORAGE_CONFS="
+
+# TOML literal strings are valid and podman accepts them.
+printf "rootless_storage_path = '/mnt/ssd/literal'\n" > "$USER_CONF"
+assert_root "TOML literal (single-quoted) value" "/mnt/ssd/literal" \
+    "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$CONF_DIR" "SYS_STORAGE_CONFS="
+
+# Single file, no merge: a user config that exists but is silent on the key
+# falls to the DEFAULT rather than deferring to a lower-precedence file.
+printf 'driver = "overlay"\n' > "$USER_CONF"
+printf 'rootless_storage_path = "/mnt/should-not-be-used"\n' > "$SYS_LO"
+assert_root "silent user config does not fall through" "$DEFAULT_ROOT" \
+    "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$CONF_DIR" "SYS_STORAGE_CONFS=$SYS_LO"
+
+# Same rule inside the system search path: the first readable file decides, so a
+# lower-precedence value must not be picked up when the higher one is silent.
+rm -f "$USER_CONF"
+printf 'driver = "overlay"\n' > "$SYS_HI"
+printf 'rootless_storage_path = "/mnt/should-not-be-used"\n' > "$SYS_LO"
+assert_root "lower system file ignored when higher exists" "$DEFAULT_ROOT" \
+    "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$WORK/empty" "SYS_STORAGE_CONFS=$SYS_HI:$SYS_LO"
+
+# ...but it IS used when the higher-precedence file is absent.
+rm -f "$SYS_HI"
+assert_root "lower system file used when higher absent" "/mnt/should-not-be-used" \
+    "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$WORK/empty" "SYS_STORAGE_CONFS=$SYS_HI:$SYS_LO"
 
 # CONTAINERS_STORAGE_CONF pins one file outright, ignoring the search path.
-printf 'graphroot = "/mnt/pinned"
-' > "$ETC_STYLE"
+printf 'rootless_storage_path = "/mnt/pinned"\n' > "$PINNED"
 assert_root "CONTAINERS_STORAGE_CONF pins the file" "/mnt/pinned" \
-    "HOME=$WORK/home" "XDG_CONFIG_HOME=$CONF_DIR" "CONTAINERS_STORAGE_CONF=$ETC_STYLE"
+    "HOME=$WORK/home" "XDG_DATA_HOME=$WORK/data" "XDG_CONFIG_HOME=$CONF_DIR" \
+    "CONTAINERS_STORAGE_CONF=$PINNED" "SYS_STORAGE_CONFS=$SYS_LO"
 
-# THE STOCK-INSTALL TRAP. Debian and Pi OS ship
-# /usr/share/containers/storage.conf with graphroot = "/var/lib/containers/storage"
-# — the ROOTFUL store, which a rootless podman ignores. An earlier revision of
-# the resolver honoured it and would have pointed this tool at the wrong store
-# on a DEFAULT install. Only rootless_storage_path may carry from a system file.
-SYS_DIR="$WORK/sys"; mkdir -p "$SYS_DIR"
-printf 'graphroot = "/var/lib/containers/storage"\n' > "$SYS_DIR/storage.conf"
-assert_root "system graphroot is ignored for a rootless store" \
-    "$WORK/data/containers/storage" \
-    "HOME=$WORK/home" "XDG_CONFIG_HOME=$WORK/empty" "XDG_DATA_HOME=$WORK/data" \
-    "CONTAINERS_STORAGE_CONF="
-
-# $HOME inside a value is expanded by podman; mirror that.
-# shellcheck disable=SC2016  # the literal $HOME is the fixture's whole point
-printf 'graphroot = "$HOME/relocated"
-' > "$ETC_STYLE"
-assert_root "expands \$HOME in a config value" "$WORK/home/relocated" \
-    "HOME=$WORK/home" "XDG_CONFIG_HOME=$CONF_DIR" "CONTAINERS_STORAGE_CONF=$ETC_STYLE"
+# podman expands these inside a value; mirror it. The literal, unexpanded
+# $HOME is the whole point of both the fixture and the label.
+# shellcheck disable=SC2016
+printf 'rootless_storage_path = "$HOME/relocated"\n' > "$PINNED"
+# shellcheck disable=SC2016
+assert_root 'expands $HOME in a config value' "$WORK/home/relocated" \
+    "HOME=$WORK/home" "XDG_DATA_HOME=$WORK/data" "XDG_CONFIG_HOME=$CONF_DIR" \
+    "CONTAINERS_STORAGE_CONF=$PINNED" "SYS_STORAGE_CONFS="
 
 # No config anywhere: fall back through XDG_DATA_HOME, not a hardcoded path.
-assert_root "XDG_DATA_HOME fallback" "$WORK/data/containers/storage" \
-    "HOME=$WORK/home" "XDG_CONFIG_HOME=$WORK/empty" "XDG_DATA_HOME=$WORK/data" \
-    "CONTAINERS_STORAGE_CONF="
+assert_root "XDG_DATA_HOME fallback" "$DEFAULT_ROOT" \
+    "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$WORK/empty" "SYS_STORAGE_CONFS="
 
 if [[ $fail -ne 0 ]]; then
     echo "[FAIL] incomplete-layer detector"
