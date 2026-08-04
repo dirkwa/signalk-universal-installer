@@ -184,6 +184,32 @@ ExecStartPre=/bin/sh -c 'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -
 # retry at all. Not raised further — the `systemctl restart` blocks up to this
 # long, so it's also a ceiling on how long the install can stall here.
 TimeoutStartSec=300
+# TimeoutStopSec must be >= TimeoutStartSec, and systemd's 90s default made
+# it 3.3x SMALLER. That asymmetry is what turns an interrupted version switch
+# into a wedged host. ExecStart is `podman run --replace --rm`, budgeted 300s
+# above because container CREATE is slow on SD cards. Stop the unit while that
+# create is in flight — the updater's rollback does exactly this when a health
+# check gives up — and systemd SIGTERMs podman, waits only the default 90s,
+# then (KillMode=mixed, FinalKillSignal=9) SIGKILLs the whole cgroup mid-write.
+#
+# The wreckage from that kill is not a failed start, it is an unusable podman.
+# The half-created container leaves an "incomplete layer" whose overlayfs mount
+# survives the kill. podman's own cleanup then walks INTO the still-mounted
+# merged dir; every unlink needs a whiteout, the orphaned workdir refuses
+# (`overlayfs: failed to lock workdir+upperdir` in dmesg), and it spins forever
+# holding c/storage's global lock. Every later podman command — `podman ps`
+# included — blocks behind it, so Restart=always cannot recover the box either:
+# the retry hangs too. Recovery is an SSH session (see
+# `signalk-recovery unwedge-podman`).
+#
+# Matching 300s rather than a smaller bump: the budgets have to be equal or the
+# same race just reopens at the new seam. The cost is bounded — the normal stop
+# path is `podman rm -f` against a container with StopTimeout=5 and returns in
+# seconds; this budget is only ever reached when podman is mid-storage-write,
+# which is exactly the case worth waiting out. A `systemctl restart` landing on
+# a slow create can now block for start+stop, which is the intended trade: a
+# slow version switch beats a nav server that needs SSH to come back.
+TimeoutStopSec=300
 # QuestDB (managed inside signalk-server) asks for 1048576 open files and
 # risks WAL corruption with less. This unit-level request is the effective
 # limit only because the installer raises the parent user@.service bounding

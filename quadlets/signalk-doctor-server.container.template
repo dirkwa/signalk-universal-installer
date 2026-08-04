@@ -99,6 +99,11 @@ Label=io.signalk.role=doctor
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=120
+# Matches TimeoutStartSec — see the long rationale on the same key in
+# signalk-server.container.template. systemd's 90s default is smaller than the
+# start budget, so a stop landing on a slow container create gets SIGKILLed
+# mid-write and leaves an incomplete layer that wedges podman globally.
+TimeoutStopSec=120
 
 [Install]
 WantedBy=default.target
