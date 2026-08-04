@@ -39,17 +39,68 @@ PODMAN_KILL_AFTER=${PODMAN_KILL_AFTER:-5}
 # store (jq path below) carries no time bound at all.
 UNWEDGE_SINCE=${UNWEDGE_SINCE:--7 days}
 
-# c/storage's graphroot. Honour a relocated store (`graphroot=` in
-# storage.conf, common when the store was moved to an SSD) before falling back
-# to the rootless default — against the wrong root every unmount is a silent
-# no-op, and this is the tool of last resort.
+# Read one TOML key out of a storage.conf. Values are quoted strings per the
+# format; last assignment in the file wins.
+storage_conf_value() {
+    local file=$1 key=$2
+    [[ -r "$file" ]] || return 1
+    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" \
+        | tail -1
+}
+
+# Expand the couple of variables podman itself expands inside a config value,
+# and supply the rootless default when nothing was configured.
+expand_store_path() {
+    local root=$1
+    root=${root//\$HOME/$HOME}
+    root=${root//\$UID/$(id -u)}
+    printf '%s' "${root:-${XDG_DATA_HOME:-$HOME/.local/share}/containers/storage}"
+}
+
+# Resolve podman's EFFECTIVE ROOTLESS store. Getting this wrong makes every
+# unmount below a silent no-op, and this is the tool of last resort — so follow
+# containers-storage.conf(5) rather than guessing. Asking `podman info` is not
+# an option: by the time this runs, podman is the wedged thing.
+#
+# The trap, and why `graphroot` is NOT read from the system files: stock Debian
+# and Pi OS ship /usr/share/containers/storage.conf carrying
+# `graphroot = "/var/lib/containers/storage"`. That is the ROOTFUL store. A
+# rootless podman ignores it — verified on a stock Pi 4, where podman reports
+# ~/.local/share/containers/storage while that file says /var/lib. Honouring a
+# system-level graphroot here would send this tool at the wrong store on a
+# DEFAULT install, which is the exact silent failure the resolver exists to
+# avoid.
+#
+# So: `rootless_storage_path` is the only key that carries from a system config
+# (that is precisely what it is for). `graphroot` counts only from a user-level
+# config — the user's own file, or one pinned via CONTAINERS_STORAGE_CONF —
+# because there it really is this user's store. A user-level file replaces the
+# system ones wholesale rather than merging with them.
 default_storage_root() {
-    local conf="${HOME}/.config/containers/storage.conf" root=''
-    if [[ -r "$conf" ]]; then
-        root=$(sed -n 's/^[[:space:]]*graphroot[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-            "$conf" | tail -1)
+    local user_files=() sys_files=() f root=''
+    if [[ -n "${CONTAINERS_STORAGE_CONF:-}" ]]; then
+        user_files=("$CONTAINERS_STORAGE_CONF")
+    else
+        user_files=("${XDG_CONFIG_HOME:-$HOME/.config}/containers/storage.conf")
+        sys_files=(/etc/containers/storage.conf /usr/share/containers/storage.conf)
     fi
-    printf '%s' "${root:-${HOME}/.local/share/containers/storage}"
+
+    for f in "${user_files[@]}"; do
+        [[ -r "$f" ]] || continue
+        root=$(storage_conf_value "$f" rootless_storage_path || true)
+        [[ -n "$root" ]] || root=$(storage_conf_value "$f" graphroot || true)
+        # Present but silent on both keys still means "use the default" — it
+        # replaced the system files, it did not defer to them.
+        expand_store_path "$root"
+        return
+    done
+
+    for f in "${sys_files[@]}"; do
+        [[ -r "$f" ]] || continue
+        root=$(storage_conf_value "$f" rootless_storage_path || true)
+        [[ -n "$root" ]] && break
+    done
+    expand_store_path "$root"
 }
 STORAGE_ROOT=${STORAGE_ROOT:-$(default_storage_root)}
 
@@ -219,15 +270,25 @@ cmd_unwedge_podman() {
     # Validate rather than ignore. This command SIGKILLs a service and unmounts
     # filesystems; a typo ("--dryrun", "-n") silently falling through to the
     # real action is not an acceptable failure mode for a recovery tool.
+    #
+    # Count-based, not `case "${1:-}"`: that form cannot tell "no argument" from
+    # an explicit empty one, and it says nothing about arguments past the first.
+    # `signalk recover` execs this script with the user's whole argv, so trailing
+    # arguments do reach here and must not be dropped in silence.
     local dry=0
-    case "${1:-}" in
-        '') ;;
-        --dry-run) dry=1 ;;
-        *)
-            echo "unwedge-podman: unknown argument '${1}' (expected --dry-run)" >&2
-            return 1
-            ;;
-    esac
+    if [[ $# -gt 1 ]]; then
+        echo "unwedge-podman: too many arguments (only --dry-run is accepted)" >&2
+        return 1
+    fi
+    if [[ $# -eq 1 ]]; then
+        case "$1" in
+            --dry-run) dry=1 ;;
+            *)
+                echo "unwedge-podman: unknown argument '${1}' (expected --dry-run)" >&2
+                return 1
+                ;;
+        esac
+    fi
 
     echo "=== podman unwedge ==="
     if podman_responds; then
@@ -337,7 +398,7 @@ main() {
         rollback-doctor)  cmd_rollback_doctor ;;
         rollback-all)     cmd_rollback_all ;;
         doctor)           cmd_doctor ;;
-        unwedge-podman)   cmd_unwedge_podman "${2:-}" ;;
+        unwedge-podman)   shift; cmd_unwedge_podman "$@" ;;
         -h|--help|help)   usage ;;
         *)                usage; exit 1 ;;
     esac
