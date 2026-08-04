@@ -261,7 +261,19 @@ cmd_unwedge_podman() {
 
 cmd_doctor() {
     echo "--- podman ps ---"
-    podman ps -a --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>&1 || true
+    # timeout-guarded: this is the SSH-only safety net, so it must still answer
+    # when podman is the broken thing. An unguarded `podman ps` blocks forever
+    # behind a stuck c/storage lock -- the exact fault an operator runs this
+    # command to investigate -- and the dump never reaches the rest of its
+    # sections. Name the condition and point at the fix instead.
+    local rc=0
+    timeout "$PODMAN_TIMEOUT" podman ps -a \
+        --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>&1 || rc=$?
+    if [[ $rc -eq 124 ]]; then
+        echo "  [FAIL] podman did not answer within ${PODMAN_TIMEOUT}s —"
+        echo "         c/storage lock held. Recover with:"
+        echo "           signalk-recovery unwedge-podman"
+    fi
     echo
     echo "--- systemd-user signalk-* units ---"
     systemctl --user list-units --all 'signalk-*' 2>&1 || true
