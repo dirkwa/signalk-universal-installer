@@ -69,6 +69,11 @@ checkout; that's what the dev environment is for.
   `signalk-devpod-claude` — per-box shared storage (not backups) that survives both
   `--recreate` and `devpod delete`. The workspace checkout itself is lost on delete — commit
   and push first. Full reset = `podman volume rm` (or `docker volume rm`) of all three.
+  Migration trap for workspaces created **before** the plugins volume existed: the volume
+  mount *shadows* plugin clones that lived in the workspace's own `dev/plugins/` — they still
+  exist on the host under `~/.devpod/agent/contexts/default/workspaces/<id>/content/dev/plugins/`,
+  so copy them into the volume (or re-clone) **before** a `devpod delete`, which removes the
+  workspace content including those old copies.
 
 ## Updating — four things change on four schedules
 
