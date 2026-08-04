@@ -39,14 +39,24 @@ PODMAN_KILL_AFTER=${PODMAN_KILL_AFTER:-5}
 # store (jq path below) carries no time bound at all.
 UNWEDGE_SINCE=${UNWEDGE_SINCE:--7 days}
 
-# Read one TOML key out of a storage.conf. Values are quoted strings per the
-# format; last assignment in the file wins.
+# Read one TOML string value out of a storage.conf. Handles BOTH TOML string
+# forms — basic ("…") and literal ('…'). podman accepts either (verified with
+# `podman info` against a pinned config), and matching only double quotes
+# returns empty for a perfectly valid file, silently landing this tool on the
+# wrong store. Last assignment in the file wins; commented-out examples are
+# skipped because the key must start the line.
 storage_conf_value() {
     local file=$1 key=$2
     [[ -r "$file" ]] || return 1
-    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" \
-        | tail -1
+    sed -n \
+        -e "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+        -e "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" \
+        "$file" | tail -1
 }
+
+# System-level storage.conf search path, highest precedence first. Overridable
+# so the test suite can route the resolver at fixtures instead of the real /etc.
+SYS_STORAGE_CONFS=${SYS_STORAGE_CONFS:-/etc/containers/storage.conf:/usr/share/containers/storage.conf}
 
 # Expand the couple of variables podman itself expands inside a config value,
 # and supply the rootless default when nothing was configured.
@@ -58,47 +68,63 @@ expand_store_path() {
 }
 
 # Resolve podman's EFFECTIVE ROOTLESS store. Getting this wrong makes every
-# unmount below a silent no-op, and this is the tool of last resort — so follow
-# containers-storage.conf(5) rather than guessing. Asking `podman info` is not
-# an option: by the time this runs, podman is the wedged thing.
+# unmount below a silent no-op, and this is the tool of last resort. Asking
+# `podman info` is not an option: by the time this runs, podman is the wedged
+# thing. This whole stack is rootless (systemctl --user, quadlets under
+# ~/.config), so the rootless rules are the only ones that apply.
 #
-# The trap, and why `graphroot` is NOT read from the system files: stock Debian
-# and Pi OS ship /usr/share/containers/storage.conf carrying
-# `graphroot = "/var/lib/containers/storage"`. That is the ROOTFUL store. A
-# rootless podman ignores it — verified on a stock Pi 4, where podman reports
-# ~/.local/share/containers/storage while that file says /var/lib. Honouring a
-# system-level graphroot here would send this tool at the wrong store on a
-# DEFAULT install, which is the exact silent failure the resolver exists to
-# avoid.
+# The two keys interact in a way that is measured, not assumed — every rule
+# below was checked against `podman info`, and two of them are the opposite of
+# what they look like.
 #
-# So: `rootless_storage_path` is the only key that carries from a system config
-# (that is precisely what it is for). `graphroot` counts only from a user-level
-# config — the user's own file, or one pinned via CONTAINERS_STORAGE_CONF —
-# because there it really is this user's store. A user-level file replaces the
-# system ones wholesale rather than merging with them.
+# `graphroot` is honoured ONLY from the user's own config:
+#
+#   $XDG_CONFIG_HOME/containers/storage.conf   graphroot HONOURED
+#   $HOME/.config/containers/storage.conf      graphroot HONOURED
+#   CONTAINERS_STORAGE_CONF=<file>             graphroot IGNORED
+#   /etc, /usr/share                           graphroot IGNORED
+#
+# Rootless podman replaces a graphroot that came from a "default" config
+# location with its own default, and pinning a file via CONTAINERS_STORAGE_CONF
+# makes that file the default one — so the same line is kept in the user's file
+# and dropped in a pinned copy of it. The system half matters most in practice:
+# Debian and Pi OS ship /usr/share/containers/storage.conf carrying
+# `graphroot = "/var/lib/containers/storage"` — the ROOTFUL store — so reading
+# it would aim this tool at the wrong place on a DEFAULT install.
+#
+# And `rootless_storage_path` does NOT simply outrank graphroot. It applies only
+# where graphroot did not already set the store — i.e. graphroot absent, or
+# discarded because it came from a pinned/system file. With BOTH keys in the
+# user's own config, graphroot wins; with both in a pinned file,
+# rootless_storage_path wins, because graphroot was thrown away first.
+#
+# Exactly ONE config file is consulted, never a merge: podman takes the first
+# that exists, walking CONTAINERS_STORAGE_CONF, then $XDG_CONFIG_HOME/containers,
+# then /etc, then /usr/share. A file that exists but is silent on both keys
+# means "use the default" — it replaced the lower files, it did not defer to
+# them.
 default_storage_root() {
-    local user_files=() sys_files=() f root=''
+    local files=() sys=() f root='' user_conf=''
     if [[ -n "${CONTAINERS_STORAGE_CONF:-}" ]]; then
-        user_files=("$CONTAINERS_STORAGE_CONF")
+        files=("$CONTAINERS_STORAGE_CONF")
     else
-        user_files=("${XDG_CONFIG_HOME:-$HOME/.config}/containers/storage.conf")
-        sys_files=(/etc/containers/storage.conf /usr/share/containers/storage.conf)
+        user_conf="${XDG_CONFIG_HOME:-$HOME/.config}/containers/storage.conf"
+        files=("$user_conf")
+        if [[ -n "$SYS_STORAGE_CONFS" ]]; then
+            IFS=':' read -r -a sys <<< "$SYS_STORAGE_CONFS"
+            files+=("${sys[@]}")
+        fi
     fi
-
-    for f in "${user_files[@]}"; do
+    for f in "${files[@]}"; do
         [[ -r "$f" ]] || continue
-        root=$(storage_conf_value "$f" rootless_storage_path || true)
-        [[ -n "$root" ]] || root=$(storage_conf_value "$f" graphroot || true)
-        # Present but silent on both keys still means "use the default" — it
-        # replaced the system files, it did not defer to them.
-        expand_store_path "$root"
-        return
-    done
-
-    for f in "${sys_files[@]}"; do
-        [[ -r "$f" ]] || continue
-        root=$(storage_conf_value "$f" rootless_storage_path || true)
-        [[ -n "$root" ]] && break
+        # Only the user's own file gets a say via graphroot, and there it is
+        # tried FIRST — rootless_storage_path is the fallback, not the override.
+        if [[ -n "$user_conf" && "$f" == "$user_conf" ]]; then
+            root=$(storage_conf_value "$f" graphroot || true)
+        fi
+        [[ -n "$root" ]] || root=$(storage_conf_value "$f" rootless_storage_path || true)
+        # First readable file decides, whatever it says or does not say.
+        break
     done
     expand_store_path "$root"
 }
@@ -263,7 +289,11 @@ incomplete_layer_ids() {
 # so it is absent from our own /proc/self/mountinfo -- scan every readable
 # process instead. -s swallows the races against processes that exit mid-scan.
 layer_is_mounted() {
-    grep -lsF "/overlay/${1}/merged" /proc/[0-9]*/mountinfo >/dev/null 2>&1
+    # /dev/null guarantees at least one file argument. Today the glob always
+    # matches, but grep with ZERO file arguments reads stdin — a hang, in the
+    # one tool that must never hang. One `shopt -s nullglob` anywhere above
+    # would be enough to turn that on; this makes it structurally impossible.
+    grep -lsF "/overlay/${1}/merged" /dev/null /proc/[0-9]*/mountinfo >/dev/null 2>&1
 }
 
 cmd_unwedge_podman() {
