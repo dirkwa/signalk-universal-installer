@@ -229,7 +229,14 @@ managed_container_running() {
     command -v podman >/dev/null 2>&1 || return 1
     # Cannot confirm ownership while podman is blocked; treat as "not running"
     # so check_ports reports the port conflict rather than hanging on it.
-    (( PODMAN_WEDGED )) && return 1
+    #
+    # Spelled as an `if` rather than `(( … )) && return 1`: the arithmetic form
+    # evaluates to a non-zero EXIT status when the flag is 0, which under set -e
+    # is only harmless while every caller happens to invoke this from a
+    # conditional. That is the caller's property, not this function's.
+    if (( PODMAN_WEDGED )); then
+        return 1
+    fi
     podman_guarded ps --filter "name=^${name}$" --format '{{.Names}}' 2>/dev/null \
         | grep -qx "$name"
 }
