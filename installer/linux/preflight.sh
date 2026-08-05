@@ -178,12 +178,66 @@ is_verify_mode() {
     [[ -f "$marker" ]] && grep -q '"bootstrappedAt"' "$marker" 2>/dev/null
 }
 
+# --- podman responsiveness -------------------------------------------------
+# Podman does not fail when its storage lock is stuck -- it BLOCKS, forever. A
+# SIGKILLed container create leaves a layer flagged `incomplete` whose overlayfs
+# mount survives; podman's cleanup spins on it holding the global c/storage
+# lock, and every later podman command queues behind that. Preflight runs before
+# anything can fix it, so an unguarded call here hangs the whole installer with
+# no output -- observed on a Pi 4, where `curl … | bash` stopped dead after the
+# /tmp notice and printed nothing further.
+PODMAN_TIMEOUT=${PODMAN_TIMEOUT:-15}
+PODMAN_KILL_AFTER=${PODMAN_KILL_AFTER:-5}
+PODMAN_WEDGED=0
+
+# -k is load-bearing, not defensive. A podman wedged on the storage lock spins
+# in kernel space and IGNORES SIGTERM, and timeout(1) then waits for the child
+# rather than returning -- so a plain `timeout` bounds nothing at all. Measured
+# against a SIGTERM-ignoring stub: `timeout 3` returned after 121 SECONDS;
+# `timeout -k 2 3` returned after 5.
+podman_guarded() {
+    timeout -k "$PODMAN_KILL_AFTER" "$PODMAN_TIMEOUT" podman "$@"
+}
+
+# One probe, one diagnosis. Guarding each call site individually would leave the
+# operator reading several vague timeouts instead of the one sentence that says
+# what to run, so establish the fact once and let the rest skip cleanly.
+check_podman_responsive() {
+    command -v podman >/dev/null 2>&1 || return 0
+    if podman_guarded ps --format '{{.Names}}' >/dev/null 2>&1; then
+        ok "Podman responds"
+        return 0
+    fi
+    PODMAN_WEDGED=1
+    err "Podman did not answer within ${PODMAN_TIMEOUT}s — its storage lock is stuck."
+    err "  Usual cause: a container create was SIGKILLed (an interrupted version"
+    err "  switch, or a reboot mid-install), leaving an incomplete layer whose"
+    err "  overlayfs mount survives. Podman's cleanup then spins on it forever"
+    err "  holding the global lock, so every podman command blocks."
+    err "  Confirm:  journalctl --user | grep -i 'incomplete layer'"
+    err "            dmesg | grep -i overlayfs"
+    err "  Recover:  ~/.local/bin/signalk-recovery unwedge-podman"
+    err "  (on an install too old to have that command, fetch a current one:"
+    err "   curl -fsSL ${PAGES_BASE:-https://dirkwa.github.io/signalk-universal-installer}/installer/linux/signalk-recovery.tmpl -o /tmp/skr && bash /tmp/skr unwedge-podman)"
+    fail "Podman unresponsive — the install would hang on the next podman call"
+}
+
 # True if a named container is currently running. Used to decide whether a
 # bound port is held by the managed container that should own it.
 managed_container_running() {
     local name=$1
     command -v podman >/dev/null 2>&1 || return 1
-    podman ps --filter "name=^${name}$" --format '{{.Names}}' 2>/dev/null \
+    # Cannot confirm ownership while podman is blocked; treat as "not running"
+    # so check_ports reports the port conflict rather than hanging on it.
+    #
+    # Spelled as an `if` rather than `(( … )) && return 1`: the arithmetic form
+    # evaluates to a non-zero EXIT status when the flag is 0, which under set -e
+    # is only harmless while every caller happens to invoke this from a
+    # conditional. That is the caller's property, not this function's.
+    if (( PODMAN_WEDGED )); then
+        return 1
+    fi
+    podman_guarded ps --filter "name=^${name}$" --format '{{.Names}}' 2>/dev/null \
         | grep -qx "$name"
 }
 
@@ -419,8 +473,24 @@ check_podman() {
         warn "Podman not installed — installer will install it"
         return
     fi
+    if (( PODMAN_WEDGED )); then
+        warn "Skipped podman version check — podman is not responding"
+        return
+    fi
     local v
-    v=$(podman --version 2>/dev/null | awk '{print $3}')
+    # Guarded like every other podman call. `--version` should never touch the
+    # store, but "should never" is exactly the assumption that turns preflight
+    # into a silent hang, and the cost of being wrong is the whole installer.
+    #
+    # `|| true` is required, not decorative: timeout -k kills with SIGKILL, the
+    # pipeline exit becomes 137 under `set -o pipefail`, and an unguarded
+    # assignment then trips `set -e` and takes the whole preflight down with it
+    # -- turning a guard against hanging into a silent exit 137 mid-run.
+    v=$(podman_guarded --version 2>/dev/null | awk '{print $3}' || true)
+    if [[ -z "$v" ]]; then
+        warn "Could not read podman version (no response) — skipping version gate"
+        return
+    fi
     # Compare major.minor only
     local req_major=${PODMAN_MIN_VERSION%%.*}
     local req_minor=${PODMAN_MIN_VERSION#*.}
@@ -444,8 +514,8 @@ check_podman() {
 # so fall back to the packaged locations.
 check_aardvark_dns() {
     local p=""
-    if command -v podman >/dev/null 2>&1; then
-        p="$(podman info --format '{{.Host.NetworkBackendInfo.DNS.Path}}' 2>/dev/null || true)"
+    if command -v podman >/dev/null 2>&1 && (( ! PODMAN_WEDGED )); then
+        p="$(podman_guarded info --format '{{.Host.NetworkBackendInfo.DNS.Path}}' 2>/dev/null || true)"
     fi
     if [[ -n "$p" && -x "$p" ]] \
         || [[ -x /usr/lib/podman/aardvark-dns || -x /usr/libexec/podman/aardvark-dns ]] \
@@ -580,8 +650,12 @@ check_orphan_containers() {
     if ! command -v podman >/dev/null 2>&1; then
         return 0
     fi
+    if (( PODMAN_WEDGED )); then
+        warn "Skipped orphan-container scan — podman is not responding"
+        return 0
+    fi
     local orphans=()
-    mapfile -t orphans < <(podman ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | _orphan_names_from_ps)
+    mapfile -t orphans < <(podman_guarded ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | _orphan_names_from_ps)
 
     if (( ${#orphans[@]} == 0 )); then
         ok "No orphan signalk-server containers"
@@ -601,7 +675,7 @@ check_orphan_containers() {
     read -r reply </dev/tty || return 0
     case "$reply" in
         y|Y|yes|YES)
-            if podman rm -f "${orphans[@]}" >/dev/null 2>&1; then
+            if podman_guarded rm -f "${orphans[@]}" >/dev/null 2>&1; then
                 ok "Removed orphan container(s): ${orphans[*]}"
             else
                 warn "Failed to remove some orphan container(s). Remove manually: podman rm -f ${orphans[*]}"
@@ -647,6 +721,9 @@ main() {
     check_ram
     check_disk
     check_tmp_on_tmpfs
+    # Before check_ports, which is the first check that touches container
+    # storage and therefore the first that can hang.
+    check_podman_responsive
     check_ports
     check_cgroups_v2
     check_user_slice_delegation
