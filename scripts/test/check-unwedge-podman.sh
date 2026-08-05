@@ -226,6 +226,47 @@ assert_root 'expands $HOME in a config value' "$WORK/home/relocated" \
 assert_root "XDG_DATA_HOME fallback" "$DEFAULT_ROOT" \
     "${BASE_ENV[@]}" "XDG_CONFIG_HOME=$WORK/empty" "SYS_STORAGE_CONFS="
 
+# --- namespace entry and escalation ----------------------------------------
+# The tool must not depend on podman to repair podman. `podman unshare` was the
+# original way into the namespace; on a second real incident it HUNG, because
+# unshare still initialises the store -- the thing that is blocked. nsenter into
+# a live conmon touches no podman code, which is why it is now preferred.
+if declare -F mount_ns_pid >/dev/null; then
+    echo "  [OK]   mount_ns_pid helper present"
+else
+    echo "  [MISS] mount_ns_pid helper missing"; fail=1
+fi
+
+# mount_ns_pid must pick a CONMON, never a podman process: conmons are the
+# long-lived per-container supervisors, and none of them can be the wedged one.
+if grep -q 'comm" 2>/dev/null)" == conmon' "$RECOVERY"; then
+    echo "  [OK]   namespace entry targets a conmon, not a podman process"
+else
+    echo "  [MISS] namespace entry does not pin conmon"; fail=1
+fi
+
+# A layer with no mount anywhere must not resolve to some unrelated pid.
+if mount_ns_pid deadbeefdeadbeefdeadbeefdeadbeef >/dev/null 2>&1; then
+    echo "  [MISS] mount_ns_pid matched a layer that is not mounted"; fail=1
+else
+    echo "  [OK]   unmounted layer yields no namespace pid"
+fi
+
+# Dropping the mount is not always enough -- observed on a Pi 4, where podman
+# still spun on the layer afterwards and the directory had to go. Escalation
+# must exist, and must be gated on podman still being unresponsive so a healthy
+# host never has a layer directory deleted underneath it.
+if declare -F remove_layer_dir >/dev/null; then
+    echo "  [OK]   remove_layer_dir escalation present"
+else
+    echo "  [MISS] remove_layer_dir escalation missing"; fail=1
+fi
+if grep -q '! podman_responds; then' "$RECOVERY"; then
+    echo "  [OK]   escalation gated on podman still being wedged"
+else
+    echo "  [MISS] escalation not gated — could delete on a healthy host"; fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo "[FAIL] incomplete-layer detector"
     exit 1
