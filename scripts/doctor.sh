@@ -32,6 +32,52 @@ check() {
     fi
 }
 
+# Seconds to wait on podman before declaring it wedged, and how long after
+# SIGTERM to escalate to SIGKILL. The escalation is load-bearing: a podman
+# wedged on the c/storage lock spins in kernel space and IGNORES SIGTERM, and
+# timeout(1) then waits for the child rather than returning -- so a plain
+# `timeout` bounds nothing at all. Measured against a SIGTERM-ignoring stub,
+# `timeout 3` returned only after 121s; `timeout -k 2 3` returned after 5s.
+PODMAN_TIMEOUT=${PODMAN_TIMEOUT:-15}
+PODMAN_KILL_AFTER=${PODMAN_KILL_AFTER:-5}
+
+# Every podman call here is timeout-guarded, because podman has a failure mode
+# where it blocks FOREVER rather than erroring: a SIGKILLed container create
+# leaves an incomplete layer whose overlayfs mount survives, podman's cleanup
+# spins on it holding the global c/storage lock, and every later command --
+# `podman ps` included -- queues behind that lock.
+#
+# Unguarded, this probe hangs the operator's terminal at exactly the moment
+# they most need an answer, and prints nothing at all. Worse, the closing hint
+# below sends them to `signalk-recovery`, so the whole diagnostic path dies
+# together. A wedged podman is a finding; report it as one.
+container_snapshot() {
+    local out rc=0
+    out=$(timeout -k "$PODMAN_KILL_AFTER" "$PODMAN_TIMEOUT" \
+        podman ps -a --filter 'name=signalk-' \
+        --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>/dev/null) || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        if [[ -n "$out" ]]; then
+            printf '%s\n' "$out"
+        else
+            echo "  (no signalk-* containers)"
+        fi
+        return
+    fi
+    # 124 = timeout(1) gave up; 137 = 128+SIGKILL, the escalation landed
+    # because podman ignored SIGTERM. Both mean the same thing to an operator.
+    if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "  [FAIL] podman did not answer within ${PODMAN_TIMEOUT}s"
+        echo "         The c/storage lock is held, usually by a stuck cleanup of an"
+        echo "         incomplete layer left behind by a SIGKILLed container create."
+        echo "         Confirm:  journalctl --user | grep -i 'incomplete layer'"
+        echo "                   dmesg | grep -i overlayfs"
+        echo "         Recover:  ~/.local/bin/signalk-recovery unwedge-podman"
+    else
+        echo "  [WARN] podman unavailable (exit $rc)"
+    fi
+}
+
 echo "=== SignalK Stack Doctor ==="
 check "signalk-server"  "$SIGNALK_URL"
 check "updater (:3003)" "$UPDATER_URL/api/health"
@@ -43,7 +89,7 @@ systemctl --user --no-pager list-units --all 'signalk-*' 2>/dev/null || true
 
 echo
 echo "=== Container snapshot ==="
-podman ps -a --filter 'name=signalk-' --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>/dev/null || true
+container_snapshot
 
 # Root storage type. Twin of the doctor container's storage-type probe (CC-3),
 # but reads the host's real /proc + /sys directly so it works with zero
