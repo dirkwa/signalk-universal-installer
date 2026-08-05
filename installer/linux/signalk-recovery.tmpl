@@ -310,7 +310,11 @@ layer_is_mounted() {
 # podman unshare stays as the fallback for a host without sudo.
 unmount_layer() {
     local id=$1 merged="$STORAGE_ROOT/overlay/${1}/merged" pid=''
-    pid=$(mount_ns_pid "$id")
+    # `|| true`: mount_ns_pid returns non-zero when no conmon shares the mount,
+    # and without this the assignment's failure would skip the fallback below
+    # in any caller that does not already suppress set -e. Correctness should
+    # not depend on how this function happens to be called.
+    pid=$(mount_ns_pid "$id" || true)
     if [[ -n "$pid" ]] && command -v nsenter >/dev/null 2>&1 && can_sudo; then
         sudo -n nsenter -t "$pid" -m umount -l "$merged" 2>/dev/null && return 0
     fi
@@ -340,7 +344,16 @@ can_sudo() {
 # the tree is owned by subuids inside the rootless userns and is not writable by
 # the invoking user; podman unshare is the no-sudo fallback.
 remove_layer_dir() {
-    local dir="$STORAGE_ROOT/overlay/${1}"
+    local id=$1 dir="$STORAGE_ROOT/overlay/${1}"
+    # This runs `rm -rf` under sudo. Validate the target rather than trusting
+    # that STORAGE_ROOT and the id are always well-formed: an empty root or a
+    # malformed id must not be able to aim it somewhere else on the disk.
+    if [[ -z "$STORAGE_ROOT" ]] || [[ ! "$id" =~ ^[0-9a-f]{12,}$ ]] \
+        || [[ "$dir" != */overlay/* ]]; then
+        echo "  [WARN] refusing to remove implausible layer path: ${dir}" >&2
+        return 1
+    fi
+    [[ -e "$dir" ]] || return 0
     if can_sudo; then
         sudo -n rm -rf "$dir" 2>/dev/null && return 0
     fi
