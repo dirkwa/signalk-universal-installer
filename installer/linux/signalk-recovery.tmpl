@@ -10,6 +10,7 @@
 #   signalk-recovery rollback-doctor   — restore doctor quadlet
 #   signalk-recovery rollback-all      — restore all three
 #   signalk-recovery doctor            — print diagnostics dump
+#   signalk-recovery unwedge-podman    — clear a stuck c/storage lock
 
 set -euo pipefail
 
@@ -18,6 +19,116 @@ SNAP_DIR="${HOME}/.signalk-doctor/snapshots"
 LAST_GOOD="${HOME}/.signalk-doctor/last-good.json"
 
 QUADLETS=(signalk-server signalk-updater-server signalk-doctor-server)
+
+# Seconds to wait for any podman command before calling it wedged. Every podman
+# invocation in this script is guarded: the failure mode below blocks them
+# forever, and a recovery tool that hangs is worse than useless.
+PODMAN_TIMEOUT=${PODMAN_TIMEOUT:-15}
+
+# How long to wait after SIGTERM before sending SIGKILL. This is NOT belt and
+# braces: a podman wedged on the c/storage lock is spinning in kernel space and
+# does NOT respond to SIGTERM — plain `timeout` returns while the process keeps
+# burning a core. Without the follow-up kill, every guarded probe (and every
+# re-run of this script) leaks another spinning podman onto an already-sick box.
+PODMAN_KILL_AFTER=${PODMAN_KILL_AFTER:-5}
+
+# How far back to scan the journal for podman's incomplete-layer marker. The
+# wedge is live *now*, so the line is recent, and an unbounded read of a busy
+# journal costs minutes on an SD card — the opposite of what a recovery tool
+# should do. Widen it for a host that sat wedged longer than this. The layer
+# store (jq path below) carries no time bound at all.
+UNWEDGE_SINCE=${UNWEDGE_SINCE:--7 days}
+
+# Read one TOML string value out of a storage.conf. Handles BOTH TOML string
+# forms — basic ("…") and literal ('…'). podman accepts either (verified with
+# `podman info` against a pinned config), and matching only double quotes
+# returns empty for a perfectly valid file, silently landing this tool on the
+# wrong store. Last assignment in the file wins; commented-out examples are
+# skipped because the key must start the line.
+storage_conf_value() {
+    local file=$1 key=$2
+    [[ -r "$file" ]] || return 1
+    sed -n \
+        -e "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+        -e "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" \
+        "$file" | tail -1
+}
+
+# System-level storage.conf search path, highest precedence first. Overridable
+# so the test suite can route the resolver at fixtures instead of the real /etc.
+SYS_STORAGE_CONFS=${SYS_STORAGE_CONFS:-/etc/containers/storage.conf:/usr/share/containers/storage.conf}
+
+# Expand the couple of variables podman itself expands inside a config value,
+# and supply the rootless default when nothing was configured.
+expand_store_path() {
+    local root=$1
+    root=${root//\$HOME/$HOME}
+    root=${root//\$UID/$(id -u)}
+    printf '%s' "${root:-${XDG_DATA_HOME:-$HOME/.local/share}/containers/storage}"
+}
+
+# Resolve podman's EFFECTIVE ROOTLESS store. Getting this wrong makes every
+# unmount below a silent no-op, and this is the tool of last resort. Asking
+# `podman info` is not an option: by the time this runs, podman is the wedged
+# thing. This whole stack is rootless (systemctl --user, quadlets under
+# ~/.config), so the rootless rules are the only ones that apply.
+#
+# The two keys interact in a way that is measured, not assumed — every rule
+# below was checked against `podman info`, and two of them are the opposite of
+# what they look like.
+#
+# `graphroot` is honoured ONLY from the user's own config:
+#
+#   $XDG_CONFIG_HOME/containers/storage.conf   graphroot HONOURED
+#   $HOME/.config/containers/storage.conf      graphroot HONOURED
+#   CONTAINERS_STORAGE_CONF=<file>             graphroot IGNORED
+#   /etc, /usr/share                           graphroot IGNORED
+#
+# Rootless podman replaces a graphroot that came from a "default" config
+# location with its own default, and pinning a file via CONTAINERS_STORAGE_CONF
+# makes that file the default one — so the same line is kept in the user's file
+# and dropped in a pinned copy of it. The system half matters most in practice:
+# Debian and Pi OS ship /usr/share/containers/storage.conf carrying
+# `graphroot = "/var/lib/containers/storage"` — the ROOTFUL store — so reading
+# it would aim this tool at the wrong place on a DEFAULT install.
+#
+# And `rootless_storage_path` does NOT simply outrank graphroot. It applies only
+# where graphroot did not already set the store — i.e. graphroot absent, or
+# discarded because it came from a pinned/system file. With BOTH keys in the
+# user's own config, graphroot wins; with both in a pinned file,
+# rootless_storage_path wins, because graphroot was thrown away first.
+#
+# Exactly ONE config file is consulted, never a merge: podman takes the first
+# that exists, walking CONTAINERS_STORAGE_CONF, then $XDG_CONFIG_HOME/containers,
+# then /etc, then /usr/share. A file that exists but is silent on both keys
+# means "use the default" — it replaced the lower files, it did not defer to
+# them.
+default_storage_root() {
+    local files=() sys=() f root='' user_conf=''
+    if [[ -n "${CONTAINERS_STORAGE_CONF:-}" ]]; then
+        files=("$CONTAINERS_STORAGE_CONF")
+    else
+        user_conf="${XDG_CONFIG_HOME:-$HOME/.config}/containers/storage.conf"
+        files=("$user_conf")
+        if [[ -n "$SYS_STORAGE_CONFS" ]]; then
+            IFS=':' read -r -a sys <<< "$SYS_STORAGE_CONFS"
+            files+=("${sys[@]}")
+        fi
+    fi
+    for f in "${files[@]}"; do
+        [[ -r "$f" ]] || continue
+        # Only the user's own file gets a say via graphroot, and there it is
+        # tried FIRST — rootless_storage_path is the fallback, not the override.
+        if [[ -n "$user_conf" && "$f" == "$user_conf" ]]; then
+            root=$(storage_conf_value "$f" graphroot || true)
+        fi
+        [[ -n "$root" ]] || root=$(storage_conf_value "$f" rootless_storage_path || true)
+        # First readable file decides, whatever it says or does not say.
+        break
+    done
+    expand_store_path "$root"
+}
+STORAGE_ROOT=${STORAGE_ROOT:-$(default_storage_root)}
 
 usage() {
     cat <<EOF
@@ -30,6 +141,8 @@ Commands:
   rollback-doctor          restore signalk-doctor-server.container from last-known-good
   rollback-all             restore all three quadlets
   doctor                   dump systemd, podman, and last-error diagnostics
+  unwedge-podman           clear a stuck c/storage lock (podman hangs forever);
+                           accepts --dry-run to report without acting
 
 Snapshots live under: $SNAP_DIR
 Last-known-good index:  $LAST_GOOD
@@ -117,6 +230,164 @@ cmd_rollback_all() {
     reload_and_restart "${svcs[@]}"
 }
 
+# --- podman unwedge --------------------------------------------------------
+# Recovers a failure mode nothing else in the stack can, because everything else
+# depends on the thing that is broken.
+#
+# A SIGKILL landing on `podman run` mid-container-create -- systemd's stop
+# timeout firing during a version switch is the observed trigger -- leaves a
+# layer flagged `incomplete` in c/storage with its overlayfs merged dir STILL
+# MOUNTED. podman's own cleanup then recurses INTO that live mount; every unlink
+# needs a whiteout, the orphaned workdir refuses (dmesg: `overlayfs: failed to
+# lock workdir+upperdir`), and the cleanup spins forever holding c/storage's
+# global lock. Every later podman command blocks behind it -- `podman ps`
+# included -- so Restart=always cannot heal the host: the retry hangs too.
+#
+# Killing the API service alone is NOT enough. The stale mount lives in the
+# podman-pause mount namespace that every conmon shares, so it outlives
+# podman.service and the very next podman command re-enters the same spin.
+# Dropping the mount is the actual fix; podman's own cleanup then completes on
+# its next invocation and removes the layer.
+
+podman_responds() {
+    timeout -k "$PODMAN_KILL_AFTER" "$PODMAN_TIMEOUT" \
+        podman ps --format '{{.Names}}' >/dev/null 2>&1
+}
+
+# Layer IDs podman itself has declared incomplete.
+#
+# SAFETY: this is the whole basis for unmounting anything. Both sources are
+# written by podman at the moment it gives up on a layer, so neither can ever
+# name the layer of a healthy running container -- which is what makes the
+# unmount below safe to do unattended. Never widen this to "overlay mounts that
+# look stale": unmounting a live container's merged dir breaks that container.
+#
+# The journal source stands alone on hosts without jq (it is optional per
+# install.sh) and is sufficient by itself -- podman logs the ID immediately
+# before the delete that wedges.
+incomplete_layer_ids() {
+    {
+        # podman emits this in logfmt, so the ID's quotes arrive backslash-
+        # escaped inside msg="...": `Found incomplete layer \"<id>\", deleting`.
+        # Match the phrase, drop everything before it, then take the hex run --
+        # matching a literal quote here silently finds nothing.
+        journalctl --user --no-pager -o cat --since "$UNWEDGE_SINCE" 2>/dev/null \
+            | grep -o 'Found incomplete layer.*' \
+            | grep -oE '[0-9a-f]{12,}' || true
+        if command -v jq >/dev/null 2>&1; then
+            local f
+            for f in "$STORAGE_ROOT/overlay-layers/layers.json" \
+                     "$STORAGE_ROOT/overlay-layers/volatile-layers.json"; do
+                [[ -r "$f" ]] || continue
+                jq -r '.[]|select(.flags.incomplete)|.id' "$f" 2>/dev/null || true
+            done
+        fi
+    } | sort -u
+}
+
+# Is this layer's merged dir mounted? It lives in the shared rootless namespace,
+# so it is absent from our own /proc/self/mountinfo -- scan every readable
+# process instead. -s swallows the races against processes that exit mid-scan.
+layer_is_mounted() {
+    # /dev/null guarantees at least one file argument. Today the glob always
+    # matches, but grep with ZERO file arguments reads stdin — a hang, in the
+    # one tool that must never hang. One `shopt -s nullglob` anywhere above
+    # would be enough to turn that on; this makes it structurally impossible.
+    grep -lsF "/overlay/${1}/merged" /dev/null /proc/[0-9]*/mountinfo >/dev/null 2>&1
+}
+
+cmd_unwedge_podman() {
+    # Validate rather than ignore. This command SIGKILLs a service and unmounts
+    # filesystems; a typo ("--dryrun", "-n") silently falling through to the
+    # real action is not an acceptable failure mode for a recovery tool.
+    #
+    # Count-based, not `case "${1:-}"`: that form cannot tell "no argument" from
+    # an explicit empty one, and it says nothing about arguments past the first.
+    # `signalk recover` execs this script with the user's whole argv, so trailing
+    # arguments do reach here and must not be dropped in silence.
+    local dry=0
+    if [[ $# -gt 1 ]]; then
+        echo "unwedge-podman: too many arguments (only --dry-run is accepted)" >&2
+        return 1
+    fi
+    if [[ $# -eq 1 ]]; then
+        case "$1" in
+            --dry-run) dry=1 ;;
+            *)
+                echo "unwedge-podman: unknown argument '${1}' (expected --dry-run)" >&2
+                return 1
+                ;;
+        esac
+    fi
+
+    echo "=== podman unwedge ==="
+    if podman_responds; then
+        echo "  podman answered within ${PODMAN_TIMEOUT}s — nothing to unwedge."
+        return 0
+    fi
+    echo "  [!] podman did not answer in ${PODMAN_TIMEOUT}s — c/storage lock is held."
+
+    local ids id
+    local stale=()
+    ids=$(incomplete_layer_ids)
+    if [[ -z "$ids" ]]; then
+        echo "  No incomplete layer in the journal or layer store — this is a"
+        echo "  different fault and unwedge must not guess at it. Collect:"
+        echo "    journalctl --user | grep -i 'incomplete layer'"
+        echo "    dmesg | grep -i overlayfs"
+        return 1
+    fi
+
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        if layer_is_mounted "$id"; then
+            stale+=("$id")
+            echo "  stale mount:   ${id:0:12}  (flagged incomplete, still mounted)"
+        else
+            echo "  already clear: ${id:0:12}"
+        fi
+    done <<< "$ids"
+
+    if [[ ${#stale[@]} -eq 0 ]]; then
+        echo "  No stale mounts remain, yet podman is still blocked. Try:"
+        echo "    systemctl --user kill -s KILL podman.service"
+        return 1
+    fi
+
+    if [[ $dry -eq 1 ]]; then
+        echo "  --dry-run: would kill podman.service, then unmount ${#stale[@]} layer(s)."
+        return 0
+    fi
+
+    # The spinning cleanup ignores SIGTERM -- it is looping in kernel space --
+    # so SIGKILL is the only signal that lands. Running containers are
+    # conmon-managed and independent of the API service; they survive this.
+    echo "  killing the stuck API service (running containers are unaffected)"
+    systemctl --user kill -s KILL podman.service 2>/dev/null || true
+
+    for id in "${stale[@]}"; do
+        echo "  unmounting ${id:0:12}"
+        # Lazy: something may still hold a reference into the tree. `podman
+        # unshare` joins the existing rootless namespace without taking the
+        # storage lock, which is why it still works while podman is wedged.
+        timeout -k "$PODMAN_KILL_AFTER" "$PODMAN_TIMEOUT" podman unshare \
+            umount -l "$STORAGE_ROOT/overlay/${id}/merged" 2>/dev/null \
+            || echo "  [WARN] could not unmount ${id:0:12}"
+    done
+
+    if podman_responds; then
+        echo "  [OK] podman is responding again."
+        echo "       Bring back anything left down:"
+        echo "         systemctl --user reset-failed signalk-server.service"
+        echo "         systemctl --user start signalk-server.service"
+        return 0
+    fi
+    echo "  [FAIL] still blocked after unmounting. Escalate:"
+    echo "         dmesg | grep -i overlayfs"
+    echo "         a reboot clears every stale mount as the last resort."
+    return 1
+}
+
 cmd_doctor() {
     echo "--- podman ps ---"
     podman ps -a --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>&1 || true
@@ -134,13 +405,23 @@ cmd_doctor() {
     cat "$LAST_GOOD" 2>/dev/null || echo "(missing)"
 }
 
-case "${1:-status}" in
-    status)           show_status ;;
-    rollback-server)  cmd_rollback_server ;;
-    rollback-updater) cmd_rollback_updater ;;
-    rollback-doctor)  cmd_rollback_doctor ;;
-    rollback-all)     cmd_rollback_all ;;
-    doctor)           cmd_doctor ;;
-    -h|--help|help)   usage ;;
-    *)                usage; exit 1 ;;
-esac
+main() {
+    case "${1:-status}" in
+        status)           show_status ;;
+        rollback-server)  cmd_rollback_server ;;
+        rollback-updater) cmd_rollback_updater ;;
+        rollback-doctor)  cmd_rollback_doctor ;;
+        rollback-all)     cmd_rollback_all ;;
+        doctor)           cmd_doctor ;;
+        unwedge-podman)   shift; cmd_unwedge_podman "$@" ;;
+        -h|--help|help)   usage ;;
+        *)                usage; exit 1 ;;
+    esac
+}
+
+# Only dispatch when executed directly. When sourced (e.g. by the test harness
+# to exercise incomplete_layer_ids against fixture journal output), define the
+# functions but don't run anything. Same idiom as preflight.sh.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
