@@ -261,10 +261,53 @@ if declare -F remove_layer_dir >/dev/null; then
 else
     echo "  [MISS] remove_layer_dir escalation missing"; fail=1
 fi
-if grep -q '! podman_responds; then' "$RECOVERY"; then
-    echo "  [OK]   escalation gated on podman still being wedged"
+# The escalation is NOT gated on daemon responsiveness -- that gate was wrong
+# and is deliberately gone. What keeps it safe is narrower and stronger: the
+# only ids it can ever act on come from incomplete_layer_ids, i.e. layers podman
+# itself flagged and is already trying to delete. If a second source of ids
+# appears, this assertion is the thing that should stop it.
+# shellcheck disable=SC2016
+if [[ "$(grep -c 'incomplete_layer_ids' "$RECOVERY")" -ge 2 ]] \
+    && grep -q 'ids=$(incomplete_layer_ids)' "$RECOVERY"; then
+    echo "  [OK]   ids come only from podman's own incomplete-layer marker"
 else
-    echo "  [MISS] escalation not gated — could delete on a healthy host"; fail=1
+    echo "  [MISS] layer ids may come from somewhere other than podman's marker"; fail=1
+fi
+
+# --- detection must not hinge on daemon responsiveness ---------------------
+# The incident this pins: a `podman pull` sat livelocked on an incomplete
+# layer's cleanup while `podman ps` still answered in a second, because the
+# daemon and the stuck operation are different processes. The command bailed
+# out with "nothing to unwedge" and the layer had to be cleared by hand --
+# three times, across three separate wedges on the same box.
+if grep -q 'checking for stale mounts anyway' "$RECOVERY"; then
+    echo "  [OK]   a responsive daemon no longer short-circuits detection"
+else
+    echo "  [MISS] still bails out when podman answers"; fail=1
+fi
+
+# Escalation must key off "did the layer survive the unmount", not the daemon.
+# shellcheck disable=SC2016
+if grep -qE '^\s*if \[\[ -e "\$STORAGE_ROOT/overlay/\$\{id\}" \]\]; then' "$RECOVERY"; then
+    echo "  [OK]   escalation keys off the layer surviving the unmount"
+else
+    echo "  [MISS] escalation still gated on daemon responsiveness"; fail=1
+fi
+
+# Killing a healthy API service is collateral damage that fixes nothing.
+if grep -q 'leaving the API service alone' "$RECOVERY"; then
+    echo "  [OK]   healthy API service is left alone"
+else
+    echo "  [MISS] would kill the API service even when it is answering"; fail=1
+fi
+
+# On a healthy host the journal remembers every layer ever cleaned. Listing
+# them all buries the line that matters on the days something is wrong.
+noise=$(bash "$RECOVERY" unwedge-podman 2>&1 | grep -c 'already clear:' || true)
+if [[ "$noise" -le 1 ]]; then
+    echo "  [OK]   healthy-path output stays quiet ($noise detail line(s))"
+else
+    echo "  [MISS] healthy path printed $noise 'already clear' lines"; fail=1
 fi
 
 if [[ $fail -ne 0 ]]; then
