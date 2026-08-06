@@ -78,15 +78,23 @@ jobs:
 
       - name: Stage both channels
         env:
-          DEV_VERSION: ${{ steps.ver.outputs.version }}
           RELEASE_TAG: ${{ steps.rel.outputs.release_tag }}
         run: |
           set -euo pipefail
           rm -rf dist && mkdir -p dist
 
-          # /dev always carries master, labelled with the describe string.
+          # /dev always carries master, labelled from THAT worktree.
+          #
+          # Deriving it from the triggering ref would be wrong on a tag run:
+          # steps.ver reports the release tag there, so master's code would be
+          # published under the release's version number whenever master had
+          # moved on past the tag. Each tree's label has to come from the tree
+          # it describes, or `signalk version` lies about what is installed --
+          # the same class of bug installer-version.sh already carries a scar
+          # from, just multiplied by two channels.
           git worktree add --detach .site-dev origin/master
-          bash scripts/stage-site.sh .site-dev dist/dev "$DEV_VERSION"
+          dev_version="$(cd .site-dev && bash scripts/installer-version.sh)"
+          bash scripts/stage-site.sh .site-dev dist/dev "$dev_version"
 
           if [[ -n "$RELEASE_TAG" ]]; then
             # Root carries the release, labelled with the bare tag.
@@ -95,7 +103,7 @@ jobs:
           else
             # Never publish an empty root: with no release yet, master is the
             # best available answer and a broken one-liner is not acceptable.
-            bash scripts/stage-site.sh .site-dev dist "$DEV_VERSION"
+            bash scripts/stage-site.sh .site-dev dist "$dev_version"
           fi
 
           echo "--- published tree ---"

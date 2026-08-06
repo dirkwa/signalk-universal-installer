@@ -39,9 +39,13 @@ same channel, because the doctor's refresh reads the same published tree.
 To track `master` instead — for development or to test an unreleased fix:
 
 ```bash
-SIGNALK_CHANNEL=master curl -fsSL https://dirkwa.github.io/signalk-universal-installer/dev/installer/linux/install.sh | bash
+curl -fsSL https://dirkwa.github.io/signalk-universal-installer/dev/installer/linux/install.sh | SIGNALK_CHANNEL=master bash
 SIGNALK_CHANNEL=master signalk update
 ```
+
+The variable goes on `bash`, not on `curl`: it is read by the downloaded
+installer, not by the fetch. Set on `curl` it would be silently ignored and the
+run would pull the rest of its tree from the release channel.
 
 `INSTALLER_BASE_URL` still overrides both, for mirrors, CI and local checkouts.
 

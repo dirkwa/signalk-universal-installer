@@ -722,8 +722,14 @@ cmd_update() {
             echo "[i] SIGNALK_CHANNEL=${channel}: refreshing from master, not the release."
             echo "[i] The doctor refresh only serves the release channel, so this"
             echo "[i] re-runs the bootstrap against the /dev tree instead."
-            SIGNALK_CHANNEL="$channel" bash -c \
-                'curl -fsSL "https://dirkwa.github.io/signalk-universal-installer/dev/installer/linux/install.sh" | bash'
+            # `set -o pipefail` inside the child: without it a failed curl
+            # still leaves the right-hand bash exiting 0 after reading an empty
+            # script, and cmd_update would report success having done nothing.
+            # SIGNALK_CHANNEL is exported for the DOWNLOADED script, so it goes
+            # on the bash that runs it, not on the curl that fetches it.
+            bash -c 'set -o pipefail
+                curl -fsSL "https://dirkwa.github.io/signalk-universal-installer/dev/installer/linux/install.sh" \
+                    | SIGNALK_CHANNEL='"'$channel'"' bash'
             return $?
             ;;
         *)
