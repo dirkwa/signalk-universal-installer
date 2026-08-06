@@ -53,28 +53,54 @@ jobs:
           echo "Installer version: $v"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
-      - name: Stage dist/
-        env:
-          INSTALLER_VERSION: ${{ steps.ver.outputs.version }}
+      # Two channels from one deploy: the latest RELEASE tag at the site root,
+      # master under /dev. Both the bash one-liner and the doctor's
+      # /api/installer/refresh read the site root, so publishing the release
+      # there is what makes `curl … | bash` and `signalk update` follow releases
+      # instead of whatever landed on master minutes ago -- with no change
+      # needed in the doctor.
+      #
+      # Every deploy rebuilds BOTH trees, whichever ref triggered it, so the two
+      # can never drift apart or half-publish. fetch-depth: 0 above is what
+      # makes the other ref reachable.
+      - name: Resolve the release tag
+        id: rel
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp -r installer dist/
-          cp -r quadlets dist/
-          [ -d scripts ] && cp -r scripts dist/
-          [ -d docs ] && cp -r docs dist/
-          cp README.md dist/index.md
+          release_re="$(bash scripts/installer-version.sh --release-tag-pattern)"
+          tag="$(git tag --list 'v*' --sort=-v:refname | grep -E "$release_re" | head -1 || true)"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ -z "$tag" ]]; then
+            echo "No release tag yet — the site root will carry master."
+          else
+            echo "Release tag: $tag"
+          fi
 
-          # Inject version into shell + powershell installers and *.tmpl
-          # dispatcher templates. The .tmpl files are fetched verbatim by the
-          # doctor's /api/installer/refresh, so baking the version in here
-          # means `signalk version` reports the same value after a refresh
-          # as after a fresh bootstrap. The bash one-liner's install-time
-          # substitution becomes a no-op against the published artifact and
-          # still works against a local checkout (where the placeholder is
-          # untouched).
-          find dist/installer -type f \( -name '*.sh' -o -name '*.ps1' -o -name '*.tmpl' \) -print0 |
-            xargs -0 sed -i "s|INSTALLER_VERSION:-0.0.0-scaffold|INSTALLER_VERSION:-${INSTALLER_VERSION}|g; s|'0.0.0-scaffold'|'${INSTALLER_VERSION}'|g; s|__SK_VERSION__|${INSTALLER_VERSION}|g"
+      - name: Stage both channels
+        env:
+          DEV_VERSION: ${{ steps.ver.outputs.version }}
+          RELEASE_TAG: ${{ steps.rel.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          rm -rf dist && mkdir -p dist
+
+          # /dev always carries master, labelled with the describe string.
+          git worktree add --detach .site-dev origin/master
+          bash scripts/stage-site.sh .site-dev dist/dev "$DEV_VERSION"
+
+          if [[ -n "$RELEASE_TAG" ]]; then
+            # Root carries the release, labelled with the bare tag.
+            git worktree add --detach .site-rel "$RELEASE_TAG"
+            bash scripts/stage-site.sh .site-rel dist "${RELEASE_TAG#v}"
+          else
+            # Never publish an empty root: with no release yet, master is the
+            # best available answer and a broken one-liner is not acceptable.
+            bash scripts/stage-site.sh .site-dev dist "$DEV_VERSION"
+          fi
+
+          echo "--- published tree ---"
+          echo "  root: $(sed -n 's/.*INSTALLER_VERSION:-\([^}]*\)}.*/\1/p' dist/installer/linux/install.sh | head -1)"
+          echo "  dev : $(sed -n 's/.*INSTALLER_VERSION:-\([^}]*\)}.*/\1/p' dist/dev/installer/linux/install.sh | head -1)"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5

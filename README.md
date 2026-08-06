@@ -31,6 +31,20 @@ During bootstrap, the installer runs `npm install` for three companion SignalK p
 # Linux (Debian 13 / trixie, Raspberry Pi OS trixie+, Ubuntu/Kubuntu 25.04+)
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
 
+### Release channels
+
+The one-liner above installs the latest **release**. `signalk update` follows the
+same channel, because the doctor's refresh reads the same published tree.
+
+To track `master` instead — for development or to test an unreleased fix:
+
+```bash
+SIGNALK_CHANNEL=master curl -fsSL https://dirkwa.github.io/signalk-universal-installer/dev/installer/linux/install.sh | bash
+SIGNALK_CHANNEL=master signalk update
+```
+
+`INSTALLER_BASE_URL` still overrides both, for mirrors, CI and local checkouts.
+
 # macOS (Apple Silicon and Intel; Homebrew required)
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/macos/install.sh | bash
 
