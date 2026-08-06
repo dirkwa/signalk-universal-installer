@@ -83,15 +83,30 @@ else
 fi
 
 # 2. The enabled serial device is present (its node exists under SERIAL_DIR).
-# Mapped host:container, not bare. A bare `AddDevice=<by-id>` makes podman
-# follow the symlink and expose only the resolved node (/dev/ttyUSB0), so on a
-# boat with two USB serial devices they can swap on reboot and SignalK silently
-# reads the wrong one. Assert BOTH fields -- a prefix match passes against the
-# old bare form and proves nothing.
+# Each serial device must be emitted in BOTH forms, and the pair is the point.
+#
+#   mapped (<by-id>:<by-id>)  the stable name, so two USB serial devices cannot
+#                             swap on reboot and have SignalK read the wrong one
+#   bare   (<by-id>)          podman resolves it to /dev/ttyUSB0, which is what
+#                             the SignalK UI offers and what every existing
+#                             config already says
+#
+# Publishing only the mapped form replaces "permission denied" with "No such
+# file or directory" for anyone with an existing config -- a different error,
+# not a fixed install. That regression was shipped once and caught on a live
+# boat; both assertions exist so it cannot be shipped again.
 if grep -qF "AddDevice=${serial_byid}:${serial_byid}" <<<"$out"; then
     echo "  [OK]   serial device is mapped host:container (stable name inside)"
 else
     echo "  [MISS] serial AddDevice= is not mapped to a stable in-container path"
+    grep -F 'AddDevice=' <<<"$out" | sed 's/^/         /'
+    fail=1
+fi
+
+if grep -qxF "AddDevice=${serial_byid}" <<<"$out"; then
+    echo "  [OK]   serial device is also emitted bare (resolves to /dev/ttyUSB0)"
+else
+    echo "  [MISS] no bare AddDevice= — existing /dev/ttyUSB0 configs would break"
     grep -F 'AddDevice=' <<<"$out" | sed 's/^/         /'
     fail=1
 fi
