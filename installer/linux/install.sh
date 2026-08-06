@@ -1434,6 +1434,16 @@ install -m 0755 "$HERE/detect-hardware.sh" "$PAYLOAD_DIR/detect-hardware.sh"
 # detect-hardware.sh it's fetched-not-invoked by the doctor; the host CLI runs
 # it. 0755 — it's an executable script.
 install -m 0755 "$HERE/render-server-quadlet.sh" "$PAYLOAD_DIR/render-server-quadlet.sh"
+# Stage the libs those scripts source, or the staged copies cannot run.
+# detect-hardware.sh sources lib/distro.sh unconditionally and died with
+# "lib/distro.sh: No such file or directory" — the staged copy was inert in the
+# literal sense, not the intended one. hardware-merge.sh is what
+# `signalk hardware rescan` needs to carry operator toggles across a re-detect,
+# exactly as the installer's own detect step does.
+install -d -m 0755 "$PAYLOAD_DIR/lib"
+for _l in distro.sh hardware-merge.sh; do
+    install -m 0644 "$HERE/lib/$_l" "$PAYLOAD_DIR/lib/$_l"
+done
 for t in signalk-server signalk-updater-server signalk-doctor-server signalk-dbus-proxy; do
     install -m 0644 "$HERE/../../quadlets/${t}.container.template" \
         "$PAYLOAD_DIR/${t}.container.template"
