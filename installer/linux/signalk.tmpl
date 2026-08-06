@@ -13,6 +13,7 @@
 #                          doctor, then re-render the live signalk-server Quadlet
 #                          from the refreshed template (restarting the server only
 #                          if the render changed). --no-render skips that last step.
+#   signalk hardware [status|rescan] [--no-render]   (default: status)
 #   signalk render-server [--no-restart]
 #                          rebuild ~/.config/containers/systemd/signalk-server.container
 #                          from the staged template + hardware.json and (unless
@@ -476,6 +477,115 @@ cmd_resolv_watch() {
         heal) _signalk_resolv_heal ;;
         *) echo "[ERR] Unknown resolv-watch argument: $1" >&2; return 1 ;;
     esac
+}
+
+cmd_hardware() {
+    # Re-detect attached hardware and (by default) re-render the live Quadlet.
+    #
+    # Why this exists: hardware.json is written once, at install time. Plug a
+    # USB device in afterwards -- an Actisense NGT-1, a GPS -- and nothing
+    # notices. The only path to a refreshed AddDevice= line was a full
+    # re-run of the bash bootstrapper, which also re-pulls every image; on an
+    # SD-card boat that is many minutes and a stopped nav server to pick up a
+    # device that is already plugged in.
+    #
+    # Toggles are carried over exactly as the installer's own detect step does:
+    # a fresh detect emits bluetooth/gpio disabled and audio at its
+    # /dev/snd-derived default, so a naive overwrite silently switches off
+    # passthrough the operator turned on. hardware_merge is the shared filter.
+    # Defaults to `status`, NOT `rescan`. A bare noun command should report,
+    # not act: rescan rewrites hardware.json, re-renders the live Quadlet and
+    # restarts signalk-server, and someone typing `signalk hardware` to see what
+    # is attached should not get their nav server bounced for it.
+    local do_render=true
+    local sub="${1:-status}"
+    if [[ "$sub" == -* ]]; then
+        echo "[ERR] '$sub' is a flag, not a subcommand." >&2
+        echo "      Usage: signalk hardware [status|rescan] [--no-render]" >&2
+        return 1
+    fi
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-render) do_render=false; shift ;;
+            *) echo "[ERR] Unknown hardware argument: $1" >&2; return 1 ;;
+        esac
+    done
+    if [[ "$sub" == status && "$do_render" == false ]]; then
+        echo "[ERR] --no-render is meaningless for 'status' (it renders nothing)." >&2
+        return 1
+    fi
+
+    local payload="${DOCTOR_DATA}/installer-payload"
+    local detect="${payload}/detect-hardware.sh"
+    local merge="${payload}/lib/hardware-merge.sh"
+    # $HOME/... literal, matching cmd_render_server's hw_file — this file
+    # defines DOCTOR_DATA but has no updater equivalent, and inventing one
+    # here would leave two spellings of the same path.
+    local hw="$HOME/.signalk-updater/hardware.json"
+
+    case "$sub" in
+        status)
+            if [[ ! -s "$hw" ]]; then
+                echo "[ERR] no hardware.json at $hw" >&2
+                return 1
+            fi
+            if command -v jq >/dev/null 2>&1; then
+                jq -r '"detected: \(.detectedAt)",
+                       "serial:   \((.serial // []) | length) device(s)",
+                       ((.serial // [])[] | "  - \(.byId)  (enabled=\(.enabled))"),
+                       "can:      \((.can // []) | map(select(.enabled)) | length) enabled"' "$hw"
+            else
+                cat "$hw"
+            fi
+            return 0
+            ;;
+        rescan) ;;
+        *) echo "[ERR] Unknown hardware subcommand: $sub (expected status|rescan)" >&2; return 1 ;;
+    esac
+
+    if [[ ! -x "$detect" ]]; then
+        echo "[ERR] $detect missing — run 'signalk update' to refresh the payload" >&2
+        return 1
+    fi
+
+    local fresh
+    if ! fresh=$("$detect" 2>/dev/null) || [[ -z "$fresh" ]]; then
+        echo "[ERR] hardware detection failed" >&2
+        return 1
+    fi
+
+    # Merge only when we can: without jq (optional per install.sh) a fresh
+    # write would clobber the toggles, so refuse rather than silently disable
+    # bluetooth or GPIO passthrough behind the operator's back.
+    if [[ -s "$hw" ]]; then
+        if [[ -r "$merge" ]] && command -v jq >/dev/null 2>&1; then
+            # shellcheck disable=SC1090
+            . "$merge"
+            local merged
+            if merged=$(hardware_merge "$hw" <(printf '%s' "$fresh") 2>/dev/null) \
+                && [[ -n "$merged" ]]; then
+                fresh="$merged"
+            fi
+        else
+            echo "[ERR] cannot merge operator toggles (needs jq + ${merge})." >&2
+            echo "      Refusing to overwrite $hw and silently disable passthrough." >&2
+            return 1
+        fi
+    fi
+
+    cp -p "$hw" "${hw}.bak" 2>/dev/null || true
+    printf '%s\n' "$fresh" >"$hw"
+    echo "[OK] wrote $hw (operator toggles preserved)"
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '(.serial // [])[] | "  serial: \(.byId)"' "$hw" 2>/dev/null || true
+    fi
+
+    if [[ "$do_render" == true ]]; then
+        cmd_render_server
+    else
+        echo "[i] --no-render: run 'signalk render-server' to apply."
+    fi
 }
 
 cmd_render_server() {
@@ -2582,6 +2692,7 @@ case "${1:-help}" in
     bluetooth)  shift; cmd_bluetooth "$@" ;;
     timesync)   shift; cmd_timesync "$@" ;;
     update)     shift; cmd_update "$@" ;;
+    hardware)         shift; cmd_hardware "$@" ;;
     render-server) shift; cmd_render_server "$@" ;;
     resolv-watch) shift; cmd_resolv_watch "$@" ;;
     resetadmin) shift; cmd_resetadmin "$@" ;;
