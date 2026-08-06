@@ -27,17 +27,72 @@ Rootless Podman needs the calling user in the right Unix groups to forward devic
 
 The installer adds you to all four at step 5 of `install.sh`. Group changes only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.
 
+**Host membership alone is not sufficient.** `UserNS=keep-id:uid=1000,gid=1000` maps only your uid and gid into the container, so a supplementary group such as `dialout` (GID 20) arrives inside as an unmapped 100020. A `/dev/tty*` node is `root:dialout` mode 660, the container process does not hold GID 20, and every `open()` fails — silently, because SignalK reports the connection as *down* rather than surfacing a permission error.
+
+The server Quadlet therefore carries `GroupAdd=keep-groups`, which tells crun to keep your real host GIDs on the process instead of mapping them. Both halves are required: the installer puts you in the group, and `keep-groups` carries that membership across the user namespace.
+
+`keep-groups` passes your *whole* supplementary set, which on a stock Pi OS install includes `sudo` and `adm`. Those GIDs arrive unmapped inside the namespace (they show as `nogroup`) so they grant nothing against the container's own `/etc/group` — `sudo` inside is still denied — and matter only for kernel permission checks against host objects, which is exactly the device node this exists for.
+
 ## Re-running detection
 
-Hardware changes (plugging in a new USB gateway, adding a CAN interface) require re-running detection so the Quadlet picks them up. The supported path is to re-run the bash installer:
+`hardware.json` is written once, at detection time. Plug in a USB gateway afterwards and nothing notices until detection runs again.
+
+```bash
+signalk hardware status    # what was detected, and when
+signalk hardware rescan    # re-detect, re-render the Quadlet, restart if it changed
+```
+
+`rescan` carries your operator toggles across the re-detect — a fresh detection reports bluetooth and GPIO as disabled and audio at its `/dev/snd`-derived default, so a naive overwrite would switch off passthrough you had turned on. If it cannot merge (no `jq`, or the payload is incomplete) it refuses to write rather than clobbering them. `--no-render` stops before touching the Quadlet.
+
+Re-running the bash installer also works and is idempotent, but it re-pulls every image as well; on an SD-card host that is minutes and a restarted server to pick up a device that is already plugged in.
 
 ```bash
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
 ```
 
-`curl … | bash` is idempotent; it re-runs `detect-hardware.sh`, the result feeds into a Quadlet rewrite via `render-server-quadlet.sh`, and `systemctl --user daemon-reload` + `restart signalk-server.service` picks up the new `AddDevice=` lines.
-
 The `hardware.json` file is the source of truth: if you want to disable a USB-serial device you'd otherwise pass through, edit the `enabled` field directly and either re-run the installer (which calls `render-server-quadlet.sh` for you) or POST the new payload to `/api/hardware/apply` on the Updater (bearer-token-gated).
+
+## Connecting a USB NMEA gateway
+
+Worked example with an Actisense NGT-1; a USB GPS or an NMEA 0183 adapter is the same shape.
+
+1. Plug it in and confirm the host sees it:
+
+   ```bash
+   ls -l /dev/serial/by-id/
+   # usb-Actisense_NGT-1_3A055-if00-port0 -> ../../ttyUSB0
+   ```
+
+2. Re-detect and re-render:
+
+   ```bash
+   signalk hardware rescan
+   ```
+
+3. Add the connection in the SignalK admin UI under **Server → Data Connections**. For an NGT-1 that is type **NMEA 2000**, source **Actisense NGT-1**, baud **115200**.
+
+**Use the `by-id` path as the device**, not `/dev/ttyUSB0`:
+
+```
+/dev/serial/by-id/usb-Actisense_NGT-1_3A055-if00-port0
+```
+
+Both work — each device is passed into the container twice, once mapped to its stable `by-id` name and once bare, which podman resolves to `/dev/ttyUSB*`. The bare form exists so configs and guides that say `/dev/ttyUSB0` keep working. But `ttyUSB` numbering is assigned in enumeration order: add a second USB serial device and the two can swap on reboot, at which point SignalK reads the wrong one from a config that still looks correct. The `by-id` name cannot do that.
+
+### When it does not work
+
+| Symptom | Cause |
+|---|---|
+| `Error: No such file or directory, cannot open /dev/ttyUSB0` | The device is not in the Quadlet. Run `signalk hardware status` — if it is not listed, `signalk hardware rescan`. |
+| Connection shows as down, no error | Permissions. Check `GroupAdd=keep-groups` is in `~/.config/containers/systemd/signalk-server.container`, and that `id -nG` includes `dialout`. |
+| `spawn udevadm ENOENT` in the log | Harmless. The serial library shells out to `udevadm` for metadata; it is absent from the image and the port still opens. |
+
+To confirm the container can actually reach the device:
+
+```bash
+podman exec signalk-server ls -l /dev/serial/by-id/
+podman exec signalk-server sh -c '[ -w /dev/ttyUSB0 ] && echo writable'
+```
 
 ## Bluetooth / BLE passthrough
 

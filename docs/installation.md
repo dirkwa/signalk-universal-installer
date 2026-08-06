@@ -191,7 +191,7 @@ usbipd bind --busid <BUSID>
 usbipd attach --wsl --busid <BUSID>     # while the machine is running
 ```
 
-The device then shows up as `/dev/ttyUSB0` etc. inside the machine. Re-run the installer to re-detect hardware and rewrite the signalk-server Quadlet's `AddDevice=` lines. (The Updater Console has no Hardware tab — see [docs/hardware.md](hardware.md) for the supported re-detection paths.)
+The device then shows up as `/dev/ttyUSB0` etc. inside the machine. Run `signalk hardware rescan` to re-detect and rewrite the signalk-server Quadlet's `AddDevice=` lines (re-running the installer also works, but re-pulls every image). (The Updater Console has no Hardware tab — see [docs/hardware.md](hardware.md) for the supported re-detection paths.)
 
 ## Recovery
 
