@@ -13,6 +13,23 @@ TEMPLATE="${2:-}"
 # Host path probed/mounted for the audio class; overridable so the render
 # test can exercise both the present and missing cases deterministically.
 AUDIO_DIR="${AUDIO_DIR:-/dev/snd}"
+# Each serial device is emitted TWICE, deliberately.
+#
+#   AddDevice=<by-id>:<by-id>   the stable name, present inside the container
+#   AddDevice=<by-id>           podman resolves the symlink -> /dev/ttyUSB0
+#
+# The mapped form alone is not enough. It is the better path to configure --
+# a boat with two USB serial devices (an NGT-1 and a GPS) can have them swap
+# on reboot, and SignalK would read the wrong one from a config that still
+# looks correct -- but /dev/ttyUSB0 is what the SignalK UI offers and what
+# every existing config and forum post already says. Publishing only the
+# by-id name replaces "permission denied" with "No such file or directory"
+# for those users: a different error, not a fixed install. Emitting both
+# leaves existing configs working while making the stable name available.
+#
+# The existence guard below copes with both forms: it strips from the FIRST
+# colon to get the host path.
+#
 # Directory the serial AddDevice= existence guard stats against. Real serial
 # by-id symlinks live under /dev/serial/by-id; overridable (like AUDIO_DIR)
 # so the render test can seed present/absent device nodes deterministically
@@ -101,7 +118,8 @@ hardware_block() {
         # "AddDevice=..." string and errors with "Cannot index string".
         jq -r '
           [
-            ((.serial // [])[] | select(.enabled == true) | "AddDevice=" + .byId),
+            ((.serial // [])[] | select(.enabled == true)
+                | ("AddDevice=" + .byId + ":" + .byId), ("AddDevice=" + .byId)),
             ((.can // [])[] | select(.enabled == true) | "AddDevice=/dev/" + .interface),
             ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=signalk-dbus-socket:/run/dbus:rw"),
             ((.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem")
@@ -110,7 +128,8 @@ hardware_block() {
     else
         # No jq — minimal grep/sed parser. Handles serial-by-id only;
         # CAN/BLE/GPIO require jq.
-        grep -oE '"byId":"[^"]+"' "$HW_FILE" | sed 's/.*"byId":"\(.*\)"$/AddDevice=\1/'
+        grep -oE '"byId":"[^"]+"' "$HW_FILE" \
+            | sed 's/.*"byId":"\(.*\)"$/AddDevice=\1:\1\nAddDevice=\1/'
     fi
     } | guard_adddevice
 

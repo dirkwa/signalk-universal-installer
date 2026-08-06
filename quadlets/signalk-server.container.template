@@ -95,6 +95,36 @@ Timezone=local
 # UID 1000 it's an identity mapping (no-op).
 UserNS=keep-id:uid=1000,gid=1000
 
+# Keep the HOST's supplementary groups instead of mapping them through the
+# userns. Without this, serial passthrough cannot work at all: the installer
+# adds the user to `dialout` on the host, but keep-id maps only uid/gid 1000, so
+# host GID 20 arrives inside the container as 100020. A /dev/tty* node is
+# root:dialout mode 660, the process does not hold GID 20, and every open()
+# fails -- silently, because SignalK just reports the connection as down.
+#
+# Verified on a Pi 4 with an Actisense NGT-1: without this the container process
+# had groups `1000 100020 …` and the device was neither readable nor writable;
+# with it the process holds an unmapped `20` and the device is both.
+#
+# crun-only (`keep-original-groups`); this stack pins crun. install.sh's group
+# step is the other half of this -- it is what puts the user in dialout, gpio,
+# netdev and audio in the first place.
+#
+# The trade-off, stated plainly: this passes the user's WHOLE supplementary
+# group set, which on a stock Pi OS install includes `sudo` and `adm`, not just
+# the four the installer manages. That is broader than strictly needed, and
+# podman offers no way to pass a single host group.
+#
+# Measured rather than assumed, on the box: those GIDs arrive UNMAPPED inside
+# the userns and show as `nogroup`, so they grant nothing against the
+# container's own /etc/group -- `sudo -n true` inside is denied. They matter
+# only for kernel permission checks against HOST objects, which is precisely
+# the device node this exists for. The residual exposure is host paths readable
+# by those groups AND mounted in; the mount set here is ~/.signalk, the user's
+# own podman.sock, /dev/snd, and two world-readable paths, none of which is
+# adm- or sudo-gated.
+GroupAdd=keep-groups
+
 Volume=%h/.signalk:/home/node/.signalk:Z
 Volume=%t/podman/podman.sock:/var/run/docker.sock
 

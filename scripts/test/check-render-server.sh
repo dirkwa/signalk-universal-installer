@@ -288,6 +288,20 @@ else
     echo "  [SKIP] template lacks USER ADDITIONS markers or Image= — preservation N/A"
 fi
 
+# Serial passthrough is impossible without this. keep-id maps only uid/gid 1000,
+# so the host's `dialout` (GID 20) arrives inside the container as 100020, and a
+# root:dialout 660 device node cannot be opened -- silently, because SignalK
+# just shows the connection as down rather than reporting a permission error.
+#
+# Measured on a Pi 4 with an Actisense NGT-1: without keep-groups the container
+# process held `1000 100020 …` and the device was neither readable nor writable;
+# with it the process holds an unmapped `20` and the device is both.
+if grep -qE '^GroupAdd=keep-groups' "$SERVER_TMPL"; then
+    ok "template keeps the host supplementary groups (serial devices openable)"
+else
+    miss "template lacks GroupAdd=keep-groups — every serial device would be unopenable"
+fi
+
 if (( fail )); then
     echo
     echo "[ERR] render-server wiring is broken — see entries above." >&2

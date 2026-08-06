@@ -83,6 +83,34 @@ else
 fi
 
 # 2. The enabled serial device is present (its node exists under SERIAL_DIR).
+# Each serial device must be emitted in BOTH forms, and the pair is the point.
+#
+#   mapped (<by-id>:<by-id>)  the stable name, so two USB serial devices cannot
+#                             swap on reboot and have SignalK read the wrong one
+#   bare   (<by-id>)          podman resolves it to /dev/ttyUSB0, which is what
+#                             the SignalK UI offers and what every existing
+#                             config already says
+#
+# Publishing only the mapped form replaces "permission denied" with "No such
+# file or directory" for anyone with an existing config -- a different error,
+# not a fixed install. That regression was shipped once and caught on a live
+# boat; both assertions exist so it cannot be shipped again.
+if grep -qF "AddDevice=${serial_byid}:${serial_byid}" <<<"$out"; then
+    echo "  [OK]   serial device is mapped host:container (stable name inside)"
+else
+    echo "  [MISS] serial AddDevice= is not mapped to a stable in-container path"
+    grep -F 'AddDevice=' <<<"$out" | sed 's/^/         /'
+    fail=1
+fi
+
+if grep -qxF "AddDevice=${serial_byid}" <<<"$out"; then
+    echo "  [OK]   serial device is also emitted bare (resolves to /dev/ttyUSB0)"
+else
+    echo "  [MISS] no bare AddDevice= — existing /dev/ttyUSB0 configs would break"
+    grep -F 'AddDevice=' <<<"$out" | sed 's/^/         /'
+    fail=1
+fi
+
 if grep -qF "AddDevice=$serial_byid" <<<"$out"; then
     echo "  [OK]   enabled serial device emitted"
 else
@@ -93,7 +121,12 @@ fi
 # 3. Disabled hardware is excluded. BLE renders as the proxy's named
 #    socket volume (signalk-dbus-socket), never a direct /run/dbus bind
 #    mount — both patterns must stay absent while disabled.
-if grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem|/dev/snd' <<<"$out"; then
+# Comments are stripped first: a leak is a DIRECTIVE, and the template is
+# heavily commented -- a comment that merely mentions /dev/snd while explaining
+# something else is not hardware leaking into the render. Grepping the raw
+# output made this assertion fire on documentation.
+if grep -vE '^[[:space:]]*#' <<<"$out" \
+    | grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem|/dev/snd'; then
     echo "  [MISS] disabled hardware leaked into output"
     fail=1
 else
