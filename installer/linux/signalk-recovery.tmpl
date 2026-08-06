@@ -385,15 +385,31 @@ cmd_unwedge_podman() {
     fi
 
     echo "=== podman unwedge ==="
-    if podman_responds; then
-        echo "  podman answered within ${PODMAN_TIMEOUT}s — nothing to unwedge."
-        return 0
+
+    # Detect the fault by its SIGNATURE -- an incomplete layer whose overlay
+    # mount is still live -- not by whether the daemon answers.
+    #
+    # An earlier version bailed out here the moment `podman ps` responded. That
+    # was wrong, and cost three manual interventions on a Pi 4: a `podman pull`
+    # was livelocked on exactly this cleanup while `podman ps` still answered in
+    # a second, because the daemon and the stuck operation are different
+    # processes. The lock is held per-operation; a responsive daemon proves
+    # nothing about the operation sitting on it.
+    local responsive=0
+    podman_responds && responsive=1
+    if (( responsive )); then
+        echo "  podman answered within ${PODMAN_TIMEOUT}s — checking for stale mounts anyway."
+    else
+        echo "  [!] podman did not answer in ${PODMAN_TIMEOUT}s — c/storage lock is held."
     fi
-    echo "  [!] podman did not answer in ${PODMAN_TIMEOUT}s — c/storage lock is held."
 
     local ids id
     local stale=()
     ids=$(incomplete_layer_ids)
+    if [[ -z "$ids" ]] && (( responsive )); then
+        echo "  No incomplete layer anywhere and podman is answering — nothing to unwedge."
+        return 0
+    fi
     if [[ -z "$ids" ]]; then
         echo "  No incomplete layer in the journal or layer store — this is a"
         echo "  different fault and unwedge must not guess at it. Collect:"
@@ -402,32 +418,60 @@ cmd_unwedge_podman() {
         return 1
     fi
 
+    # Classify quietly first. On a healthy host the journal legitimately
+    # remembers every layer podman has ever cleaned up, and listing them all as
+    # "already clear" buries the one line that matters on the days it does.
+    local cleared=0
     while IFS= read -r id; do
         [[ -n "$id" ]] || continue
         if layer_is_mounted "$id"; then
             stale+=("$id")
-            echo "  stale mount:   ${id:0:12}  (flagged incomplete, still mounted)"
         else
-            echo "  already clear: ${id:0:12}"
+            cleared=$((cleared + 1))
         fi
     done <<< "$ids"
+    if [[ ${#stale[@]} -gt 0 ]] || (( ! responsive )); then
+        for id in "${stale[@]}"; do
+            echo "  stale mount:   ${id:0:12}  (flagged incomplete, still mounted)"
+        done
+        (( cleared )) && echo "  already clear: ${cleared} previously-cleaned layer(s)"
+    fi
 
     if [[ ${#stale[@]} -eq 0 ]]; then
+        if (( responsive )); then
+            echo "  No incomplete layer is still mounted — nothing to unwedge."
+            return 0
+        fi
         echo "  No stale mounts remain, yet podman is still blocked. Try:"
         echo "    systemctl --user kill -s KILL podman.service"
         return 1
     fi
 
     if [[ $dry -eq 1 ]]; then
-        echo "  --dry-run: would kill podman.service, then unmount ${#stale[@]} layer(s)."
+        if (( responsive )); then
+            echo "  --dry-run: would unmount ${#stale[@]} layer(s) and remove any that survive."
+            echo "             podman is answering, so the API service would be left alone."
+        else
+            echo "  --dry-run: would kill podman.service, unmount ${#stale[@]} layer(s),"
+            echo "             and remove any that survive."
+        fi
         return 0
     fi
 
-    # The spinning cleanup ignores SIGTERM -- it is looping in kernel space --
-    # so SIGKILL is the only signal that lands. Running containers are
-    # conmon-managed and independent of the API service; they survive this.
-    echo "  killing the stuck API service (running containers are unaffected)"
-    systemctl --user kill -s KILL podman.service 2>/dev/null || true
+    # Only kill the API service when the API service is what is stuck. When the
+    # daemon is answering and some other operation is livelocked, killing it is
+    # collateral damage that fixes nothing.
+    #
+    # When it IS stuck: the spinning cleanup ignores SIGTERM -- it loops in
+    # kernel space -- so SIGKILL is the only signal that lands. Running
+    # containers are conmon-managed and independent of the API service; they
+    # survive this.
+    if (( responsive )); then
+        echo "  podman is answering — leaving the API service alone"
+    else
+        echo "  killing the stuck API service (running containers are unaffected)"
+        systemctl --user kill -s KILL podman.service 2>/dev/null || true
+    fi
 
     for id in "${stale[@]}"; do
         echo "  unmounting ${id:0:12}"
@@ -444,7 +488,11 @@ cmd_unwedge_podman() {
         #
         # Safe because podman itself declared this layer incomplete: it is
         # already trying to delete it, and we are only finishing the job.
-        if [[ -e "$STORAGE_ROOT/overlay/${id}" ]] && ! podman_responds; then
+        # Escalate on whether the layer SURVIVED the unmount, not on whether the
+        # daemon answers. Gating this on responsiveness skipped the one step
+        # that actually freed the Pi 4 -- three times -- because the daemon was
+        # answering throughout while a pull sat livelocked on this layer.
+        if [[ -e "$STORAGE_ROOT/overlay/${id}" ]]; then
             echo "  removing the incomplete layer directory"
             remove_layer_dir "$id" || echo "  [WARN] could not remove ${id:0:12}"
         fi
