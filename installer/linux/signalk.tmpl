@@ -8,7 +8,7 @@
 #   signalk socketcan [..] Pi CAN-HAT detection + setup recipe
 #   signalk bluetooth [..] BLE / D-Bus passthrough (status | enable | disable)
 #   signalk timesync [...] host clock + timezone from GPS (status | run)
-#   signalk update [--no-render]
+#   signalk update [--no-render]        (SIGNALK_CHANNEL=master to track master)
 #                          refresh installer scripts + Quadlet templates via the
 #                          doctor, then re-render the live signalk-server Quadlet
 #                          from the refreshed template (restarting the server only
@@ -709,6 +709,34 @@ cmd_update() {
             *) echo "[ERR] Unknown update argument: $1" >&2; return 1 ;;
         esac
     done
+
+    # Channel. The doctor's /api/installer/refresh always fetches the site
+    # ROOT, which now carries the latest release -- so the default path already
+    # follows releases with no doctor-side change. Tracking master means going
+    # around the doctor and re-running the bootstrap against the /dev tree,
+    # which is exactly what the existing fallback below does anyway.
+    local channel="${SIGNALK_CHANNEL:-release}"
+    case "$channel" in
+        release) ;;
+        master|dev)
+            echo "[i] SIGNALK_CHANNEL=${channel}: refreshing from master, not the release."
+            echo "[i] The doctor refresh only serves the release channel, so this"
+            echo "[i] re-runs the bootstrap against the /dev tree instead."
+            # `set -o pipefail` inside the child: without it a failed curl
+            # still leaves the right-hand bash exiting 0 after reading an empty
+            # script, and cmd_update would report success having done nothing.
+            # SIGNALK_CHANNEL is exported for the DOWNLOADED script, so it goes
+            # on the bash that runs it, not on the curl that fetches it.
+            bash -c 'set -o pipefail
+                curl -fsSL "https://dirkwa.github.io/signalk-universal-installer/dev/installer/linux/install.sh" \
+                    | SIGNALK_CHANNEL='"'$channel'"' bash'
+            return $?
+            ;;
+        *)
+            echo "[ERR] SIGNALK_CHANNEL must be 'release' or 'master' (got '${channel}')" >&2
+            return 1
+            ;;
+    esac
 
     local token_path="${DOCTOR_DATA}/token"
     if [[ ! -f "$token_path" ]]; then

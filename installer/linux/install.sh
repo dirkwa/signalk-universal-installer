@@ -38,7 +38,27 @@
 #  19. Print success URLs
 
 INSTALLER_VERSION="${INSTALLER_VERSION:-0.0.0-scaffold}"
-INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
+
+# Release channel. The site publishes the latest RELEASE at its root and master
+# under /dev, so the default here follows releases rather than whatever landed
+# on master minutes ago — a boat should not be a test bed by accident.
+#
+#   SIGNALK_CHANNEL=master curl … | bash     # track master (dev/testing)
+#   INSTALLER_BASE_URL=…    curl … | bash     # point somewhere else entirely
+#
+# An explicit INSTALLER_BASE_URL still wins: it is the escape hatch for local
+# checkouts, mirrors and CI, and the channel must not quietly override it.
+SIGNALK_CHANNEL="${SIGNALK_CHANNEL:-release}"
+_SK_SITE_ROOT="https://dirkwa.github.io/signalk-universal-installer"
+case "$SIGNALK_CHANNEL" in
+    release) _SK_DEFAULT_BASE="$_SK_SITE_ROOT" ;;
+    master|dev) _SK_DEFAULT_BASE="${_SK_SITE_ROOT}/dev" ;;
+    *)
+        echo "[ERR] SIGNALK_CHANNEL must be 'release' or 'master' (got '${SIGNALK_CHANNEL}')" >&2
+        exit 1
+        ;;
+esac
+INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-$_SK_DEFAULT_BASE}"
 
 # Where the engine container HTTP servers bind. Default is LAN-reachable
 # (0.0.0.0) because most users install headless and reach the consoles
@@ -131,6 +151,7 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
     env \
         INSTALLER_VERSION="$INSTALLER_VERSION" \
         INSTALLER_BASE_URL="$INSTALLER_BASE_URL" \
+        SIGNALK_CHANNEL="$SIGNALK_CHANNEL" \
         SIGNALK_LOCALHOST_ONLY="${SIGNALK_LOCALHOST_ONLY:-}" \
         SIGNALK_LAN_EXPOSE="${SIGNALK_LAN_EXPOSE:-}" \
         SIGNALK_VESSEL_NAME="${SIGNALK_VESSEL_NAME:-}" \
