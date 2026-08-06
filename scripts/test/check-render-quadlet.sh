@@ -121,7 +121,12 @@ fi
 # 3. Disabled hardware is excluded. BLE renders as the proxy's named
 #    socket volume (signalk-dbus-socket), never a direct /run/dbus bind
 #    mount — both patterns must stay absent while disabled.
-if grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem|/dev/snd' <<<"$out"; then
+# Comments are stripped first: a leak is a DIRECTIVE, and the template is
+# heavily commented -- a comment that merely mentions /dev/snd while explaining
+# something else is not hardware leaking into the render. Grepping the raw
+# output made this assertion fire on documentation.
+if grep -vE '^[[:space:]]*#' <<<"$out" \
+    | grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem|/dev/snd'; then
     echo "  [MISS] disabled hardware leaked into output"
     fail=1
 else
