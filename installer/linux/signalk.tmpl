@@ -13,7 +13,7 @@
 #                          doctor, then re-render the live signalk-server Quadlet
 #                          from the refreshed template (restarting the server only
 #                          if the render changed). --no-render skips that last step.
-#   signalk hardware [status|rescan] [--no-render]
+#   signalk hardware [status|rescan] [--no-render]   (default: status)
 #   signalk render-server [--no-restart]
 #                          rebuild ~/.config/containers/systemd/signalk-server.container
 #                          from the staged template + hardware.json and (unless
@@ -493,8 +493,17 @@ cmd_hardware() {
     # a fresh detect emits bluetooth/gpio disabled and audio at its
     # /dev/snd-derived default, so a naive overwrite silently switches off
     # passthrough the operator turned on. hardware_merge is the shared filter.
+    # Defaults to `status`, NOT `rescan`. A bare noun command should report,
+    # not act: rescan rewrites hardware.json, re-renders the live Quadlet and
+    # restarts signalk-server, and someone typing `signalk hardware` to see what
+    # is attached should not get their nav server bounced for it.
     local do_render=true
-    local sub="${1:-rescan}"
+    local sub="${1:-status}"
+    if [[ "$sub" == -* ]]; then
+        echo "[ERR] '$sub' is a flag, not a subcommand." >&2
+        echo "      Usage: signalk hardware [status|rescan] [--no-render]" >&2
+        return 1
+    fi
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -502,6 +511,10 @@ cmd_hardware() {
             *) echo "[ERR] Unknown hardware argument: $1" >&2; return 1 ;;
         esac
     done
+    if [[ "$sub" == status && "$do_render" == false ]]; then
+        echo "[ERR] --no-render is meaningless for 'status' (it renders nothing)." >&2
+        return 1
+    fi
 
     local payload="${DOCTOR_DATA}/installer-payload"
     local detect="${payload}/detect-hardware.sh"
