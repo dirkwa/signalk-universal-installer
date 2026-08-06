@@ -62,6 +62,18 @@ Then open:
 - `http://localhost:3003` — Updater Console.
 - `http://localhost:3004` — Doctor Console.
 
+### Connecting NMEA hardware
+
+USB gateways (Actisense NGT-1, USB GPS, NMEA 0183 adapters) are detected and passed into the container automatically. After plugging one in:
+
+```bash
+signalk hardware rescan
+```
+
+Then add the connection in the SignalK admin UI under **Server → Data Connections**, using the stable `by-id` path rather than `/dev/ttyUSB0` — with two USB serial devices the `ttyUSB` numbering can swap on reboot.
+
+See [docs/hardware.md](docs/hardware.md) for the walkthrough, SocketCAN, Bluetooth and audio passthrough, and what to check when a device does not appear.
+
 See [docs/installation.md](docs/installation.md) for the full per-platform walkthrough, and [docs/recovery.md](docs/recovery.md) for the recovery playbook.
 
 ## Development
@@ -79,7 +91,7 @@ See [docs/devcontainer.md](docs/devcontainer.md) for plugin/server/installer wor
 
 ## Known limitations
 
-- **Hardware device toggling requires re-running the installer.** The `POST /api/hardware/apply` endpoint and on-disk `~/.signalk-updater/hardware.json` work end-to-end; the Updater Console doesn't expose a Hardware tab, so toggling individual devices on or off means editing `hardware.json` directly (or re-running `curl … | bash`, which re-runs detection and is idempotent on identical input).
+- **Toggling an individual device on or off means editing `hardware.json`.** Re-*detection* is a one-liner (`signalk hardware rescan`), and the `POST /api/hardware/apply` endpoint works end-to-end, but the Updater Console doesn't expose a Hardware tab — so switching a detected device off, rather than picking up a new one, still means editing the `enabled` field directly.
 - **The signalk-container config panel does not gate Stop / Remove on `io.signalk.persistent=true`.** Engine Quadlets are stamped with the label and `signalk-container` reads it from `ContainerConfig.labels`, but the UI still offers Stop and Remove buttons for engine containers. Pressing them takes the stack down; recover via the Doctor Console or `~/.local/bin/signalk-recovery`.
 - **Real-hardware smoke tests run in front of physical devices.** Pi 5 / Pi 4 / macOS Podman Machine + USB / WSL2 + usbipd are documented in `docs/installation.md` but not part of the CI matrix.
 
