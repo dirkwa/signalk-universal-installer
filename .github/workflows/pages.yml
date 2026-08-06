@@ -92,7 +92,21 @@ jobs:
           # it describes, or `signalk version` lies about what is installed --
           # the same class of bug installer-version.sh already carries a scar
           # from, just multiplied by two channels.
-          git worktree add --detach .site-dev origin/master
+          # Resolve the master ref explicitly and fail loudly if it is not
+          # there. actions/checkout with fetch-depth: 0 fetches all branches, so
+          # it should always be -- but if that ever changes, the alternatives
+          # are publishing the release tree at /dev (wrong content, silent) or
+          # omitting /dev entirely (a 404 nobody notices until they need it).
+          # A red workflow is the only failure mode here that gets looked at.
+          dev_ref=origin/master
+          if ! git rev-parse --verify --quiet "$dev_ref" >/dev/null; then
+            dev_ref=master
+          fi
+          if ! git rev-parse --verify --quiet "$dev_ref" >/dev/null; then
+            echo "::error::cannot resolve master for the /dev channel — refusing to publish a wrong or missing /dev"
+            exit 1
+          fi
+          git worktree add --detach .site-dev "$dev_ref"
           dev_version="$(cd .site-dev && bash scripts/installer-version.sh)"
           bash scripts/stage-site.sh .site-dev dist/dev "$dev_version"
 
