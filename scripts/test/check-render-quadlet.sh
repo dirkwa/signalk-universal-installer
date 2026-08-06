@@ -83,6 +83,19 @@ else
 fi
 
 # 2. The enabled serial device is present (its node exists under SERIAL_DIR).
+# Mapped host:container, not bare. A bare `AddDevice=<by-id>` makes podman
+# follow the symlink and expose only the resolved node (/dev/ttyUSB0), so on a
+# boat with two USB serial devices they can swap on reboot and SignalK silently
+# reads the wrong one. Assert BOTH fields -- a prefix match passes against the
+# old bare form and proves nothing.
+if grep -qF "AddDevice=${serial_byid}:${serial_byid}" <<<"$out"; then
+    echo "  [OK]   serial device is mapped host:container (stable name inside)"
+else
+    echo "  [MISS] serial AddDevice= is not mapped to a stable in-container path"
+    grep -F 'AddDevice=' <<<"$out" | sed 's/^/         /'
+    fail=1
+fi
+
 if grep -qF "AddDevice=$serial_byid" <<<"$out"; then
     echo "  [OK]   enabled serial device emitted"
 else

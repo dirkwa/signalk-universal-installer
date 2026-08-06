@@ -13,6 +13,14 @@ TEMPLATE="${2:-}"
 # Host path probed/mounted for the audio class; overridable so the render
 # test can exercise both the present and missing cases deterministically.
 AUDIO_DIR="${AUDIO_DIR:-/dev/snd}"
+# Serial devices are mapped host:container so the STABLE by-id name survives
+# into the container. With a bare `AddDevice=<by-id path>` podman follows the
+# symlink and exposes only the resolved node -- /dev/ttyUSB0 -- so a boat with
+# two USB serial devices (an NGT-1 and a GPS, say) can have them swap on reboot
+# and SignalK silently reads the wrong one. The existence guard below already
+# copes with the two-field form: it strips from the FIRST colon to get the host
+# path.
+#
 # Directory the serial AddDevice= existence guard stats against. Real serial
 # by-id symlinks live under /dev/serial/by-id; overridable (like AUDIO_DIR)
 # so the render test can seed present/absent device nodes deterministically
@@ -101,7 +109,8 @@ hardware_block() {
         # "AddDevice=..." string and errors with "Cannot index string".
         jq -r '
           [
-            ((.serial // [])[] | select(.enabled == true) | "AddDevice=" + .byId),
+            ((.serial // [])[] | select(.enabled == true)
+                | "AddDevice=" + .byId + ":" + .byId),
             ((.can // [])[] | select(.enabled == true) | "AddDevice=/dev/" + .interface),
             ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=signalk-dbus-socket:/run/dbus:rw"),
             ((.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem")
@@ -110,7 +119,7 @@ hardware_block() {
     else
         # No jq — minimal grep/sed parser. Handles serial-by-id only;
         # CAN/BLE/GPIO require jq.
-        grep -oE '"byId":"[^"]+"' "$HW_FILE" | sed 's/.*"byId":"\(.*\)"$/AddDevice=\1/'
+        grep -oE '"byId":"[^"]+"' "$HW_FILE" | sed 's/.*"byId":"\(.*\)"$/AddDevice=\1:\1/'
     fi
     } | guard_adddevice
 
