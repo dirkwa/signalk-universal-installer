@@ -104,10 +104,10 @@ done
 
 # ── 4. The predicate matches a default route and nothing else ──────────────
 
-# Extract the live predicate from the template rather than restating it, so
-# this check tracks the real line instead of drifting from it.
-predicate=$(grep -h '^ExecStartPre=' "${GATED_TEMPLATES[0]}" \
-    | sed -e 's/.*do //' -e 's/ && break.*//')
+# Extract the live predicate from each template rather than restating it, so
+# this check tracks the real lines instead of drifting from them. Every gated
+# template is exercised: checking only the first would let a divergent
+# predicate in the second ship untested.
 
 # Field 2 is the destination, field 3 the gateway; both hex, little-endian.
 printf 'eth0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n' >"$tmp/route-default"
@@ -130,11 +130,18 @@ check_predicate() {
     fi
 }
 
-check_predicate "$tmp/route-default" yes "matches a default route"
-check_predicate "$tmp/route-vlan"    yes "matches a VLAN interface (eth0.100)"
-check_predicate "$tmp/route-bridge"  yes "matches a bridge interface (br-lan)"
-check_predicate "$tmp/route-subnet"  no  "rejects a subnet-only route"
-check_predicate "$tmp/route-header"  no  "rejects the /proc/net/route header"
+for tmpl in "${GATED_TEMPLATES[@]}"; do
+    [[ -f "$tmpl" ]] || continue
+    name=$(basename "$tmpl" .container.template)
+    predicate=$(grep -h '^ExecStartPre=' "$tmpl" \
+        | sed -e 's/.*do //' -e 's/ && break.*//')
+
+    check_predicate "$tmp/route-default" yes "$name: matches a default route"
+    check_predicate "$tmp/route-vlan"    yes "$name: matches a VLAN interface (eth0.100)"
+    check_predicate "$tmp/route-bridge"  yes "$name: matches a bridge interface (br-lan)"
+    check_predicate "$tmp/route-subnet"  no  "$name: rejects a subnet-only route"
+    check_predicate "$tmp/route-header"  no  "$name: rejects the /proc/net/route header"
+done
 
 # ── 5. Disproved folklore stays gone ───────────────────────────────────────
 
