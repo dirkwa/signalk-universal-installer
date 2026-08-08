@@ -136,8 +136,12 @@ for tmpl in "${GATED_TEMPLATES[@]}"; do
     [[ -f "$tmpl" ]] || continue
     name=$(basename "$tmpl" .container.template)
     # Pull just the regex out of `grep -qE "<pattern>" /proc/net/route`.
-    route_pattern=$(grep -h '^ExecStartPre=' "$tmpl" \
-        | sed -n 's|.*grep -qE "\([^"]*\)" /proc/net/route.*|\1|p')
+    # sed alone, no grep: grep exits 1 when a template has no ExecStartPre at
+    # all, and under `set -o pipefail` that would kill the script here —
+    # before the guard below could say why. sed exits 0 on no match, so an
+    # unextractable pattern reports instead of vanishing.
+    route_pattern=$(sed -n \
+        's|^ExecStartPre=.*grep -qE "\([^"]*\)" /proc/net/route.*|\1|p' "$tmpl")
     if [[ -z "$route_pattern" ]]; then
         miss "$name: could not extract a route pattern from the gate"
         continue
