@@ -64,13 +64,13 @@ Every sentence names something checkable — a file, a value, a command you ran,
 
 - "That field is load-bearing." → "Removing that field makes `render-server-quadlet.sh` emit an empty `Image=` line."
 
-**Aphorism.** Abstract rulings that sound conclusive and can't be checked. "X is not Y." "The one thing that matters is…" An unfalsifiable sentence has nothing in it to check, so a wrong one survives review. These cluster in closing sentences — end on the last concrete fact instead of a summarizing ruling.
+**Aphorism.** A ruling that sounds conclusive but names no evidence or mechanism — "The one thing that matters is…". An unfalsifiable sentence has nothing in it to check, so a wrong one survives review. It's the missing mechanism that makes it one, not the sentence shape: "The installer never runs continuously" (line 10) is the same "X is not Y" form and is checkable. These cluster in closing sentences — end on the last concrete fact instead of a summarizing ruling.
 
 - "It isn't being ignored; it's inert." → "`latest_stable_tag` is defined in `installer/linux/lib/ghcr.sh` and called from nothing in the install path."
 
-**Defending in advance.** Hedges, disclaimers, "to be clear", "note that this doesn't mean…", pre-empting objections nobody raised. State the claim once. If it's wrong, the user will say so.
+**Defending in advance.** Hedges, "to be clear", "note that this doesn't mean…", pre-empting objections nobody raised. State the claim once. This does not cover factual limits — what you tested, what you didn't read, the conditions a claim holds under. Those are content, and the PR rules above require them.
 
-**Over-explication.** The fact, plus its implications, plus why it matters, plus a walkthrough. The user knows this system.
+**Over-explication.** The fact, plus its implications, plus why it matters, plus a walkthrough.
 
 - "This means that when the cache invalidates, which happens on every write, you'll see the latency spike you were asking about earlier." → "Every write invalidates the cache."
 
