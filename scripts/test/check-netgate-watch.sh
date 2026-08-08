@@ -162,7 +162,9 @@ heal_restarts() {
     local route="$1"; shift
     : >"$SYSTEMCTL_LOG"
     : >"$PODMAN_LOG"
-    env SIGNALK_NETGATE_ROUTE="$route" "$@" \
+    # Point the lock at a path that does not exist so these cases exercise
+    # the gateway logic, not guard 0.
+    env SIGNALK_NETGATE_ROUTE="$route" SIGNALK_OPERATION_LOCK="$tmp/no-lock" "$@" \
         bash "$CLI_TMPL" netgate-watch heal >"$tmp/heal.out" 2>&1 || true
     grep -c 'restart' "$SYSTEMCTL_LOG" || true
 }
@@ -224,6 +226,41 @@ if [[ "$n" == "2" ]]; then
 else
     miss "guard 4: expected 2 restarts when both are stale, got $n"
 fi
+
+# Guard 0: operation.lock serialises version switches, self-updates,
+# doctor-switches, hardware-applies and recovery. It lives on a host
+# bind-mount, so restarting a container does NOT release it -- killing a
+# holder mid-flight strands a lock that needs a manual `rm` over SSH, which
+# is worse than the stale gateway. But a stuck lock must not disable the
+# heal forever, so a clearly-stale one is overridden.
+lock_stub() {
+    env SIGNALK_NETGATE_ROUTE="$tmp/route-up" SIGNALK_OPERATION_LOCK="$1" \
+        PODMAN_RUNNING="$both" \
+        PODMAN_GW_signalk_doctor_server="$LINK_LOCAL" \
+        PODMAN_GW_signalk_updater_server="$LINK_LOCAL" \
+        bash "$CLI_TMPL" netgate-watch heal >"$tmp/heal.out" 2>&1 || true
+}
+
+: >"$SYSTEMCTL_LOG"
+touch "$tmp/op.lock"
+lock_stub "$tmp/op.lock"
+if [[ "$(grep -c 'restart' "$SYSTEMCTL_LOG" || true)" == "0" ]] \
+    && grep -q 'operation is in progress' "$tmp/heal.out"; then
+    ok "guard 0: a held operation.lock defers the heal (no mid-operation restart)"
+else
+    miss "guard 0: heal restarted a container while operation.lock was held"
+fi
+
+: >"$SYSTEMCTL_LOG"
+touch -d '20 minutes ago' "$tmp/op.lock" 2>/dev/null || touch -t "$(date -d '20 minutes ago' +%Y%m%d%H%M 2>/dev/null || echo 197001010000)" "$tmp/op.lock"
+lock_stub "$tmp/op.lock"
+if [[ "$(grep -c 'restart' "$SYSTEMCTL_LOG" || true)" == "2" ]] \
+    && grep -q 'treating it as stale' "$tmp/heal.out"; then
+    ok "guard 0: a stale operation.lock is overridden, with a warning"
+else
+    miss "guard 0: stale lock blocked the heal (one stuck file would disable it forever)"
+fi
+rm -f "$tmp/op.lock"
 
 # A restart that does not converge must say so. Guard 3 only self-limits when
 # the new container picks up the host gateway; without a post-restart check

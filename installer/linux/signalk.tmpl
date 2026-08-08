@@ -515,7 +515,8 @@ Description=Periodically verify the SignalK engine containers pasta network
 # to watch with a path unit here — no file changes when a route appears —
 # and a boot-only oneshot would miss the slow-router case entirely. The
 # 10min poll bounds worst-case downtime at ten minutes instead of five days;
-# each run is a ~150ms gateway comparison, no network probe. AccuracySec
+# a healthy pass is ~800ms of podman exec (measured, two containers), no
+# network probe and nothing that can hang. AccuracySec
 # lets systemd coalesce the wakeup so it does not defeat idle/suspend.
 OnBootSec=90
 OnUnitActiveSec=10min
@@ -617,9 +618,39 @@ _signalk_netgate_gw() {
 # is circular. Each container is healed independently so one failure does
 # not mask the other.
 _signalk_netgate_heal() {
-    local host_gw ctr ctr_gw unit healed=0
+    local host_gw ctr ctr_gw unit healed=0 lock
     host_gw=$(_signalk_netgate_gw)
     [[ -n "$host_gw" ]] || return 0
+
+    # Guard 0: never restart an engine mid-operation. operation.lock is the
+    # cross-engine mutex serialising version switches, self-updates,
+    # doctor-switches, hardware-applies and recovery. It lives on a host
+    # bind-mount, so restarting the container does NOT release it (see
+    # docs/recovery.md): killing a holder mid-flight leaves a lock held by a
+    # process that no longer exists, which needs a manual `rm` over SSH --
+    # strictly worse than the stale gateway we came to fix. A held lock also
+    # means an operation is in flight that will restart these containers
+    # itself, very likely fixing the gateway as a side effect. Wait for the
+    # next pass; this is a slow poll, not a deadline.
+    #
+    # Bounded, though: a stuck lock is itself a documented failure mode, and
+    # skipping forever would silently disable this self-heal for as long as
+    # the file sits there. docs/recovery.md puts the ceiling on a legitimate
+    # holder at the 180s health-poll plus a rollback budget, so a lock older
+    # than 15min is stale by the project's own definition -- proceed then,
+    # and say why.
+    lock="${SIGNALK_OPERATION_LOCK:-$HOME/.signalk-updater/operation.lock}"
+    if [[ -e "$lock" ]]; then
+        local lock_mtime lock_age
+        lock_mtime=$(stat -c %Y "$lock" 2>/dev/null || echo 0)
+        lock_age=$(( $(date +%s) - lock_mtime ))
+        if [[ "$lock_mtime" -gt 0 && "$lock_age" -lt 900 ]]; then
+            echo "[i] An engine operation is in progress (operation.lock held ${lock_age}s) — skipping the pasta gateway check."
+            return 0
+        fi
+        echo "[WARN] operation.lock has been held ${lock_age}s — treating it as stale and continuing." >&2
+        echo "       If engine operations are also failing, see 'stuck operation.lock' in docs/recovery.md." >&2
+    fi
 
     for ctr in signalk-doctor-server signalk-updater-server; do
         # Guard 2. Belt and braces with the empty-gateway check below (a
