@@ -75,12 +75,15 @@ for tmpl in "${GATED_TEMPLATES[@]}"; do
     # `$` would be eaten or halved by systemd's variable expansion ($$ -> $);
     # a lone `%` is a unit specifier. Either corrupts the predicate with no
     # failed unit to notice, which is why the predicate avoids both entirely.
+    # For %, strip the legitimate escaped %% pairs first; anything left is a
+    # bare specifier. Matching '%[^%]' instead would both miss a trailing %
+    # and wrongly flag a correctly-escaped %%.
     if printf '%s' "$line" | grep -q '[$]'; then
         miss "$name: route gate contains a literal \$ (systemd expands/halves it)"
-    elif printf '%s' "$line" | grep -q '%[^%]'; then
-        miss "$name: route gate contains an unescaped % (systemd specifier)"
+    elif printf '%s' "$line" | sed 's/%%//g' | grep -q '%'; then
+        miss "$name: route gate contains a bare % (systemd specifier)"
     else
-        ok "$name: route gate free of \$ and unescaped %"
+        ok "$name: route gate free of \$ and bare %"
     fi
 done
 
@@ -110,6 +113,11 @@ predicate=$(grep -h '^ExecStartPre=' "${GATED_TEMPLATES[0]}" \
 printf 'eth0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n' >"$tmp/route-default"
 printf 'eth0\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n' >"$tmp/route-subnet"
 printf 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n'  >"$tmp/route-header"
+# VLANs, bridges and aliases are ordinary on a boat LAN. An interface-name
+# class of [a-z0-9]+ silently rejects all three, so a host with a perfectly
+# good default route would burn the full wait on every boot.
+printf 'eth0.100\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n' >"$tmp/route-vlan"
+printf 'br-lan\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n'   >"$tmp/route-bridge"
 
 check_predicate() {
     local file="$1" want="$2" label="$3" got=no
@@ -123,6 +131,8 @@ check_predicate() {
 }
 
 check_predicate "$tmp/route-default" yes "matches a default route"
+check_predicate "$tmp/route-vlan"    yes "matches a VLAN interface (eth0.100)"
+check_predicate "$tmp/route-bridge"  yes "matches a bridge interface (br-lan)"
 check_predicate "$tmp/route-subnet"  no  "rejects a subnet-only route"
 check_predicate "$tmp/route-header"  no  "rejects the /proc/net/route header"
 

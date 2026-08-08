@@ -112,15 +112,18 @@ Label=io.signalk.role=doctor
 # Predicate is "a default route EXISTS", not "an address exists": docker0
 # and podman bridges carry global-scope addresses but no default route, so
 # an address gate would pass while pasta still falls back. /proc/net/route
-# needs no binary beyond grep, which is also why this is grep and not awk —
-# a literal `$` in a unit value has to be written `$$` and systemd warns on
-# backslash-escaped forms, so the predicate avoids `$` entirely.
+# needs no binary beyond grep. The interface-name field is matched as
+# "any non-whitespace" — VLANs (eth0.100), bridges (br-lan) and aliases
+# (eth0:1) are ordinary here, and a narrower class would silently burn the
+# full wait on those hosts. grep and not awk because a literal `$` in a
+# unit value has to be written `$$` and systemd warns on backslash-escaped
+# forms, so the predicate avoids `$` entirely.
 # Always exits 0 — an offline boat must still get its consoles, just 15s
 # later; where the route is already up the first check passes and the wait
 # is zero. 15s of the 120s TimeoutStartSec below, matching the server
 # template's resolver wait. A router that needs MINUTES still outruns this
 # bound; recovering from that is a follow-up (self-heal), not this gate.
-ExecStartPre=/bin/sh -c 'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -qE "^[a-z0-9]+[[:space:]]+00000000[[:space:]]+" /proc/net/route && break; sleep 1; done; exit 0'
+ExecStartPre=/bin/sh -c 'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -qE "^[^[:space:]]+[[:space:]]+00000000[[:space:]]+" /proc/net/route && break; sleep 1; done; exit 0'
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=120
