@@ -121,8 +121,10 @@ printf 'br-lan\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n'   >"$t
 
 check_predicate() {
     local file="$1" want="$2" label="$3" got=no
-    # shellcheck disable=SC2086 # predicate is a command line, must word-split
-    if ( eval "${predicate//\/proc\/net\/route/$file}" ) 2>/dev/null; then got=yes; fi
+    # The pattern is passed to grep as DATA, never eval'd: a template is
+    # input to this test, so executing a line lifted out of one would hand
+    # anything that edits a template arbitrary code execution in CI.
+    if grep -qE -- "$route_pattern" "$file"; then got=yes; fi
     if [[ "$got" == "$want" ]]; then
         ok "predicate $label -> $got"
     else
@@ -133,8 +135,13 @@ check_predicate() {
 for tmpl in "${GATED_TEMPLATES[@]}"; do
     [[ -f "$tmpl" ]] || continue
     name=$(basename "$tmpl" .container.template)
-    predicate=$(grep -h '^ExecStartPre=' "$tmpl" \
-        | sed -e 's/.*do //' -e 's/ && break.*//')
+    # Pull just the regex out of `grep -qE "<pattern>" /proc/net/route`.
+    route_pattern=$(grep -h '^ExecStartPre=' "$tmpl" \
+        | sed -n 's|.*grep -qE "\([^"]*\)" /proc/net/route.*|\1|p')
+    if [[ -z "$route_pattern" ]]; then
+        miss "$name: could not extract a route pattern from the gate"
+        continue
+    fi
 
     check_predicate "$tmp/route-default" yes "$name: matches a default route"
     check_predicate "$tmp/route-vlan"    yes "$name: matches a VLAN interface (eth0.100)"
