@@ -30,6 +30,11 @@ StartLimitBurst=5
 # rationale as in signalk-server.container.template: podman 5.x injects a
 # network-wait shim into every generated user unit; this unit only touches
 # unix sockets and needs no network at all.
+# Deliberately NO route gate here (#250). This container does get a pasta
+# netns, so an early boot can leave it on the link-local 169.254.2.1
+# fallback — but it never sends an IP packet (unix sockets only), so the
+# wrong address is inert. Gating it would delay BLE at every boot for no
+# benefit. Considered and declined; don't re-add without a use that needs IP.
 [Quadlet]
 DefaultDependencies=false
 
