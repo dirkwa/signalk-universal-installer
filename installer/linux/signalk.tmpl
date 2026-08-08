@@ -583,12 +583,18 @@ _signalk_ensure_netgate_watch() {
 # host itself has no route. `ip` is absent from the engine images, and
 # `podman inspect` reports nothing under pasta, so /proc/net/route on both
 # sides is the portable read.
+#
+# Always succeeds: a failed read is "no gateway", never a fatal error. The
+# script runs under `set -e`, so without the `|| true` a container that
+# stops between the running probe and this read would abort the whole heal
+# and leave the OTHER container unchecked -- exactly the coupling the loop
+# below is written to avoid. Same for a missing route file.
 _signalk_netgate_gw() {
     local ctr="${1:-}"
     if [[ -n "$ctr" ]]; then
-        podman exec "$ctr" awk '$2=="00000000"{print $3; exit}' /proc/net/route 2>/dev/null
+        podman exec "$ctr" awk '$2=="00000000"{print $3; exit}' /proc/net/route 2>/dev/null || true
     else
-        awk '$2=="00000000"{print $3; exit}' "${SIGNALK_NETGATE_ROUTE:-/proc/net/route}" 2>/dev/null
+        awk '$2=="00000000"{print $3; exit}' "${SIGNALK_NETGATE_ROUTE:-/proc/net/route}" 2>/dev/null || true
     fi
 }
 
@@ -629,11 +635,26 @@ _signalk_netgate_heal() {
 
         unit="${ctr}.service"
         echo "[i] ${ctr} is on a stale pasta gateway (container ${ctr_gw}, host ${host_gw}) — restarting ${unit}."
-        if systemctl --user restart "$unit"; then
-            healed=$((healed + 1))
-        else
+        if ! systemctl --user restart "$unit"; then
             echo "[ERR] could not restart ${unit}" >&2
+            continue
         fi
+
+        # Verify the restart actually converged. Guard 3 only self-limits when
+        # the new container picks up the host's gateway; if it does not, this
+        # would otherwise restart the container every time the timer fires,
+        # forever, with nothing in the journal but a repeating line. (The
+        # engine start limit does not catch it either: 1 start/10min stays
+        # under StartLimitBurst=5 per 300s.) Say so once, plainly, and leave
+        # the container alone until the next pass has fresh information.
+        ctr_gw=$(_signalk_netgate_gw "$ctr")
+        if [[ -n "$ctr_gw" && "$ctr_gw" != "$host_gw" ]]; then
+            echo "[WARN] ${ctr} is STILL on gateway ${ctr_gw} after a restart (host ${host_gw})." >&2
+            echo "       pasta is not picking up the host route; restarting again will not help." >&2
+            echo "       Check the host's routing table and 'podman logs ${ctr}'." >&2
+            continue
+        fi
+        healed=$((healed + 1))
     done
 
     [[ "$healed" -gt 0 ]] && echo "[OK] healed ${healed} container(s) stuck on a stale pasta gateway."

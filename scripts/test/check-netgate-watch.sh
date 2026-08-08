@@ -225,6 +225,85 @@ else
     miss "guard 4: expected 2 restarts when both are stale, got $n"
 fi
 
+# A restart that does not converge must say so. Guard 3 only self-limits when
+# the new container picks up the host gateway; without a post-restart check
+# a permanently stale container would be restarted on every pass forever,
+# with nothing in the journal but a repeating line (the engine start limit
+# does not catch it: 1 start/10min is under 5 per 300s).
+: >"$SYSTEMCTL_LOG"
+: >"$PODMAN_LOG"
+cat >"$tmp/bin/podman" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$PODMAN_LOG"
+[[ "$1" == "exec" ]] || exit 1
+ctr="$2"; shift 2
+[[ "$1" == "true" ]] && exit 0
+# The doctor never converges; the updater is healthy.
+[[ "$ctr" == "signalk-doctor-server" ]] && { printf '0202FEA9\n'; exit 0; }
+printf '0100A8C0\n'
+EOF
+chmod +x "$tmp/bin/podman"
+nc_rc=0
+env SIGNALK_NETGATE_ROUTE="$tmp/route-up" bash "$CLI_TMPL" netgate-watch heal \
+    >"$tmp/heal.out" 2>&1 || nc_rc=$?
+if [[ "$nc_rc" == "0" ]] \
+    && grep -q 'STILL on gateway' "$tmp/heal.out" \
+    && ! grep -q 'healed 1' "$tmp/heal.out"; then
+    ok "a restart that does not converge warns and is not counted as healed"
+else
+    miss "non-converging restart did not produce an actionable warning (rc=$nc_rc)"
+    printf '         %s\n' "$(head -2 "$tmp/heal.out")"
+fi
+
+# A container can stop between the running probe and the gateway read. Under
+# `set -e` an unabsorbed failure there aborts the whole heal, so the OTHER
+# container silently goes unchecked -- the containers must stay independent.
+: >"$SYSTEMCTL_LOG"
+: >"$PODMAN_LOG"
+cat >"$tmp/bin/podman" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$PODMAN_LOG"
+[[ "$1" == "exec" ]] || exit 1
+ctr="$2"; shift 2
+[[ "$1" == "true" ]] && exit 0
+# The doctor raced away after the running probe; the updater is stale.
+[[ "$ctr" == "signalk-doctor-server" ]] && exit 1
+printf '0202FEA9\n'
+EOF
+chmod +x "$tmp/bin/podman"
+# `|| rc=$?` and not a bare call: this script runs under `set -e` too, so an
+# aborting heal would kill the test instead of being reported as a failure.
+rc=0
+env SIGNALK_NETGATE_ROUTE="$tmp/route-up" bash "$CLI_TMPL" netgate-watch heal \
+    >"$tmp/heal.out" 2>&1 || rc=$?
+if [[ "$rc" == "0" ]] && grep -q 'restart signalk-updater-server.service' "$SYSTEMCTL_LOG"; then
+    ok "a container vanishing mid-run does not abort the heal for the other"
+else
+    miss "container vanishing mid-run aborted the heal (rc=$rc); the other went unchecked"
+fi
+
+# A missing/unreadable route file is "no route", not a fatal error.
+: >"$SYSTEMCTL_LOG"
+if env SIGNALK_NETGATE_ROUTE="$tmp/no-such-file" bash "$CLI_TMPL" netgate-watch heal \
+        >/dev/null 2>&1; then
+    ok "unreadable host route file exits cleanly (treated as no route)"
+else
+    miss "unreadable host route file made the heal exit non-zero"
+fi
+
+# Restore the standard stub for the checks below.
+cat >"$tmp/bin/podman" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$PODMAN_LOG"
+[[ "$1" == "exec" ]] || exit 1
+ctr="$2"; shift 2
+case " ${PODMAN_RUNNING:-} " in *" $ctr "*) ;; *) exit 1 ;; esac
+[[ "$1" == "true" ]] && exit 0
+var="PODMAN_GW_${ctr//-/_}"
+printf '%s\n' "${!var:-}"
+EOF
+chmod +x "$tmp/bin/podman"
+
 # The heal must never probe over the network: that request is exactly what
 # black-holes, and a timeout could not distinguish a broken pasta mapping
 # from a server that is merely down. Only `podman exec` is legitimate.
@@ -255,14 +334,19 @@ else
     miss "netgate-watch does not ride along with render-server (existing boxes would never get it)"
 fi
 
-if grep -q 'netgate-watch' installer/linux/install.sh; then
+# Match the invocation, not the bare name: install.sh explains the units in
+# a comment right above the call, so a plain name grep would still pass with
+# the call deleted.
+if grep -qE '^[^#]*signalk"? netgate-watch' installer/linux/install.sh; then
     ok "fresh install invokes 'signalk netgate-watch'"
 else
     miss "install.sh never installs the netgate-watch units"
 fi
 
 # The Windows shim hides Linux-host-only commands from its help output.
-if grep -q 'resolv-watch|netgate-watch' "$CLI_TMPL"; then
+# Assert the token is inside the alternation, not that it sits next to a
+# particular sibling -- reordering the alternation is harmless.
+if grep -qE '^[[:space:]]*/\^.*signalk \([a-z|-]*netgate-watch[a-z|-]*\)' "$CLI_TMPL"; then
     ok "Windows shim help-suppression lists netgate-watch"
 else
     miss "netgate-watch missing from the Windows shim help-suppression regex"
