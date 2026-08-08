@@ -1486,6 +1486,17 @@ if ! "$HOME/.local/bin/signalk" resolv-watch; then
     warn "DHCP may leave the app store offline until signalk-server restarts."
 fi
 
+# pasta gateway self-heal (signalk-netgate-watch.timer/.service): restarts an
+# engine container that latched onto a stale gateway when it started before
+# the host had a route, leaving host.containers.internal black-holed for the
+# container's lifetime. The engine Quadlets' ExecStartPre route gate covers
+# the fast case; this covers a router that takes minutes, and repairs boxes
+# whose Quadlets predate that gate. Same single-owner rationale as above.
+if ! "$HOME/.local/bin/signalk" netgate-watch; then
+    warn "could not install the signalk-netgate-watch units; a container that"
+    warn "starts before the host has a route may stay unreachable until restarted."
+fi
+
 # 11b. signalk-server drift apply
 # Re-runs of the installer may change PORT, the image tag (operator picks
 # standard ports at the prompt, or bumps the engine channel), or the image

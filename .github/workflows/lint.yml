@@ -64,6 +64,9 @@ jobs:
       - name: pasta route gate (issue #250)
         run: bash scripts/test/check-pasta-route-gate.sh
 
+      - name: pasta gateway self-heal (issue #250)
+        run: bash scripts/test/check-netgate-watch.sh
+
       - name: orphan container detection
         run: bash scripts/test/check-orphan-detection.sh
 

@@ -29,6 +29,15 @@
 #                          container started (boot beat DHCP). Idempotent;
 #                          render-server runs it automatically. `heal` runs one
 #                          probe-and-recover pass now (what the oneshot calls).
+#   signalk netgate-watch [heal]
+#                          no argument: (re)install the signalk-netgate-watch
+#                          systemd user units — a timer plus a oneshot that
+#                          restarts an engine container whose pasta network
+#                          latched onto a stale gateway at boot, leaving
+#                          host.containers.internal pointing at an address
+#                          nothing listens on. Idempotent; render-server runs
+#                          it automatically. `heal` runs one check-and-recover
+#                          pass now (what the oneshot calls).
 #   signalk resetadmin [user]
 #                          reset (or create) an admin user's password for the
 #                          Admin UI login (default user: admin). Prompts for the
@@ -148,7 +157,7 @@ usage() {
         # strip). A subcommand HEADER is "  signalk <name>"; CONTINUATION
         # lines are indented deeper and do not start a new "signalk" entry.
         printf '%s\n' "$help" | awk '
-            /^[[:space:]]*signalk (socketcan|bluetooth|timesync|render-server|resolv-watch)( |$)/ { drop = 1; next }
+            /^[[:space:]]*signalk (socketcan|bluetooth|timesync|render-server|resolv-watch|netgate-watch)( |$)/ { drop = 1; next }
             /^[[:space:]]*signalk / { drop = 0; print; next }
             drop { next }
             { print }
@@ -479,6 +488,218 @@ cmd_resolv_watch() {
     esac
 }
 
+# --- netgate-watch: pasta host-gateway self-heal --------------------------
+# pasta reads the host's routes ONCE, when podman creates the container, and
+# latches the result for the container's lifetime. A container that starts
+# before the host has a default route gets pasta's link-local fallback
+# (169.254.2.1) and its host.containers.internal translates to an address
+# nothing listens on — permanently. Traffic is black-holed rather than
+# refused, so probes hang instead of failing fast and no app-level retry
+# recovers (#250: a doctor unreachable for five days).
+#
+# The engine Quadlets carry a bounded ExecStartPre route gate, which covers
+# the common case. Two cases escape it, and this is what covers them:
+#   - a router that takes MINUTES (boat powered on all at once) outruns any
+#     bounded wait;
+#   - boxes installed before the gate shipped never got it — `signalk
+#     render-server` only re-renders signalk-server.container, so the engine
+#     Quadlets on an existing install are never rewritten.
+# These units ride along with every render, so `signalk update` installs the
+# timer on an existing box and it heals the old, ungated Quadlets in place.
+NETGATE_WATCH_TIMER_UNIT='# Installed by signalk-universal-installer (signalk netgate-watch)
+[Unit]
+Description=Periodically verify the SignalK engine containers pasta network
+
+[Timer]
+# Shortly after boot for the fast case, then a slow poll. There is nothing
+# to watch with a path unit here — no file changes when a route appears —
+# and a boot-only oneshot would miss the slow-router case entirely. The
+# 10min poll bounds worst-case downtime at ten minutes instead of five days;
+# a healthy pass is ~800ms of podman exec (measured, two containers), no
+# network probe and nothing that can hang. AccuracySec
+# lets systemd coalesce the wakeup so it does not defeat idle/suspend.
+OnBootSec=90
+OnUnitActiveSec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target'
+NETGATE_WATCH_SERVICE_UNIT='# Installed by signalk-universal-installer (signalk netgate-watch)
+[Unit]
+Description=Recreate SignalK engine containers stuck on the pasta link-local fallback
+# The probe + recovery logic lives in the CLI (`signalk netgate-watch
+# heal`). The unit is inert when the CLI is missing.
+ConditionPathExists=%h/.local/bin/signalk
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/signalk netgate-watch heal'
+
+_signalk_ensure_netgate_watch() {
+    local unit_dir="${HOME}/.config/systemd/user"
+    local timer_file="${unit_dir}/signalk-netgate-watch.timer"
+    local svc_file="${unit_dir}/signalk-netgate-watch.service"
+
+    if [[ "$(cat "$timer_file" 2>/dev/null)" == "$NETGATE_WATCH_TIMER_UNIT" ]] \
+        && [[ "$(cat "$svc_file" 2>/dev/null)" == "$NETGATE_WATCH_SERVICE_UNIT" ]] \
+        && systemctl --user is-enabled signalk-netgate-watch.timer >/dev/null 2>&1; then
+        echo "[OK] signalk-netgate-watch units already installed."
+        return 0
+    fi
+
+    mkdir -p "$unit_dir"
+    # Atomic per-file (temp + mv), 0644 — same shape as the Quadlet writes.
+    local f content tmp
+    for f in "$timer_file" "$svc_file"; do
+        if [[ "$f" == "$timer_file" ]]; then
+            content="$NETGATE_WATCH_TIMER_UNIT"
+        else
+            content="$NETGATE_WATCH_SERVICE_UNIT"
+        fi
+        tmp=$(mktemp "${f}.XXXXXX") || { echo "[ERR] mktemp failed for $f" >&2; return 1; }
+        if ! printf '%s\n' "$content" >"$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$f"; then
+            echo "[ERR] Failed to install $f." >&2
+            rm -f "$tmp"
+            return 1
+        fi
+    done
+
+    systemctl --user daemon-reload || {
+        echo "[ERR] systemctl --user daemon-reload failed; the netgate-watch units are" >&2
+        echo "      on disk but not parsed. Retry:  systemctl --user daemon-reload" >&2
+        return 1
+    }
+    systemctl --user enable --now signalk-netgate-watch.timer >/dev/null 2>&1 || {
+        echo "[ERR] could not enable signalk-netgate-watch.timer" >&2
+        return 1
+    }
+    echo "[OK] signalk-netgate-watch units installed and polling."
+}
+
+# Default IPv4 gateway as the raw little-endian hex from /proc/net/route
+# (field 3 of the row whose destination is 00000000). Empty when there is
+# no default route. With an argument, reads it from inside that container.
+# Comparing gateways beats testing for 169.254.x: it also catches pasta
+# latching onto a bridge-only interface, and it self-suppresses when the
+# host itself has no route. `ip` is absent from the engine images, and
+# `podman inspect` reports nothing under pasta, so /proc/net/route on both
+# sides is the portable read.
+#
+# Always succeeds: a failed read is "no gateway", never a fatal error. The
+# script runs under `set -e`, so without the `|| true` a container that
+# stops between the running probe and this read would abort the whole heal
+# and leave the OTHER container unchecked -- exactly the coupling the loop
+# below is written to avoid. Same for a missing route file.
+_signalk_netgate_gw() {
+    local ctr="${1:-}"
+    if [[ -n "$ctr" ]]; then
+        podman exec "$ctr" awk '$2=="00000000"{print $3; exit}' /proc/net/route 2>/dev/null || true
+    else
+        awk '$2=="00000000"{print $3; exit}' "${SIGNALK_NETGATE_ROUTE:-/proc/net/route}" 2>/dev/null || true
+    fi
+}
+
+# The oneshot's entry point. Deliberately NO probe of
+# host.containers.internal: that is the thing that hangs, and it cannot tell
+# "pasta is broken" from "signalk-server is down" — which would fire the
+# heal during a legitimate restart. Ordered guards, each a clean no-op exit:
+#   1. host has no default route  -> nothing to heal towards (offline boat)
+#   2. container not running      -> try-restart semantics; never start a
+#                                    unit the operator stopped
+#   3. gateways match             -> healthy, the ~150ms common path
+# Only then restart, whose `podman run --replace` re-runs pasta against the
+# routes as they are now. Guard 3 makes this self-limiting exactly as the
+# resolv-watch heal is: after one successful heal the gateways agree and
+# every later trigger exits there.
+#
+# systemctl --user restart, NOT _signalk_restart_server: that helper routes
+# through the updater's REST API, and these units ARE the updater and the
+# doctor — asking the updater to restart itself over its own broken network
+# is circular. Each container is healed independently so one failure does
+# not mask the other.
+_signalk_netgate_heal() {
+    local host_gw ctr ctr_gw unit healed=0 lock
+    host_gw=$(_signalk_netgate_gw)
+    [[ -n "$host_gw" ]] || return 0
+
+    # Guard 0: never restart an engine mid-operation. operation.lock is the
+    # cross-engine mutex serialising version switches, self-updates,
+    # doctor-switches, hardware-applies and recovery. It lives on a host
+    # bind-mount, so restarting the container does NOT release it (see
+    # docs/recovery.md): killing a holder mid-flight leaves a lock held by a
+    # process that no longer exists, which needs a manual `rm` over SSH --
+    # strictly worse than the stale gateway we came to fix. A held lock also
+    # means an operation is in flight that will restart these containers
+    # itself, very likely fixing the gateway as a side effect. Wait for the
+    # next pass; this is a slow poll, not a deadline.
+    #
+    # Bounded, though: a stuck lock is itself a documented failure mode, and
+    # skipping forever would silently disable this self-heal for as long as
+    # the file sits there. docs/recovery.md puts the ceiling on a legitimate
+    # holder at the 180s health-poll plus a rollback budget, so a lock older
+    # than 15min is stale by the project's own definition -- proceed then,
+    # and say why.
+    lock="${SIGNALK_OPERATION_LOCK:-$HOME/.signalk-updater/operation.lock}"
+    if [[ -e "$lock" ]]; then
+        local lock_mtime lock_age
+        lock_mtime=$(stat -c %Y "$lock" 2>/dev/null || echo 0)
+        lock_age=$(( $(date +%s) - lock_mtime ))
+        if [[ "$lock_mtime" -gt 0 && "$lock_age" -lt 900 ]]; then
+            echo "[i] An engine operation is in progress (operation.lock held ${lock_age}s) — skipping the pasta gateway check."
+            return 0
+        fi
+        echo "[WARN] operation.lock has been held ${lock_age}s — treating it as stale and continuing." >&2
+        echo "       If engine operations are also failing, see 'stuck operation.lock' in docs/recovery.md." >&2
+    fi
+
+    for ctr in signalk-doctor-server signalk-updater-server; do
+        # Guard 2. Belt and braces with the empty-gateway check below (a
+        # stopped container yields no gateway either), but kept explicit: it
+        # states the try-restart intent, and skips a second podman exec on a
+        # container that is not running.
+        podman exec "$ctr" true 2>/dev/null || continue
+        ctr_gw=$(_signalk_netgate_gw "$ctr")
+        # A running container that reports no default route tells us nothing
+        # to act on -- do not read that as "stale" and restart it.
+        [[ -n "$ctr_gw" ]] || continue
+        [[ "$ctr_gw" == "$host_gw" ]] && continue
+
+        unit="${ctr}.service"
+        echo "[i] ${ctr} is on a stale pasta gateway (container ${ctr_gw}, host ${host_gw}) — restarting ${unit}."
+        if ! systemctl --user restart "$unit"; then
+            echo "[ERR] could not restart ${unit}" >&2
+            continue
+        fi
+
+        # Verify the restart actually converged. Guard 3 only self-limits when
+        # the new container picks up the host's gateway; if it does not, this
+        # would otherwise restart the container every time the timer fires,
+        # forever, with nothing in the journal but a repeating line. (The
+        # engine start limit does not catch it either: 1 start/10min stays
+        # under StartLimitBurst=5 per 300s.) Say so once, plainly, and leave
+        # the container alone until the next pass has fresh information.
+        ctr_gw=$(_signalk_netgate_gw "$ctr")
+        if [[ -n "$ctr_gw" && "$ctr_gw" != "$host_gw" ]]; then
+            echo "[WARN] ${ctr} is STILL on gateway ${ctr_gw} after a restart (host ${host_gw})." >&2
+            echo "       pasta is not picking up the host route; restarting again will not help." >&2
+            echo "       Check the host's routing table and 'podman logs ${ctr}'." >&2
+            continue
+        fi
+        healed=$((healed + 1))
+    done
+
+    [[ "$healed" -gt 0 ]] && echo "[OK] healed ${healed} container(s) stuck on a stale pasta gateway."
+    return 0
+}
+
+cmd_netgate_watch() {
+    case "${1:-}" in
+        '') _signalk_ensure_netgate_watch ;;
+        heal) _signalk_netgate_heal ;;
+        *) echo "[ERR] Unknown netgate-watch argument: $1" >&2; return 1 ;;
+    esac
+}
+
 cmd_hardware() {
     # Re-detect attached hardware and (by default) re-render the live Quadlet.
     #
@@ -621,6 +842,14 @@ cmd_render_server() {
     # Non-fatal: a failed unit install must not block a template render.
     _signalk_ensure_resolv_watch \
         || echo "[WARN] could not install the signalk-resolv-watch units (continuing)" >&2
+
+    # Same deal for the pasta gateway self-heal. This is the ONLY way an
+    # existing box gets #250 fixed: the render below rewrites
+    # signalk-server.container only, so the engine Quadlets — and the route
+    # gate they now carry — are never refreshed on an install that predates
+    # it. The timer heals those old Quadlets without rewriting them.
+    _signalk_ensure_netgate_watch \
+        || echo "[WARN] could not install the signalk-netgate-watch units (continuing)" >&2
 
     local payload_dir="${DOCTOR_DATA}/installer-payload"
     local renderer="${payload_dir}/render-server-quadlet.sh"
@@ -2695,6 +2924,7 @@ case "${1:-help}" in
     hardware)         shift; cmd_hardware "$@" ;;
     render-server) shift; cmd_render_server "$@" ;;
     resolv-watch) shift; cmd_resolv_watch "$@" ;;
+    netgate-watch) shift; cmd_netgate_watch "$@" ;;
     resetadmin) shift; cmd_resetadmin "$@" ;;
     bug-report) shift; cmd_bug_report "$@" ;;
     stop)       cmd_stop ;;
