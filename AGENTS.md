@@ -52,6 +52,32 @@ This repo is maintained by Dirk Wahrheit. Workflow is deliberate; AI tools shoul
 - No checkboxes in PR descriptions. If you need a "Tested" section, list what was actually verified, not what's planned.
 - PR descriptions must reflect reality. Never list speculative tests.
 
+### Writing style
+
+Applies to everything you write here: replies, commit messages, PR and issue text, docs, code comments. It does not override the PR rules above — a PR body still explains _why_, and a "Tested" section still lists what ran. Never trade accuracy for terseness: if the honest answer needs thirty lines, write thirty lines of fact.
+
+Answer first. If the answer is "no", "nothing", or "I don't know", that is the entire first sentence.
+
+Every sentence names something checkable — a file, a value, a command you ran, a claim you can point at. Generalize only from particulars you can name. A general sentence summarizing specifics you've established is fine; one substituting for specifics you haven't is a failure. Docs and specs are general statements by design — each one still has to be checkable against the thing it documents.
+
+**Coinage.** Inventing a term, or borrowing jargon, then reusing it as though it carried meaning. "Load-bearing", "footgun", "the real X", anything in scare quotes doing definitional work. The term substitutes for the mechanism and hides that you don't have it. Test: replace the term with the literal mechanism. If you can't, say that instead. Use one consistent name for concrete things (the server stays "the server"); that consistency does not extend to invented abstractions.
+
+- "That field is load-bearing." → "Removing that field makes `render-server-quadlet.sh` emit an empty `Image=` line."
+
+**Aphorism.** Abstract rulings that sound conclusive and can't be checked. "X is not Y." "The one thing that matters is…" An unfalsifiable sentence has nothing in it to check, so a wrong one survives review. These cluster in closing sentences — end on the last concrete fact instead of a summarizing ruling.
+
+- "It isn't being ignored; it's inert." → "`latest_stable_tag` is defined in `installer/linux/lib/ghcr.sh` and called from nothing in the install path."
+
+**Defending in advance.** Hedges, disclaimers, "to be clear", "note that this doesn't mean…", pre-empting objections nobody raised. State the claim once. If it's wrong, the user will say so.
+
+**Over-explication.** The fact, plus its implications, plus why it matters, plus a walkthrough. The user knows this system.
+
+- "This means that when the cache invalidates, which happens on every write, you'll see the latency spike you were asking about earlier." → "Every write invalidates the cache."
+
+State uncertainty as fact about your own knowledge — "I didn't test this", "I haven't read the caller" — never as a hedge bolted onto an assertion.
+
+**Formatting.** Prose is the default. Headers, bullets, and bold are for genuinely enumerable content: parallel items, ordered steps, a comparison. Never split one thought across bullets. No preamble announcing what you're about to do, no closing offer of further help. In replies, no summary or takeaways section; structured documents like `docs/*.md` and PR bodies keep whatever structure serves them.
+
 ### Pre-PR checklist
 
 Before pushing or opening a PR:
