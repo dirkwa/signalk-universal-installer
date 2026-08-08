@@ -56,11 +56,12 @@ StartLimitIntervalSec=0
 # 90s timeout while flooding the journal with `sh[NNNN]: inactive` on any
 # host where the system network hasn't settled yet (fresh VMs especially).
 # DefaultDependencies=false (the [Quadlet]-section key, per
-# podman-systemd.unit(5)) is the documented suppression. NOTE: do NOT name
-# the shim service verbatim anywhere in this file — the generator scans the
-# source text and re-injects the dependency if it sees that string, undoing
-# this. This unit runs Network=host and binds the host's already-up
-# interfaces directly, so the wait buys nothing here.
+# podman-systemd.unit(5)) is the documented suppression. This unit runs
+# Network=host and binds the host's already-up interfaces directly, so the
+# wait buys nothing here — and unlike the pasta-networked engine Quadlets
+# it needs no route gate either (#250): host networking has no netns
+# address for pasta to latch, so there is nothing to get wrong at create
+# time.
 [Quadlet]
 DefaultDependencies=false
 

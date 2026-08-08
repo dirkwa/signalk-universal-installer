@@ -21,12 +21,16 @@ StartLimitBurst=5
 # 90s timeout while flooding the journal with `sh[NNNN]: inactive` on any
 # host where the system network hasn't settled yet (fresh VMs especially).
 # DefaultDependencies=false (the [Quadlet]-section key, per
-# podman-systemd.unit(5)) is the documented suppression. NOTE: do NOT name
-# the shim service verbatim anywhere in this file — the generator scans the
-# source text and re-injects the dependency if it sees that string, undoing
-# this. This container reaches signalk-server over pasta's
-# host.containers.internal and retries its health probe on its own, so the
-# wait buys nothing here.
+# podman-systemd.unit(5)) is the documented suppression.
+#
+# Suppressing that shim removes podman's only network-readiness ordering,
+# which re-opens a different race: pasta reads the host's routes ONCE at
+# container create and latches the result for the container's lifetime.
+# The [Service] ExecStartPre below restores the ordering directly. An
+# explicit [Unit] After=network-online.target would NOT work — that target
+# does not exist in the systemd USER manager (`systemctl --user is-active
+# network-online.target` is permanently inactive), which is precisely why
+# podman ships a polling shim instead.
 [Quadlet]
 DefaultDependencies=false
 
@@ -79,6 +83,30 @@ Label=io.signalk.persistent=true
 Label=io.signalk.role=updater
 
 [Service]
+# Wait for an IPv4 default route before podman creates the container. Runs
+# on the HOST, before `podman run`. pasta derives the netns address from
+# "the interface with the first default route"; with no default route it
+# falls back to link-local 169.254.2.1 (pasta(1)). host.containers.internal
+# then translates to an address nothing listens on, for the CONTAINER'S
+# LIFETIME — connections black-hole (SYN dropped, not refused), so the
+# health probe hangs instead of failing fast and no app-level retry can
+# recover it (#250: a doctor unreachable for five days).
+#
+# Predicate is "a default route EXISTS", not "an address exists": docker0
+# and podman bridges carry global-scope addresses but no default route, so
+# an address gate would pass while pasta still falls back. /proc/net/route
+# needs no binary beyond grep. The interface-name field is matched as
+# "any non-whitespace" — VLANs (eth0.100), bridges (br-lan) and aliases
+# (eth0:1) are ordinary here, and a narrower class would silently burn the
+# full wait on those hosts. grep and not awk because a literal `$` in a
+# unit value has to be written `$$` and systemd warns on backslash-escaped
+# forms, so the predicate avoids `$` entirely.
+# Always exits 0 — an offline boat must still get its consoles, just 15s
+# later; where the route is already up the first check passes and the wait
+# is zero. 15s of the 120s TimeoutStartSec below, matching the server
+# template's resolver wait. A router that needs MINUTES still outruns this
+# bound; recovering from that is a follow-up (self-heal), not this gate.
+ExecStartPre=/bin/sh -c 'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -qE "^[^[:space:]]+[[:space:]]+00000000[[:space:]]+" /proc/net/route && break; sleep 1; done; exit 0'
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=120
