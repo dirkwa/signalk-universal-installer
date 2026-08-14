@@ -94,6 +94,18 @@ else
     fail=1
 fi
 
+# --- 5. the Windows-only verb must be discoverable --------------------------
+# `signalk help` renders from the in-VM CLI, which knows nothing about the
+# verbs this shim adds. Without a help case, `machine` exists but appears in no
+# help output on the only platform that has it.
+if printf '%s\n' "$body" | grep -qE "^  'help' \{" \
+    && printf '%s\n' "$body" | grep -q 'signalk machine stop|start'; then
+    echo "  [OK]   'signalk help' advertises the Windows-only machine verb"
+else
+    echo "[MISS] 'machine' is not mentioned in 'signalk help' - undiscoverable"
+    fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo "[FAIL] windows shim"
     exit 1

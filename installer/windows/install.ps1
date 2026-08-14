@@ -1107,6 +1107,21 @@ switch (`$sub) {
     exit 0
   }
 
+  'help' {
+    # The help text comes from the in-VM CLI, which knows nothing about the
+    # Windows-only verbs this shim adds - so `signalk machine` would be
+    # invisible to the one audience that needs it. Forward, then append.
+    Send-Vm (`$SkEnv + 'signalk help')
+    Write-Host ''
+    Write-Host 'Windows-only:'
+    Write-Host '  signalk machine stop|start'
+    Write-Host '                         stop or start the Podman machine (the VM) itself and'
+    Write-Host '                         its auto-start-at-boot task. One level above'
+    Write-Host "                         'signalk stop', which pauses only signalk-server and"
+    Write-Host '                         leaves the updater + doctor consoles reachable.'
+    exit 0
+  }
+
   'hardware' {
     # Wrapper, NOT a rejection: the in-VM rescan is correct and must still run.
     # What is missing on Windows is the precondition. A USB device plugged into
