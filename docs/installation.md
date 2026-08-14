@@ -138,6 +138,15 @@ finally { Stop-Transcript; Read-Host 'Press Enter to close' }
 
 The transcript on your Desktop survives the window closing and the reboot exit, and the `Read-Host` keeps the window open so you can read the result. Attach `signalk-install.log` if you report a problem.
 
+**Release channel.** The one-liner installs the latest release. To track `master` instead, pass `-Channel master` — which means downloading the script rather than piping it, because `iex` has nowhere to put parameters:
+
+```powershell
+iwr -useb https://dirkwa.github.io/signalk-universal-installer/dev/installer/windows/install.ps1 -OutFile install.ps1
+.\install.ps1 -Channel master
+```
+
+The `signalk` command remembers the channel it was installed from, so `signalk update` on a master box stays on master rather than silently reverting to release. Set `$env:SIGNALK_CHANNEL` to override a single run, or pass `-InstallerBaseUrl` to point at a mirror or local checkout (an explicit base URL wins over the channel).
+
 The Windows installer:
 
 1. Checks for Administrator and Windows 11.
