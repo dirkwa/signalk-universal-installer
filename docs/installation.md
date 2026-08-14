@@ -32,7 +32,7 @@ The installer:
 10. `systemctl --user daemon-reload`, then starts (or restarts, on re-run) the doctor and updater services and asks the updater to start signalk-server via its REST API. Falls back to a direct `systemctl --user start` if the updater is unreachable, with a short warm-up retry to absorb a daemon-reload's transient socket downtime.
 11. Installs and auto-enables the bundled SignalK plugins (`signalk-container`, `signalk-updater`, `signalk-doctor`) into `~/.signalk/node_modules/` via the signalk-server container's bundled npm. Plugin config files are written **only** if absent — re-running the installer never overrides a user-disabled plugin.
 12. Installs the SSH-only recovery script at `~/.local/bin/signalk-recovery` (the safety net for when both engine containers are down).
-13. Installs the `signalk` command at `~/.local/bin/signalk` — a dispatcher for `health`, `recover`, `socketcan`, `bluetooth`, `timesync`, `update`, `resetadmin`, `bug-report`, `stop`, `start`, and `uninstall`. Run `signalk help` for usage. (`signalk update` calls the doctor's `/api/installer/refresh` endpoint to rewrite the host-resident scripts and Quadlet templates without restarting containers.) The installer also persists `~/.local/bin` on your PATH if it isn't already.
+13. Installs the `signalk` command at `~/.local/bin/signalk` — a dispatcher for `health`, `recover`, `socketcan`, `bluetooth`, `timesync`, `update`, `hardware`, `render-server`, `resolv-watch`, `netgate-watch`, `resetadmin`, `bug-report`, `stop`, `start`, `restart`, `devpod`, and `uninstall`. Run `signalk help` for usage. (`signalk update` calls the doctor's `/api/installer/refresh` endpoint to rewrite the host-resident scripts and Quadlet templates without restarting containers.) The installer also persists `~/.local/bin` on your PATH if it isn't already.
 
     The installer tees its own console output to `~/.signalk-updater/install.log` (truncated at the start of each run), and `signalk bug-report` copies that file into its bundle. So a failed install — including a pre-container failure where no container ever started to log to journald — leaves an on-disk trace you can attach to an issue. Set `SIGNALK_NO_INSTALL_LOG=1` to skip it (e.g. a read-only home).
 14. Installs the `signalk-timesync` host agent (root-owned script + systemd system timer, every 5 minutes): steps the host clock from SignalK's GPS `navigation.datetime` **only when the host has no NTP sync** (offline passages, RTC-less cold boot — an in-container plugin can never do this: `CLOCK_REALTIME` needs `CAP_SYS_TIME` in the initial user namespace), and follows the GPS position's IANA timezone via `tz-lookup` (installed into `~/.signalk/node_modules`; the lookup runs inside the container, the root-side `timedatectl` applies it — no polkit rule needed). NTP-synchronized boats are left alone. Opt out via `/etc/default/signalk-timesync` (`SIGNALK_TIMESYNC=off`, or `SIGNALK_TIMESYNC_TZ=off` for clock-only). `signalk timesync status` shows timer state and recent decisions.
@@ -167,11 +167,21 @@ The installer also drops a `signalk` command on your PATH (open a **new** termin
 
 - `signalk resetadmin [user]` — prompts for the new password **on Windows** (the VM has no terminal to prompt on) and applies it inside the machine.
 - `signalk bug-report` — generates the bundle inside the machine and copies the resulting `.tar.gz` out to your **Desktop**, so you have a file you can actually attach to an issue.
-- `signalk stop` — stops SignalK and keeps it stopped across reboots, **without uninstalling**: it stops the Podman machine (the whole VM goes down and frees RAM) and disables the boot task so a restart won't bring it back. Nothing is removed.
-- `signalk start` — resumes after `signalk stop`: re-enables the boot task and starts the machine again.
+- `signalk machine stop` / `signalk machine start` — Windows-only, one level **above** `signalk stop`: stops the Podman machine itself (the whole VM goes down and frees RAM, consoles included) and disables the boot task so a restart won't bring it back. `machine start` reverses both. Nothing is removed.
 - `signalk uninstall` — removes the stack inside the machine, then offers to remove the Podman machine itself (and with it **all** SignalK data — on Windows there is no `~/.signalk*` on the host; everything lives in the VM) plus the `signalk` command and its PATH entry.
 
+`signalk stop`, `start` and `restart` are **not** Windows-specific — they run inside the machine and mean exactly what they mean on Linux: `stop` pauses signalk-server (the data plane) and durably keeps it down across reboots, while the Updater (`:3003`) and Doctor (`:3004`) consoles **stay reachable** so you can still diagnose and recover. `restart` bounces signalk-server to pick up config changes without touching boot behaviour.
+
+So there are two levels of "off", and which you want depends on why:
+
+| Goal | Command | Consoles |
+|---|---|---|
+| Pause the nav server, keep diagnosing | `signalk stop` | up |
+| Free the VM's RAM / lay the boat up | `signalk machine stop` | down |
+
 To **pause** SignalK for later (the common "I don't need it running right now" case), use `signalk stop` — not `uninstall`. Resume with `signalk start`, or just re-run the installer (it resumes a stopped stack).
+
+> **Changed in this release.** `signalk stop` / `start` on Windows previously stopped and started the whole Podman machine. They now match Linux and act on signalk-server only; the old behaviour moved to `signalk machine stop` / `signalk machine start`. The previous form took the Doctor console down together with the server — removing the recovery surface at exactly the moment you might need it.
 
 ### Windows troubleshooting
 

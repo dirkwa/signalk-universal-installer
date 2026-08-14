@@ -50,8 +50,8 @@
 #   signalk stop           stop signalk-server (the data plane) without
 #                          uninstalling; the updater + doctor consoles stay up.
 #                          Preserves all data/config/plugins and stays down
-#                          across reboots until 'signalk start'. (On Windows this
-#                          stops the whole VM instead.)
+#                          across reboots until 'signalk start'. (On Windows,
+#                          'signalk machine stop' takes the whole VM down.)
 #   signalk start          start signalk-server again after 'signalk stop'
 #   signalk restart        restart signalk-server (picks up config changes).
 #                          Unlike stop/start this does not change whether the
