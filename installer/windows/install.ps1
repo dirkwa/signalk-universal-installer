@@ -1107,6 +1107,46 @@ switch (`$sub) {
     exit 0
   }
 
+  'hardware' {
+    # Wrapper, NOT a rejection: the in-VM rescan is correct and must still run.
+    # What is missing on Windows is the precondition. A USB device plugged into
+    # the PC is invisible to the Podman machine until usbipd-win attaches it to
+    # WSL, so ``signalk hardware rescan`` finds no serial device and reports
+    # nothing attached - true from inside the VM, and useless to someone
+    # looking at the adapter in their hand.
+    #
+    # Only ``rescan`` gets this treatment. ``hardware status`` just reads
+    # hardware.json and is correct unmodified, and a bare ``signalk hardware``
+    # defaults to status on the Linux side.
+    `$hwAct = if (`$args.Count -gt 1) { `$args[1] } else { 'status' }
+    if (`$hwAct -eq 'rescan') {
+        `$usbipd = Get-Command usbipd -ErrorAction SilentlyContinue
+        if (-not `$usbipd) {
+            Write-Host '[i] usbipd-win is not installed. USB devices (NMEA gateways, GPS pucks)'
+            Write-Host '    cannot reach the SignalK machine without it:'
+            Write-Host '      winget install --id dorssel.usbipd-win'
+            Write-Host '    See docs/installation.md for the full USB serial walkthrough.'
+            Write-Host ''
+        } else {
+            # ``usbipd list`` is a human-readable table whose columns have moved
+            # between releases, so don't parse it for state - just show it and
+            # let the operator read it. Printing the recipe whenever we cannot
+            # positively confirm an attachment is honest and never wrong.
+            Write-Host '[i] USB devices known to usbipd-win:'
+            & usbipd list 2>&1 | ForEach-Object { Write-Host "    `$_" }
+            Write-Host ''
+            Write-Host '    A device must be BOUND and ATTACHED to WSL before the machine sees it:'
+            Write-Host '      usbipd bind   --busid <BUSID>     (once per device, needs an admin shell)'
+            Write-Host '      usbipd attach --wsl --busid <BUSID>'
+            Write-Host ''
+        }
+    }
+    # Forward verbatim either way - including any --no-render the caller passed.
+    `$q = `$args | ForEach-Object { Quote-Bash `$_ }
+    Send-Vm (`$SkEnv + 'signalk ' + (`$q -join ' '))
+    exit `$LASTEXITCODE
+  }
+
   'socketcan' {
     # Pi CAN-HAT (GPIO/SPI socketcan) setup. Meaningless on Windows: the stack
     # runs in the Podman machine's VM, which has no CAN hardware, no SPI bus,

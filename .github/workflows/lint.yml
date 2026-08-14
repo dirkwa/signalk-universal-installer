@@ -93,3 +93,45 @@ jobs:
 
       - name: Pages installer-version label
         run: bash scripts/test/check-pages-version.sh
+
+      - name: Windows shim generation
+        run: bash scripts/test/check-windows-shim.sh
+
+      # install.ps1 is not shellcheck-able and had no syntax gate at all, so a
+      # broken here-string or an unbalanced brace could ship. pwsh is present on
+      # ubuntu-latest, and the parser runs without executing anything.
+      #
+      # This checks BOTH files that matter: install.ps1 itself, and the
+      # signalk-run.ps1 it generates - the generated one is where the escaping
+      # hazards land, and it is not otherwise parsed until it reaches a user's
+      # machine. It is a syntax gate, not a correctness gate: an unescaped $
+      # still yields valid PowerShell (see check-windows-shim.sh for that).
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = 'installer/windows/install.ps1'
+          $errs = $null
+          [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$null, [ref]$errs) | Out-Null
+          if ($errs) {
+              $errs | ForEach-Object { Write-Host "::error file=$src,line=$($_.Extent.StartLineNumber)::$($_.Message)" }
+              exit 1
+          }
+          Write-Host "$src parses clean"
+
+          # Render the generated shim the way install.ps1 does, then parse it.
+          $lines = Get-Content $src
+          $start = ($lines | Select-String -Pattern '^\$ps1Body = @"' | Select-Object -First 1).LineNumber
+          $end   = ($lines | Select-String -Pattern '^"@' | Where-Object { $_.LineNumber -gt $start } | Select-Object -First 1).LineNumber
+          if (-not $start -or -not $end) { Write-Host '::error::could not locate the $ps1Body here-string'; exit 1 }
+          $MachineName = 'signalk'
+          $Channel = 'release'
+          $SignalkPorts = @(80, 443, 3000, 3443, 3003, 3004)
+          $rendered = $ExecutionContext.InvokeCommand.ExpandString(($lines[$start..($end - 2)] -join "`n"))
+          $gerrs = $null
+          [System.Management.Automation.Language.Parser]::ParseInput($rendered, [ref]$null, [ref]$gerrs) | Out-Null
+          if ($gerrs) {
+              $gerrs | ForEach-Object { Write-Host "::error file=$src::generated signalk-run.ps1 line $($_.Extent.StartLineNumber): $($_.Message)" }
+              exit 1
+          }
+          Write-Host 'generated signalk-run.ps1 parses clean'
