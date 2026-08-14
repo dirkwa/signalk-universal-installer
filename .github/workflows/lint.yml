@@ -94,6 +94,21 @@ jobs:
       - name: Pages installer-version label
         run: bash scripts/test/check-pages-version.sh
 
+      - name: site release/master channels
+        run: bash scripts/test/check-site-channels.sh
+
+      - name: staged installer payload runnable
+        run: bash scripts/test/check-payload-runnable.sh
+
+      - name: podman probe timeout guards
+        run: bash scripts/test/check-podman-timeout-guards.sh
+
+      - name: preflight survives a wedged podman
+        run: bash scripts/test/check-preflight-podman-hang.sh
+
+      - name: unwedge-podman storage-lock recovery
+        run: bash scripts/test/check-unwedge-podman.sh
+
       - name: Windows shim generation
         run: bash scripts/test/check-windows-shim.sh
 
