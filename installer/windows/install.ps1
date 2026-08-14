@@ -31,10 +31,31 @@ param(
     [switch]$NoPause,            # skip the "press Enter to close" pause at the end
     [switch]$NoPrompt,           # don't ask for vessel identity / admin login
     [string]$InstallerVersion,
+    # Release channel, mirroring installer/linux/install.sh. ValidateSet accepts
+    # the same three spellings install.sh does and rejects anything else with a
+    # native PowerShell error, so the VM never sees a value bash would refuse.
+    [ValidateSet('release', 'master', 'dev')]
+    [string]$Channel = 'release',
     [string]$InstallerBaseUrl = 'https://dirkwa.github.io/signalk-universal-installer'
 )
 
 if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { $env:INSTALLER_VERSION } else { '0.0.0-scaffold' } }
+
+# Resolve the channel to a base URL, matching installer/linux/install.sh:51-61:
+# the site publishes the latest RELEASE at its root and master under /dev, and
+# an explicit base URL beats the channel (the escape hatch for local checkouts,
+# mirrors and CI).
+#
+# $InstallerBaseUrl has a DEFAULT, so it is never empty and `if (-not $x)`
+# cannot tell "caller passed one" from "fell back to the default".
+# $PSBoundParameters.ContainsKey is the test that can - it is the PowerShell
+# analogue of bash's ${VAR:-default} precedence, and without it -Channel would
+# silently lose to the default base URL on every run.
+$SkSiteRoot = 'https://dirkwa.github.io/signalk-universal-installer'
+$SkExplicitBase = $PSBoundParameters.ContainsKey('InstallerBaseUrl')
+if (-not $SkExplicitBase) {
+    $InstallerBaseUrl = if ($Channel -eq 'release') { $SkSiteRoot } else { "$SkSiteRoot/dev" }
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -879,6 +900,17 @@ foreach ($k in $skEnvVars.Keys) {
     $esc = $skEnvVars[$k] -replace "'", "'\''"
     $skEnv += "$k='$esc' "
 }
+# Pass the channel through so the in-VM installer resolves the SAME tree this
+# script fetched install.sh from. Skipped when the caller gave an explicit
+# -InstallerBaseUrl: install.sh:61 lets an explicit base win over the channel,
+# and sending both would describe two different trees in one command line.
+#
+# This rides in $skEnv, which is spliced in AFTER the pipe, so the assignment
+# lands on bash and not on curl - the distinction README.md:46-48 calls out,
+# where a channel set on curl is read by nothing and silently ignored.
+if (-not $SkExplicitBase) {
+    $skEnv += "SIGNALK_CHANNEL='" + ($Channel -replace "'", "'\''") + "' "
+}
 # Keep the curl|bash on ONE line - no backslash line-continuation. A `\` at end
 # of line followed by CRLF makes bash continue the line and swallow the `\r`
 # into the next token (seen as `$'bash\r': command not found`). One line has no
@@ -943,7 +975,17 @@ $ps1Body = @"
 #    line, suppress the VM-internal-path uninstall block). Kept separate from
 #    SIGNALK_PUBLIC_HOST so a Linux/macOS user who sets a public host for URL
 #    display doesn't accidentally trigger the Windows-only behavior.
-`$SkEnv = 'SIGNALK_PUBLIC_HOST=localhost SIGNALK_WINDOWS_SHIM=1 '
+#  - SIGNALK_CHANNEL: the channel this box was installed from, so ``signalk
+#    update`` re-fetches the tree it came from instead of silently reverting a
+#    master install to release. \$env:SIGNALK_CHANNEL overrides it at call time,
+#    matching the documented Linux ``SIGNALK_CHANNEL=master signalk update``.
+#
+# NOTE the bare `$Channel below: it interpolates HERE, at install time, baking
+# the chosen channel into the generated shim. That is deliberate and is the one
+# intentional unescaped expansion in this here-string - every other `$ in this
+# block is escaped so it survives into the generated file.
+`$SkChannel = if (`$env:SIGNALK_CHANNEL) { `$env:SIGNALK_CHANNEL } else { '$Channel' }
+`$SkEnv = "SIGNALK_PUBLIC_HOST=localhost SIGNALK_WINDOWS_SHIM=1 SIGNALK_CHANNEL='`$SkChannel' "
 
 # Base64-encode a bash command and run it in the VM. base64 is one token with no
 # shell metacharacters (immune to quote mangling) and ``base64 -d`` ignores the
