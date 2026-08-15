@@ -301,7 +301,22 @@ function Stop-ForReboot {
     Write-Host "    1. Reboot Windows."
     Write-Host "    2. Open PowerShell as Administrator again."
     Write-Host "    3. Re-run the same command - it picks up where it left off:"
-    Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
+    # The resume command must carry the parameters THIS run was given. A plain
+    # `iwr … | iex` cannot: iex has nowhere to put arguments, so a
+    # `-Channel master` install would resume on the release channel and bake
+    # `release` into the shim - silently installing something other than what
+    # was asked for, at the one moment the operator is least likely to notice.
+    # With no non-default parameters the one-liner is still the friendlier form,
+    # so only fall back to download-then-invoke when there is something to carry.
+    $resumeArgs = @()
+    if ($Channel -ne 'release') { $resumeArgs += "-Channel $Channel" }
+    if ($SkExplicitBase) { $resumeArgs += "-InstallerBaseUrl '$InstallerBaseUrl'" }
+    if ($resumeArgs.Count -gt 0) {
+        Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 -OutFile install.ps1"
+        Write-Host "       .\install.ps1 $($resumeArgs -join ' ')"
+    } else {
+        Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
+    }
     Write-Host ""
     Write-Host "  (If WSL still fails after the reboot, confirm hardware virtualization"
     Write-Host "   - VT-x / AMD-V - is enabled in your BIOS/UEFI.)"
@@ -985,6 +1000,15 @@ $ps1Body = @"
 # intentional unescaped expansion in this here-string - every other `$ in this
 # block is escaped so it survives into the generated file.
 `$SkChannel = if (`$env:SIGNALK_CHANNEL) { `$env:SIGNALK_CHANNEL } else { '$Channel' }
+# `$SkChannel lands inside single quotes in a bash command line, and the env-var
+# branch is whatever the caller exported - so a value containing a quote would
+# close that string and inject. install.sh accepts exactly three spellings, so
+# validate rather than escape: anything else is a typo the VM would reject with
+# a worse message, and there is no legitimate value this rejects.
+if (`$SkChannel -notmatch '^(release|master|dev)`$') {
+    Write-Host "[ERR] SIGNALK_CHANNEL must be 'release', 'master' or 'dev' (got '`$SkChannel')"
+    exit 1
+}
 `$SkEnv = "SIGNALK_PUBLIC_HOST=localhost SIGNALK_WINDOWS_SHIM=1 SIGNALK_CHANNEL='`$SkChannel' "
 
 # Base64-encode a bash command and run it in the VM. base64 is one token with no
