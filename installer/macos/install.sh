@@ -24,6 +24,7 @@ fi
 
 info()    { printf '[i] %s\n' "$*"; }
 ok()      { printf '[OK] %s\n' "$*"; }
+warn()    { printf '[WARN] %s\n' "$*"; }
 die()     { printf '[ERR] %s\n' "$*" >&2; exit 1; }
 section() { printf '\n== %s ==\n' "$*"; }
 
@@ -149,47 +150,165 @@ LINUX_SCRIPT
 
 # On SELinux VMs, container label isolation blocks access to the mounted
 # rootless podman socket unless SecurityLabelDisable is set.
-info "Applying signalk-server socket-access fix for SELinux VMs"
+info "Applying socket-access fix for SELinux VMs"
 podman machine ssh "$MACHINE_NAME" bash << 'SOCKET_FIX_SCRIPT'
 set -euo pipefail
-quadlet="$HOME/.config/containers/systemd/signalk-server.container"
-if [[ ! -f "$quadlet" ]]; then
-    echo "WARN: signalk-server quadlet not found at $quadlet; skipping socket-access fix" >&2
-    exit 0
-fi
+changed=0
+for unit in signalk-server signalk-updater-server signalk-doctor-server; do
+    quadlet="$HOME/.config/containers/systemd/${unit}.container"
+    if [[ ! -f "$quadlet" ]]; then
+        echo "WARN: ${unit} quadlet not found at $quadlet; skipping socket-access fix" >&2
+        continue
+    fi
 
-if grep -q '^SecurityLabelDisable=true$' "$quadlet"; then
-    echo "signalk-server quadlet already has SecurityLabelDisable=true"
-    exit 0
-fi
+    if grep -q '^SecurityLabelDisable=true$' "$quadlet"; then
+        echo "${unit} quadlet already has SecurityLabelDisable=true"
+        continue
+    fi
 
-if ! grep -q '^Volume=%t/podman/podman.sock:/var/run/docker.sock$' "$quadlet"; then
-    echo "WARN: signalk-server quadlet has no podman socket mount; skipping socket-access fix" >&2
-    exit 0
-fi
+    if ! grep -q '^Volume=%t/podman/podman.sock:/var/run/docker.sock$' "$quadlet"; then
+        echo "WARN: ${unit} quadlet has no podman socket mount; skipping socket-access fix" >&2
+        continue
+    fi
 
-tmp="${quadlet}.tmp"
-awk '
-    BEGIN { inserted = 0 }
-    /^Volume=%t\/podman\/podman\.sock:\/var\/run\/docker\.sock$/ {
-        print
-        if (!inserted) {
-            print "SecurityLabelDisable=true"
-            inserted = 1
+    tmp="${quadlet}.tmp"
+    awk '
+        BEGIN { inserted = 0 }
+        /^Volume=%t\/podman\/podman\.sock:\/var\/run\/docker\.sock$/ {
+            print
+            if (!inserted) {
+                print "SecurityLabelDisable=true"
+                inserted = 1
+            }
+            next
         }
-        next
-    }
+        { print }
+    ' "$quadlet" > "$tmp"
+    mv "$tmp" "$quadlet"
+    changed=1
+    echo "Applied socket-access fix to ${unit}.container"
+done
+
+if [[ "$changed" -eq 1 ]]; then
+    systemctl --user daemon-reload
+fi
+
+for service in signalk-server.service signalk-updater-server.service signalk-doctor-server.service; do
+    if systemctl --user restart "$service"; then
+        echo "Restarted $service"
+    else
+        echo "WARN: restart failed for $service; restart it manually" >&2
+    fi
+done
+SOCKET_FIX_SCRIPT
+
+# Some Podman-machine networking setups resolve host.containers.internal to an
+# address that is not reachable from updater/doctor containers.
+info "Checking engine-to-server health URL reachability"
+podman machine ssh "$MACHINE_NAME" bash << 'HEALTH_URL_FIX_SCRIPT'
+set -euo pipefail
+
+doctor_container="signalk-doctor-server"
+updater_quadlet="$HOME/.config/containers/systemd/signalk-updater-server.container"
+doctor_quadlet="$HOME/.config/containers/systemd/signalk-doctor-server.container"
+server_quadlet="$HOME/.config/containers/systemd/signalk-server.container"
+
+if ! podman container exists "$doctor_container"; then
+    systemctl --user start signalk-doctor-server.service || true
+    for _ in 1 2 3 4 5; do
+        podman container exists "$doctor_container" && break
+        sleep 1
+    done
+fi
+if ! podman container exists "$doctor_container"; then
+    echo "WARN: doctor container is not running; skipping health URL reachability fix" >&2
+    exit 0
+fi
+
+sk_http_port=$(grep -E '^Environment=PORT=' "$server_quadlet" 2>/dev/null | awk -F= '{print $NF}' | tail -n1)
+sk_http_port=${sk_http_port:-80}
+sk_https_port=$(grep -E '"sslport"' "$HOME/.signalk/settings.json" 2>/dev/null | sed -E 's/[^0-9]*([0-9]+).*/\1/' | head -n1)
+sk_https_port=${sk_https_port:-443}
+
+probe_signalk_http() {
+        local host="$1"
+        local port="$2"
+    podman exec "$doctor_container" node -e '
+const url = process.argv[1];
+const ok = (s) => s >= 200 && s < 400;
+fetch(url, { redirect: "manual" })
+    .then((r) => {
+        console.log(ok(r.status) ? "ok" : `status-${r.status}`);
+    })
+    .catch(() => {
+        console.log("error");
+    });
+' "http://${host}:${port}/signalk" 2>/dev/null | grep -q '^ok$'
+}
+
+probe_host_port() {
+    local host="$1"
+    local port="$2"
+    podman exec "$doctor_container" node -e '
+const net = require("net");
+const host = process.argv[1];
+const port = Number(process.argv[2]);
+const s = net.createConnection({ host, port, timeout: 2500 }, () => {
+  console.log("ok");
+  s.destroy();
+});
+s.on("timeout", () => { console.log("timeout"); s.destroy(); });
+s.on("error", () => { console.log("error"); });
+' "$host" "$port" 2>/dev/null | grep -q '^ok$'
+}
+
+if probe_signalk_http host.containers.internal "$sk_http_port"; then
+    echo "Engine containers can reach host.containers.internal:${sk_http_port}"
+    exit 0
+fi
+
+alias_ip=$(podman exec "$doctor_container" sh -lc "getent hosts host.containers.internal | awk '{print \$1}' | head -n1" 2>/dev/null || true)
+if [[ -z "$alias_ip" ]]; then
+    echo "WARN: could not resolve host.containers.internal from doctor container; skipping health URL fix" >&2
+    exit 0
+fi
+
+fallback_ip=$(echo "$alias_ip" | awk -F. 'NF==4 { print $1"."$2"."$3".1" }')
+if [[ -z "$fallback_ip" ]]; then
+    echo "WARN: could not derive fallback host IP from ${alias_ip}; skipping health URL fix" >&2
+    exit 0
+fi
+
+if ! probe_host_port "$fallback_ip" "$sk_http_port"; then
+    echo "WARN: derived fallback host IP ${fallback_ip}:${sk_http_port} is not reachable; skipping health URL fix" >&2
+    exit 0
+fi
+
+if ! probe_signalk_http "$fallback_ip" "$sk_http_port"; then
+    echo "WARN: derived fallback host IP ${fallback_ip}:${sk_http_port} does not serve SignalK /signalk; skipping health URL fix" >&2
+    exit 0
+fi
+
+tmp="${updater_quadlet}.tmp"
+awk -v ip="$fallback_ip" -v p="$sk_http_port" '
+    index($0, "Environment=SIGNALK_HEALTH_URL=") == 1 { $0 = "Environment=SIGNALK_HEALTH_URL=http://" ip ":" p "/signalk" }
+    index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" ip ":" p }
     { print }
-' "$quadlet" > "$tmp"
-mv "$tmp" "$quadlet"
+' "$updater_quadlet" > "$tmp"
+mv "$tmp" "$updater_quadlet"
+
+tmp="${doctor_quadlet}.tmp"
+awk -v ip="$fallback_ip" -v hp="$sk_http_port" -v sp="$sk_https_port" '
+    index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" ip ":" hp "/signalk" }
+    index($0, "Environment=SIGNALK_HTTPS_URL=") == 1 { $0 = "Environment=SIGNALK_HTTPS_URL=https://" ip ":" sp "/signalk" }
+    { print }
+' "$doctor_quadlet" > "$tmp"
+mv "$tmp" "$doctor_quadlet"
 
 systemctl --user daemon-reload
-if systemctl --user restart signalk-server.service; then
-    echo "Applied socket-access fix and restarted signalk-server.service"
-else
-    echo "WARN: applied socket-access fix but restart failed; restart signalk-server.service manually" >&2
-fi
-SOCKET_FIX_SCRIPT
+systemctl --user restart signalk-updater-server.service signalk-doctor-server.service
+echo "Rewrote updater/doctor health URLs to fallback host IP ${fallback_ip}"
+HEALTH_URL_FIX_SCRIPT
 
 # 5. Forward the ports out of the machine
 section "Port forwarding"

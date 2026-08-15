@@ -128,6 +128,8 @@ GroupAdd=keep-groups
 
 Volume=%h/.signalk:/home/node/.signalk:Z
 Volume=%t/podman/podman.sock:/var/run/docker.sock
+# SELinux hosts: allow access to the mounted rootless podman socket.
+SecurityLabelDisable=true
 
 # Read-only view of the host's linger registry so signalk-container's
 # Deployment Doctor can warn when linger gets disabled after install

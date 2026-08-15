@@ -50,6 +50,8 @@ PublishPort=__PUBLISH_HOST__:3004:3004
 Volume=%h/.signalk-doctor:/data:Z
 Volume=%h/.config/containers/systemd:/quadlets:Z
 Volume=%t/podman/podman.sock:/var/run/docker.sock
+# SELinux hosts: allow access to the mounted rootless podman socket.
+SecurityLabelDisable=true
 Volume=%t/bus:/host/dbus:ro
 # Read access to the updater's data dir for the shared operation.lock
 Volume=%h/.signalk-updater:/updater-data:rw,Z
