@@ -31,10 +31,38 @@ param(
     [switch]$NoPause,            # skip the "press Enter to close" pause at the end
     [switch]$NoPrompt,           # don't ask for vessel identity / admin login
     [string]$InstallerVersion,
+    # Release channel, mirroring installer/linux/install.sh. ValidateSet accepts
+    # the same three spellings install.sh does and rejects anything else with a
+    # native PowerShell error, so the VM never sees a value bash would refuse.
+    [ValidateSet('release', 'master', 'dev')]
+    [string]$Channel = 'release',
     [string]$InstallerBaseUrl = 'https://dirkwa.github.io/signalk-universal-installer'
 )
 
 if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { $env:INSTALLER_VERSION } else { '0.0.0-scaffold' } }
+
+# Resolve the channel to a base URL, matching installer/linux/install.sh:51-61:
+# the site publishes the latest RELEASE at its root and master under /dev, and
+# an explicit base URL beats the channel (the escape hatch for local checkouts,
+# mirrors and CI).
+#
+# $InstallerBaseUrl has a DEFAULT, so it is never empty and `if (-not $x)`
+# cannot tell "caller passed one" from "fell back to the default".
+# $PSBoundParameters.ContainsKey is the test that can - it is the PowerShell
+# analogue of bash's ${VAR:-default} precedence, and without it -Channel would
+# silently lose to the default base URL on every run.
+#
+# Lowercase the channel before it goes anywhere. PowerShell's ValidateSet is
+# CASE-INSENSITIVE and passes the caller's original spelling through, so
+# `-Channel MASTER` validates here and then matches no branch of install.sh's
+# case statement, aborting the install inside the VM with a message about a
+# value the operator believed was legal.
+$SkSiteRoot = 'https://dirkwa.github.io/signalk-universal-installer'
+$Channel = $Channel.ToLowerInvariant()
+$SkExplicitBase = $PSBoundParameters.ContainsKey('InstallerBaseUrl')
+if (-not $SkExplicitBase) {
+    $InstallerBaseUrl = if ($Channel -eq 'release') { $SkSiteRoot } else { "$SkSiteRoot/dev" }
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -280,7 +308,43 @@ function Stop-ForReboot {
     Write-Host "    1. Reboot Windows."
     Write-Host "    2. Open PowerShell as Administrator again."
     Write-Host "    3. Re-run the same command - it picks up where it left off:"
-    Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
+    # The resume command must carry the parameters THIS run was given. A plain
+    # `iwr ... | iex` cannot: iex has nowhere to put arguments, so a
+    # `-Channel master` install would resume on the release channel and bake
+    # `release` into the shim - silently installing something other than what
+    # was asked for, at the one moment the operator is least likely to notice.
+    # The same applies to every other parameter: -MachineName nav would resume
+    # against the default 'signalk' machine.
+    #
+    # Read $script:PSBoundParameters rather than listing names here, so a
+    # parameter added later is carried without anyone remembering to update
+    # this. Switches ($true) are emitted bare; everything else is single-quoted
+    # with embedded quotes doubled, so a value containing a space, an ampersand
+    # or an apostrophe survives as ONE argument instead of changing the parse.
+    $resumeArgs = @()
+    foreach ($kv in $script:PSBoundParameters.GetEnumerator() | Sort-Object Key) {
+        $v = $kv.Value
+        if ($v -is [switch]) {
+            if ($v.IsPresent) { $resumeArgs += "-$($kv.Key)" }
+        } else {
+            $resumeArgs += "-$($kv.Key) '$($v -replace "'", "''")'"
+        }
+    }
+    # With nothing to carry the one-liner is still the friendlier form, so only
+    # fall back to download-then-invoke when there is something to preserve.
+    if ($resumeArgs.Count -gt 0) {
+        # A unique filename: -OutFile would silently overwrite an install.ps1
+        # already sitting in the operator's working directory.
+        $resumeFile = "signalk-install-$(Get-Random).ps1"
+        # Escape the URL the same way the arguments above are escaped: it is
+        # single-quoted here too, and an apostrophe in a mirror URL would
+        # otherwise close the string and break the printed command.
+        $resumeUrl = "$InstallerBaseUrl/installer/windows/install.ps1" -replace "'", "''"
+        Write-Host "       iwr -useb '$resumeUrl' -OutFile $resumeFile"
+        Write-Host "       .\$resumeFile $($resumeArgs -join ' ')"
+    } else {
+        Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
+    }
     Write-Host ""
     Write-Host "  (If WSL still fails after the reboot, confirm hardware virtualization"
     Write-Host "   - VT-x / AMD-V - is enabled in your BIOS/UEFI.)"
@@ -879,6 +943,17 @@ foreach ($k in $skEnvVars.Keys) {
     $esc = $skEnvVars[$k] -replace "'", "'\''"
     $skEnv += "$k='$esc' "
 }
+# Pass the channel through so the in-VM installer resolves the SAME tree this
+# script fetched install.sh from. Skipped when the caller gave an explicit
+# -InstallerBaseUrl: install.sh:61 lets an explicit base win over the channel,
+# and sending both would describe two different trees in one command line.
+#
+# This rides in $skEnv, which is spliced in AFTER the pipe, so the assignment
+# lands on bash and not on curl - the distinction README.md:46-48 calls out,
+# where a channel set on curl is read by nothing and silently ignored.
+if (-not $SkExplicitBase) {
+    $skEnv += "SIGNALK_CHANNEL='" + ($Channel -replace "'", "'\''") + "' "
+}
 # Keep the curl|bash on ONE line - no backslash line-continuation. A `\` at end
 # of line followed by CRLF makes bash continue the line and swallow the `\r`
 # into the next token (seen as `$'bash\r': command not found`). One line has no
@@ -943,7 +1018,26 @@ $ps1Body = @"
 #    line, suppress the VM-internal-path uninstall block). Kept separate from
 #    SIGNALK_PUBLIC_HOST so a Linux/macOS user who sets a public host for URL
 #    display doesn't accidentally trigger the Windows-only behavior.
-`$SkEnv = 'SIGNALK_PUBLIC_HOST=localhost SIGNALK_WINDOWS_SHIM=1 '
+#  - SIGNALK_CHANNEL: the channel this box was installed from, so ``signalk
+#    update`` re-fetches the tree it came from instead of silently reverting a
+#    master install to release. `$env:SIGNALK_CHANNEL overrides it at call time,
+#    matching the documented Linux ``SIGNALK_CHANNEL=master signalk update``.
+#
+# NOTE the bare `$Channel below: it interpolates HERE, at install time, baking
+# the chosen channel into the generated shim. That is deliberate and is the one
+# intentional unescaped expansion in this here-string - every other `$ in this
+# block is escaped so it survives into the generated file.
+`$SkChannel = if (`$env:SIGNALK_CHANNEL) { `$env:SIGNALK_CHANNEL.ToLowerInvariant() } else { '$Channel' }
+# `$SkChannel lands inside single quotes in a bash command line, and the env-var
+# branch is whatever the caller exported - so a value containing a quote would
+# close that string and inject. install.sh accepts exactly three spellings, so
+# validate rather than escape: anything else is a typo the VM would reject with
+# a worse message, and there is no legitimate value this rejects.
+if (`$SkChannel -notmatch '^(release|master|dev)`$') {
+    Write-Host "[ERR] SIGNALK_CHANNEL must be 'release', 'master' or 'dev' (got '`$SkChannel')"
+    exit 1
+}
+`$SkEnv = "SIGNALK_PUBLIC_HOST=localhost SIGNALK_WINDOWS_SHIM=1 SIGNALK_CHANNEL='`$SkChannel' "
 
 # Base64-encode a bash command and run it in the VM. base64 is one token with no
 # shell metacharacters (immune to quote mangling) and ``base64 -d`` ignores the
@@ -988,49 +1082,67 @@ function Quote-Bash {
 
 switch (`$sub) {
 
-  'stop' {
-    # Stop SignalK AND keep it stopped across reboots, without uninstalling. On
-    # Windows the on/off switch is the Podman MACHINE plus its boot task - not the
-    # in-VM systemd units: stop the machine (everything in it goes down, frees RAM)
-    # and DISABLE the S4U boot task so a reboot doesn't restart it. `signalk start`
-    # reverses both. Nothing is removed (machine, data, config, plugins preserved).
-    `$taskName = "SignalK Podman Machine (`$Machine)"
-    Write-Host '[i] Stopping SignalK and disabling auto-start at boot...'
-    # Surface a task-toggle failure: this shim runs non-elevated but the task was
-    # registered elevated, so Disable can be denied - if so, the stack would still
-    # come back at boot and we must NOT claim it won't.
-    `$taskOff = `$true
-    try { Disable-ScheduledTask -TaskName `$taskName -ErrorAction Stop | Out-Null }
-    catch { `$taskOff = `$false; Write-Host "[WARN] Could not disable the boot task (`$(`$_.Exception.Message)). It may still start at boot; disable 'SignalK Podman Machine' in Task Scheduler manually." }
-    # `podman machine stop` exits 125 if already stopped - treat that as success.
-    # A real stop failure is a HARD error: the machine is still running, so we
-    # must NOT report '[OK] stopped'. (The boot task is already disabled above,
-    # which is fine - auto-start is off even though the machine is still up.)
-    `$stopOut = (& podman machine stop `$Machine 2>&1) | Out-String
-    if (`$LASTEXITCODE -ne 0 -and `$stopOut -notmatch 'already stopped|not running') {
-        Write-Host "[ERR] 'podman machine stop' failed: `$(`$stopOut.Trim())"
-        if (`$taskOff) {
-            Write-Host '      SignalK is still running. Auto-start at boot was disabled; re-run after fixing the error.'
-        } else {
-            Write-Host '      SignalK is still running, and auto-start at boot may still be enabled; disable the task manually after fixing the error.'
-        }
+  'machine' {
+    # VM-level power control: the Podman MACHINE plus its S4U boot task.
+    #
+    # This is a level ABOVE `signalk stop`. `signalk stop` pauses the data plane
+    # (signalk-server) and deliberately leaves the updater and doctor consoles
+    # running - they are recovery tiers 1 and 2, and taking them down with the
+    # server would remove the surface you recover FROM. `signalk machine stop`
+    # takes the whole VM down, consoles included, and frees its RAM.
+    #
+    # Use machine stop when you want SignalK gone until you say otherwise (the
+    # boat is laid up, the laptop needs the memory); use plain stop when you
+    # want the server down but the consoles reachable.
+    `$act = if (`$args.Count -gt 1) { `$args[1] } else { '' }
+    if (`$act -ne 'stop' -and `$act -ne 'start') {
+        Write-Host 'Usage: signalk machine stop | signalk machine start'
+        Write-Host ''
+        Write-Host '  machine stop   stop the whole Podman machine (VM) and disable auto-start'
+        Write-Host '                 at boot. Takes the updater and doctor consoles down too.'
+        Write-Host '  machine start  start the machine again and re-enable auto-start at boot.'
+        Write-Host ''
+        Write-Host 'To stop only signalk-server and keep the consoles up, use: signalk stop'
         exit 1
     }
-    if (`$taskOff) {
-        Write-Host '[OK] SignalK stopped and will NOT start at boot. Resume with: signalk start'
-    } else {
-        Write-Host '[OK] SignalK stopped now, but auto-start at boot could NOT be disabled (see warning).'
-    }
-    Write-Host '     Nothing was removed - data, config and plugins are preserved.'
-    exit 0
-  }
-
-  'start' {
-    # Resume after `signalk stop`: re-enable the boot task and start the machine.
-    # Inside the VM, systemd brings the containers up on machine start (their
-    # Quadlets are never touched on the Windows path).
     `$taskName = "SignalK Podman Machine (`$Machine)"
-    Write-Host '[i] Enabling auto-start and starting SignalK...'
+
+    if (`$act -eq 'stop') {
+        Write-Host '[i] Stopping the machine and disabling auto-start at boot...'
+        # Surface a task-toggle failure: this shim runs non-elevated but the task
+        # was registered elevated, so Disable can be denied - if so, the stack
+        # would still come back at boot and we must NOT claim it won't.
+        `$taskOff = `$true
+        try { Disable-ScheduledTask -TaskName `$taskName -ErrorAction Stop | Out-Null }
+        catch { `$taskOff = `$false; Write-Host "[WARN] Could not disable the boot task (`$(`$_.Exception.Message)). It may still start at boot; disable 'SignalK Podman Machine' in Task Scheduler manually." }
+        # `podman machine stop` exits 125 if already stopped - treat that as
+        # success. A real stop failure is a HARD error: the machine is still
+        # running, so we must NOT report '[OK] stopped'. (The boot task is
+        # already disabled above, which is fine - auto-start is off even though
+        # the machine is still up.)
+        `$stopOut = (& podman machine stop `$Machine 2>&1) | Out-String
+        if (`$LASTEXITCODE -ne 0 -and `$stopOut -notmatch 'already stopped|not running') {
+            Write-Host "[ERR] 'podman machine stop' failed: `$(`$stopOut.Trim())"
+            if (`$taskOff) {
+                Write-Host '      The machine is still running. Auto-start at boot was disabled; re-run after fixing the error.'
+            } else {
+                Write-Host '      The machine is still running, and auto-start at boot may still be enabled; disable the task manually after fixing the error.'
+            }
+            exit 1
+        }
+        if (`$taskOff) {
+            Write-Host '[OK] Machine stopped and will NOT start at boot. Resume with: signalk machine start'
+        } else {
+            Write-Host '[OK] Machine stopped now, but auto-start at boot could NOT be disabled (see warning).'
+        }
+        Write-Host '     Nothing was removed - data, config and plugins are preserved.'
+        exit 0
+    }
+
+    # act -eq 'start': resume after `signalk machine stop`. Inside the VM,
+    # systemd brings the containers up on machine start (their Quadlets are
+    # never touched on the Windows path).
+    Write-Host '[i] Enabling auto-start and starting the machine...'
     `$taskOn = `$true
     try { Enable-ScheduledTask -TaskName `$taskName -ErrorAction Stop | Out-Null }
     catch { `$taskOn = `$false; Write-Host "[WARN] Could not re-enable the boot task (`$(`$_.Exception.Message)); enable 'SignalK Podman Machine' in Task Scheduler manually for start-at-boot." }
@@ -1040,11 +1152,66 @@ switch (`$sub) {
         Write-Host "[ERR] 'podman machine start' failed: `$(`$startOut.Trim())"; exit 1
     }
     if (`$taskOn) {
-        Write-Host '[OK] SignalK started and set to auto-start at boot. Check it with: signalk health'
+        Write-Host '[OK] Machine started and set to auto-start at boot. Check it with: signalk health'
     } else {
-        Write-Host '[OK] SignalK started now, but auto-start at boot could NOT be enabled (see warning). Check it with: signalk health'
+        Write-Host '[OK] Machine started now, but auto-start at boot could NOT be enabled (see warning). Check it with: signalk health'
     }
     exit 0
+  }
+
+  'help' {
+    # The help text comes from the in-VM CLI, which knows nothing about the
+    # Windows-only verbs this shim adds - so `signalk machine` would be
+    # invisible to the one audience that needs it. Forward, then append.
+    Send-Vm (`$SkEnv + 'signalk help')
+    Write-Host ''
+    Write-Host 'Windows-only:'
+    Write-Host '  signalk machine stop|start'
+    Write-Host '                         stop or start the Podman machine (the VM) itself and'
+    Write-Host '                         its auto-start-at-boot task. One level above'
+    Write-Host "                         'signalk stop', which pauses only signalk-server and"
+    Write-Host '                         leaves the updater + doctor consoles reachable.'
+    exit 0
+  }
+
+  'hardware' {
+    # Wrapper, NOT a rejection: the in-VM rescan is correct and must still run.
+    # What is missing on Windows is the precondition. A USB device plugged into
+    # the PC is invisible to the Podman machine until usbipd-win attaches it to
+    # WSL, so ``signalk hardware rescan`` finds no serial device and reports
+    # nothing attached - true from inside the VM, and useless to someone
+    # looking at the adapter in their hand.
+    #
+    # Only ``rescan`` gets this treatment. ``hardware status`` just reads
+    # hardware.json and is correct unmodified, and a bare ``signalk hardware``
+    # defaults to status on the Linux side.
+    `$hwAct = if (`$args.Count -gt 1) { `$args[1] } else { 'status' }
+    if (`$hwAct -eq 'rescan') {
+        `$usbipd = Get-Command usbipd -ErrorAction SilentlyContinue
+        if (-not `$usbipd) {
+            Write-Host '[i] usbipd-win is not installed. USB devices (NMEA gateways, GPS pucks)'
+            Write-Host '    cannot reach the SignalK machine without it:'
+            Write-Host '      winget install --id dorssel.usbipd-win'
+            Write-Host '    See docs/installation.md for the full USB serial walkthrough.'
+            Write-Host ''
+        } else {
+            # ``usbipd list`` is a human-readable table whose columns have moved
+            # between releases, so don't parse it for state - just show it and
+            # let the operator read it. Printing the recipe whenever we cannot
+            # positively confirm an attachment is honest and never wrong.
+            Write-Host '[i] USB devices known to usbipd-win:'
+            & usbipd list 2>&1 | ForEach-Object { Write-Host "    `$_" }
+            Write-Host ''
+            Write-Host '    A device must be BOUND and ATTACHED to WSL before the machine sees it:'
+            Write-Host '      usbipd bind   --busid <BUSID>     (once per device, needs an admin shell)'
+            Write-Host '      usbipd attach --wsl --busid <BUSID>'
+            Write-Host ''
+        }
+    }
+    # Forward verbatim either way - including any --no-render the caller passed.
+    `$q = `$args | ForEach-Object { Quote-Bash `$_ }
+    Send-Vm (`$SkEnv + 'signalk ' + (`$q -join ' '))
+    exit `$LASTEXITCODE
   }
 
   'socketcan' {
@@ -1226,7 +1393,7 @@ switch (`$sub) {
     if (`$userPath) {
         # -ine: explicit case-insensitive match. PowerShell's -ne is already
         # case-insensitive by default, but Windows paths are case-insensitive
-        # and `$dir (from $MyInvocation) may differ in case from the stored PATH
+        # and `$dir (from `$MyInvocation) may differ in case from the stored PATH
         # entry, so spell out the intent.
         `$kept = (`$userPath -split ';') | Where-Object { `$_ -and (`$_ -ine `$dir) }
         [Environment]::SetEnvironmentVariable('Path', (`$kept -join ';'), 'User')

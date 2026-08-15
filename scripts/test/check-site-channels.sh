@@ -185,6 +185,75 @@ else
     echo "  [MISS] SIGNALK_CHANNEL is on the wrong side of the pipe"; fail=1
 fi
 
+# --- the VM-based installers must reach both channels too -------------------
+# Windows and macOS run the Linux installer inside a VM. Both used to hardcode
+# INSTALLER_BASE_URL and pass it explicitly into that VM, which beats the
+# channel (install.sh lets an explicit base win) and pinned them to the release
+# tree with no way to reach /dev.
+LINUX=${LINUX_INSTALLER:-installer/linux/install.sh}
+PS1=${PS1_INSTALLER:-installer/windows/install.ps1}
+MACOS=${MACOS_INSTALLER:-installer/macos/install.sh}
+
+# The site root must be spelled identically everywhere. Drift here silently
+# sends one platform to a tree that does not exist.
+# Label by platform, not basename: linux and macos are both "install.sh" and a
+# collided label would hide which one failed.
+root_re='https://dirkwa\.github\.io/signalk-universal-installer'
+for pair in "linux:$LINUX" "windows:$PS1" "macos:$MACOS"; do
+    plat=${pair%%:*}; f=${pair#*:}
+    if grep -qE "$root_re" "$f"; then
+        echo "  [OK]   $plat installer uses the canonical site root"
+    else
+        echo "  [MISS] $plat installer does not name the canonical site root"; fail=1
+    fi
+done
+
+if grep -qE "ValidateSet\('release', *'master', *'dev'\)" "$PS1"; then
+    echo "  [OK]   install.ps1 accepts the same channels as install.sh"
+else
+    echo "  [MISS] install.ps1 -Channel does not match install.sh's channels"; fail=1
+fi
+
+# ContainsKey is the only way to tell an explicitly-passed -InstallerBaseUrl
+# from the parameter default; without it -Channel loses to the default base URL
+# on every run and the flag does nothing.
+if grep -q "PSBoundParameters.ContainsKey('InstallerBaseUrl')" "$PS1"; then
+    echo "  [OK]   install.ps1 detects an explicit -InstallerBaseUrl"
+else
+    echo "  [MISS] install.ps1 cannot tell an explicit base URL from the default"; fail=1
+fi
+
+# Same bash-not-curl rule as above, on both VM handoffs. Neither installer
+# writes SIGNALK_CHANNEL next to curl literally - both build the assignments in
+# a variable and splice it in ($skEnv on Windows, $_SK_CHAN_ENV on macOS), so
+# grepping for the literal next to `curl` can never fail and proves nothing.
+# Check the SPLICE POINT instead: on the handoff line, whatever carries the
+# channel must appear after the pipe, never before curl.
+for triple in "windows:$PS1:__SKENV__" "macos:$MACOS:\${_SK_CHAN_ENV}"; do
+    plat=${triple%%:*}; rest=${triple#*:}; f=${rest%:*}; splice=${rest##*:}
+    # Join backslash continuations first: macOS wraps the handoff across two
+    # physical lines, Windows keeps it on one (a `\` + CRLF there would make
+    # bash swallow the CR). Both must be compared as one logical line.
+    #
+    # Anchor on `curl … | … bash`, not on the install.sh path: macOS reaches the
+    # URL through ${LINUX_URL}, so the literal path never appears on the line
+    # that actually pipes into bash.
+    line=$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$f" \
+        | grep -E "curl -fsSL .*\|.* bash" | head -1)
+    if [[ -z "$line" ]]; then
+        echo "  [MISS] $plat installer: could not find the curl|bash handoff line"; fail=1
+        continue
+    fi
+    before=${line%%|*}
+    if [[ "$before" == *"$splice"* ]]; then
+        echo "  [MISS] $plat installer splices the channel before the pipe (curl reads it, bash never does)"; fail=1
+    elif [[ "$line" != *"$splice"* ]]; then
+        echo "  [MISS] $plat installer no longer passes the channel into the VM at all"; fail=1
+    else
+        echo "  [OK]   $plat installer splices the channel after the pipe"
+    fi
+done
+
 if [[ $fail -ne 0 ]]; then
     echo "[FAIL] site channels"
     exit 1

@@ -13,7 +13,31 @@
 #   - GPIO: not applicable.
 
 INSTALLER_VERSION="${INSTALLER_VERSION:-0.0.0-scaffold}"
-INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-https://dirkwa.github.io/signalk-universal-installer}"
+
+# Release channel, same rules as installer/linux/install.sh: the site publishes
+# the latest RELEASE at its root and master under /dev, and an explicit
+# INSTALLER_BASE_URL still wins as the escape hatch for local checkouts, mirrors
+# and CI. Without this the hardcoded base URL below was passed explicitly into
+# the VM, which beat the channel and pinned macOS to the release tree.
+SIGNALK_CHANNEL="${SIGNALK_CHANNEL:-release}"
+_SK_SITE_ROOT="https://dirkwa.github.io/signalk-universal-installer"
+case "$SIGNALK_CHANNEL" in
+    release) _SK_DEFAULT_BASE="$_SK_SITE_ROOT" ;;
+    master|dev) _SK_DEFAULT_BASE="${_SK_SITE_ROOT}/dev" ;;
+    *)
+        echo "[ERR] SIGNALK_CHANNEL must be 'release' or 'master' (got '${SIGNALK_CHANNEL}')" >&2
+        exit 1
+        ;;
+esac
+# Whether the caller set it explicitly, before the default fills it in. The VM
+# handoff below sends the channel only when they did not: install.sh lets an
+# explicit base URL win, so sending both would name two different trees.
+if [[ -n "${INSTALLER_BASE_URL:-}" ]]; then
+    _SK_EXPLICIT_BASE=true
+else
+    _SK_EXPLICIT_BASE=false
+fi
+INSTALLER_BASE_URL="${INSTALLER_BASE_URL:-$_SK_DEFAULT_BASE}"
 
 set -euo pipefail
 
@@ -155,10 +179,20 @@ SUDO_SCRIPT
 LINUX_URL="${INSTALLER_BASE_URL}/installer/linux/install.sh"
 info "Fetching $LINUX_URL and running it in the machine"
 
+# Send the channel only when the caller did NOT pin a base URL explicitly (see
+# above). The assignment goes on the `bash` side of the pipe, never on curl:
+# it is read by the DOWNLOADED installer, so on curl it would be ignored and
+# the run would fetch install.sh from one tree and the rest of its files from
+# the other.
+_SK_CHAN_ENV=""
+if [[ "$_SK_EXPLICIT_BASE" == false ]]; then
+    _SK_CHAN_ENV="SIGNALK_CHANNEL='${SIGNALK_CHANNEL}' "
+fi
+
 podman machine ssh "$MACHINE_NAME" bash << LINUX_SCRIPT
 set -euo pipefail
 cd \$HOME
-curl -fsSL '${LINUX_URL}' | INSTALLER_VERSION='${INSTALLER_VERSION}' INSTALLER_BASE_URL='${INSTALLER_BASE_URL}' bash
+curl -fsSL '${LINUX_URL}' | ${_SK_CHAN_ENV}INSTALLER_VERSION='${INSTALLER_VERSION}' INSTALLER_BASE_URL='${INSTALLER_BASE_URL}' bash
 LINUX_SCRIPT
 
 # On SELinux VMs, container label isolation blocks access to the mounted

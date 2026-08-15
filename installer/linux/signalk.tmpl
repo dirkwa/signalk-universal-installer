@@ -50,8 +50,8 @@
 #   signalk stop           stop signalk-server (the data plane) without
 #                          uninstalling; the updater + doctor consoles stay up.
 #                          Preserves all data/config/plugins and stays down
-#                          across reboots until 'signalk start'. (On Windows this
-#                          stops the whole VM instead.)
+#                          across reboots until 'signalk start'. (On Windows,
+#                          'signalk machine stop' takes the whole VM down.)
 #   signalk start          start signalk-server again after 'signalk stop'
 #   signalk restart        restart signalk-server (picks up config changes).
 #                          Unlike stop/start this does not change whether the
@@ -1443,8 +1443,9 @@ _signalk_lifecycle() {
 # plane) AND keeps it down across reboots, via the updater's durable pause. The
 # lightweight updater + doctor stay running (the doctor is the recovery surface,
 # and the updater is how `signalk start` brings the server back). Nothing is
-# removed. On Windows/macOS the `signalk` shim instead stops the whole Podman
-# MACHINE + disables its boot task - same durable outcome by a different lever.
+# removed. This runs inside the VM on Windows too and means the same thing
+# there; the Windows shim's `signalk machine stop` is the separate, coarser
+# lever that takes the whole Podman machine down, consoles included.
 cmd_stop() {
     echo "Stopping SignalK (signalk-server)..."
     # Capture the status via `|| rc=$?` so `set -e` (set at the top of this

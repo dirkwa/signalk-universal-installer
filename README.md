@@ -31,15 +31,30 @@ During bootstrap, the installer runs `npm install` for three companion SignalK p
 # Linux (Debian 13 / trixie, Raspberry Pi OS trixie+, Ubuntu/Kubuntu 25.04+)
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
 
+# macOS (Apple Silicon and Intel; Homebrew required)
+curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/macos/install.sh | bash
+```
+
+```powershell
+# Windows 11 (PowerShell as administrator; enables WSL2, then Podman Machine runs the stack)
+iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows/install.ps1 | iex
+```
+
 ### Release channels
 
-The one-liner above installs the latest **release**. `signalk update` follows the
+The one-liners above install the latest **release**. `signalk update` follows the
 same channel, because the doctor's refresh reads the same published tree.
 
 To track `master` instead — for development or to test an unreleased fix:
 
 ```bash
+# Linux
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/dev/installer/linux/install.sh | SIGNALK_CHANNEL=master bash
+
+# macOS
+curl -fsSL https://dirkwa.github.io/signalk-universal-installer/dev/installer/macos/install.sh | SIGNALK_CHANNEL=master bash
+
+# either, afterwards
 SIGNALK_CHANNEL=master signalk update
 ```
 
@@ -47,14 +62,22 @@ The variable goes on `bash`, not on `curl`: it is read by the downloaded
 installer, not by the fetch. Set on `curl` it would be silently ignored and the
 run would pull the rest of its tree from the release channel.
 
-`INSTALLER_BASE_URL` still overrides both, for mirrors, CI and local checkouts.
+On Windows the channel is a parameter rather than an environment variable, so
+`iwr … | iex` cannot carry it — `iex` has nowhere to put arguments. Download the
+script first, then invoke it:
 
-# macOS (Apple Silicon and Intel; Homebrew required)
-curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/macos/install.sh | bash
-
-# Windows 11 (PowerShell as administrator; enables WSL2, then Podman Machine runs the stack)
-iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows/install.ps1 | iex
+```powershell
+# Windows
+iwr -useb https://dirkwa.github.io/signalk-universal-installer/dev/installer/windows/install.ps1 -OutFile install.ps1
+.\install.ps1 -Channel master
 ```
+
+The installed `signalk` command remembers the channel it was installed from, so
+`signalk update` on a master box stays on master. Set `$env:SIGNALK_CHANNEL` to
+override a single run.
+
+`INSTALLER_BASE_URL` (Linux/macOS) and `-InstallerBaseUrl` (Windows) still
+override both, for mirrors, CI and local checkouts.
 
 Then open:
 
