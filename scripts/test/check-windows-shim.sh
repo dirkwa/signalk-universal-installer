@@ -53,17 +53,38 @@ else
 fi
 
 # --- 2. the shim's own variables must be escaped ----------------------------
-# $SkEnv/$Machine/$sub/$args/$LASTEXITCODE are RUNTIME variables of the
-# generated file. If any appears unescaped it expands at install time instead.
-for v in SkEnv Machine sub args LASTEXITCODE; do
-    # An unescaped occurrence is one NOT preceded by a backtick.
-    if printf '%s\n' "$body" | grep -qE "(^|[^\`])\\\$${v}\b"; then
-        echo "[MISS] \$${v} appears unescaped - it expands at install time, not run time"
-        fail=1
-    fi
-done
-if [[ $fail -eq 0 ]]; then
+# Every variable in the generated file is a RUNTIME variable and must be written
+# `$name. Unescaped it expands at install time, usually to nothing - and the
+# result still PARSES, so neither the pwsh gate nor a syntax check sees it.
+#
+# Deny by default rather than listing names to check: an allowlist only covers
+# the variables someone remembered to add, so every new one ships unguarded.
+# Three names are DELIBERATELY interpolated here (they bake install-time values
+# into the shim) and are the only exemptions.
+interpolated='MachineName|Channel|SignalkPorts'
+if bad=$(printf '%s\n' "$body" \
+    | grep -noE '(^|[^`])\$[A-Za-z_][A-Za-z_0-9]*' \
+    | sed 's/:[^:]*\$/:$/' \
+    | grep -vE ":\\\$(${interpolated})\$"); then
+    echo "[MISS] unescaped \$variable in the shim - expands at install time, not run time"
+    echo "       (write it as \`\$name; only \$${interpolated//|/, \$} interpolate on purpose)"
+    printf '%s\n' "$bad" | sed 's/^/         line /'
+    fail=1
+else
     echo "  [OK]   shim runtime variables are backtick-escaped"
+fi
+
+# --- 2b. bash-style escaping does not work here -----------------------------
+# This file also generates a bash heredoc elsewhere, where `\$` is the escape.
+# Inside a PowerShell here-string `\$` is a literal backslash followed by a LIVE
+# `$` - so it both expands at install time and leaves a stray backslash. The
+# escape here is a backtick.
+if bad=$(printf '%s\n' "$body" | grep -nE '\\\$[A-Za-z_]'); then
+    echo "[MISS] bash-style \\\$ escape inside a PowerShell here-string - use a backtick:"
+    printf '%s\n' "$bad" | sed 's/^/         /'
+    fail=1
+else
+    echo "  [OK]   no bash-style \\\$ escapes in the shim"
 fi
 
 # --- 3. the one deliberate interpolation is still deliberate ----------------

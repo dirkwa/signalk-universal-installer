@@ -977,7 +977,7 @@ $ps1Body = @"
 #    display doesn't accidentally trigger the Windows-only behavior.
 #  - SIGNALK_CHANNEL: the channel this box was installed from, so ``signalk
 #    update`` re-fetches the tree it came from instead of silently reverting a
-#    master install to release. \$env:SIGNALK_CHANNEL overrides it at call time,
+#    master install to release. `$env:SIGNALK_CHANNEL overrides it at call time,
 #    matching the documented Linux ``SIGNALK_CHANNEL=master signalk update``.
 #
 # NOTE the bare `$Channel below: it interpolates HERE, at install time, baking
@@ -1341,7 +1341,7 @@ switch (`$sub) {
     if (`$userPath) {
         # -ine: explicit case-insensitive match. PowerShell's -ne is already
         # case-insensitive by default, but Windows paths are case-insensitive
-        # and `$dir (from $MyInvocation) may differ in case from the stored PATH
+        # and `$dir (from `$MyInvocation) may differ in case from the stored PATH
         # entry, so spell out the intent.
         `$kept = (`$userPath -split ';') | Where-Object { `$_ -and (`$_ -ine `$dir) }
         [Environment]::SetEnvironmentVariable('Path', (`$kept -join ';'), 'User')

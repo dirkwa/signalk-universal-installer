@@ -223,13 +223,34 @@ else
     echo "  [MISS] install.ps1 cannot tell an explicit base URL from the default"; fail=1
 fi
 
-# Same bash-not-curl rule as above, on both VM handoffs.
-for pair in "windows:$PS1" "macos:$MACOS"; do
-    plat=${pair%%:*}; f=${pair#*:}
-    if grep -qE "SIGNALK_CHANNEL=[^ ]* *curl" "$f"; then
-        echo "  [MISS] $plat installer puts SIGNALK_CHANNEL on curl"; fail=1
+# Same bash-not-curl rule as above, on both VM handoffs. Neither installer
+# writes SIGNALK_CHANNEL next to curl literally - both build the assignments in
+# a variable and splice it in ($skEnv on Windows, $_SK_CHAN_ENV on macOS), so
+# grepping for the literal next to `curl` can never fail and proves nothing.
+# Check the SPLICE POINT instead: on the handoff line, whatever carries the
+# channel must appear after the pipe, never before curl.
+for triple in "windows:$PS1:__SKENV__" "macos:$MACOS:\${_SK_CHAN_ENV}"; do
+    plat=${triple%%:*}; rest=${triple#*:}; f=${rest%:*}; splice=${rest##*:}
+    # Join backslash continuations first: macOS wraps the handoff across two
+    # physical lines, Windows keeps it on one (a `\` + CRLF there would make
+    # bash swallow the CR). Both must be compared as one logical line.
+    #
+    # Anchor on `curl … | … bash`, not on the install.sh path: macOS reaches the
+    # URL through ${LINUX_URL}, so the literal path never appears on the line
+    # that actually pipes into bash.
+    line=$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$f" \
+        | grep -E "curl -fsSL .*\|.* bash" | head -1)
+    if [[ -z "$line" ]]; then
+        echo "  [MISS] $plat installer: could not find the curl|bash handoff line"; fail=1
+        continue
+    fi
+    before=${line%%|*}
+    if [[ "$before" == *"$splice"* ]]; then
+        echo "  [MISS] $plat installer splices the channel before the pipe (curl reads it, bash never does)"; fail=1
+    elif [[ "$line" != *"$splice"* ]]; then
+        echo "  [MISS] $plat installer no longer passes the channel into the VM at all"; fail=1
     else
-        echo "  [OK]   $plat installer keeps SIGNALK_CHANNEL off curl"
+        echo "  [OK]   $plat installer splices the channel after the pipe"
     fi
 done
 
