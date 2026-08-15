@@ -87,17 +87,30 @@ if ! [[ "$MACHINE_MEMORY_MB" =~ ^[0-9]+$ ]] || (( MACHINE_MEMORY_MB < 2048 )); t
     die "PODMAN_MACHINE_MEMORY_MB must be an integer >= 2048 (got '${MACHINE_MEMORY_MB}'); the SignalK stack needs at least 2048 MB inside the VM."
 fi
 
-# Optional reset: remove any existing machine before recreating it.
+machine_exists=0
+if podman machine inspect "$MACHINE_NAME" >/dev/null 2>&1; then
+    machine_exists=1
+fi
+
+# Optional reset: remove only the exact matching machine before recreating it.
 if (( RESET_MACHINE )); then
-    if podman machine list --format '{{.Name}}' | grep -q "^${MACHINE_NAME}"; then
+    if (( machine_exists )); then
         info "Removing existing Podman machine '$MACHINE_NAME' (--reset-machine)"
         podman machine stop "$MACHINE_NAME" 2>/dev/null || true
         podman machine rm -f "$MACHINE_NAME"
+        if podman machine inspect "$MACHINE_NAME" >/dev/null 2>&1; then
+            die "Failed to remove Podman machine '$MACHINE_NAME' before reset"
+        fi
     fi
+    machine_exists=0
 fi
 
-info "Creating Podman machine '$MACHINE_NAME' (${MACHINE_MEMORY_MB} MB; this takes a few minutes)"
-podman machine init --cpus 2 --memory "$MACHINE_MEMORY_MB" --disk-size 30 "$MACHINE_NAME"
+if (( ! machine_exists )); then
+    info "Creating Podman machine '$MACHINE_NAME' (${MACHINE_MEMORY_MB} MB; this takes a few minutes)"
+    podman machine init --cpus 2 --memory "$MACHINE_MEMORY_MB" --disk-size 30 "$MACHINE_NAME"
+else
+    info "Reusing existing Podman machine '$MACHINE_NAME'"
+fi
 
 if ! podman machine list --format '{{.Name}} {{.Running}}' | grep -q "^${MACHINE_NAME}[[:space:]]*true"; then
     info "Starting Podman machine"
@@ -193,13 +206,44 @@ if [[ "$changed" -eq 1 ]]; then
     systemctl --user daemon-reload
 fi
 
-for service in signalk-server.service signalk-updater-server.service signalk-doctor-server.service; do
+for service in signalk-updater-server.service signalk-doctor-server.service; do
     if systemctl --user restart "$service"; then
         echo "Restarted $service"
     else
         echo "WARN: restart failed for $service; restart it manually" >&2
     fi
 done
+
+updater_url="http://127.0.0.1:3003"
+token_file="$HOME/.signalk-updater/token"
+
+if [[ -s "$token_file" ]]; then
+    token=$(<"$token_file")
+    set +e
+    restart_resp=$(curl -sS -m 10 -o /tmp/signalk-restart-api.body -w "%{http_code}" \
+        -X POST \
+        -H "Authorization: Bearer ${token}" \
+        "${updater_url}/api/signalk/restart")
+    curl_rc=$?
+    set -e
+
+    if [[ "$curl_rc" -eq 0 ]]; then
+        if [[ "$restart_resp" =~ ^2 ]]; then
+            echo "Restarted signalk-server via updater API"
+        else
+            echo "WARN: updater API restart failed (HTTP ${restart_resp})" >&2
+        fi
+    else
+        echo "WARN: updater unreachable for signalk restart; using systemctl fallback" >&2
+        if systemctl --user start signalk-server.service; then
+            echo "Started signalk-server.service via fallback"
+        else
+            echo "WARN: fallback start failed for signalk-server.service" >&2
+        fi
+    fi
+else
+    echo "WARN: updater token missing at ${token_file}; cannot request signalk restart via updater API" >&2
+fi
 SOCKET_FIX_SCRIPT
 
 # Some Podman-machine networking setups resolve host.containers.internal to an
@@ -323,6 +367,8 @@ _VM_SSH_USER=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.Rem
 _VM_SSH_KEY=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.IdentityPath}}' 2>/dev/null || true)
 _VM_SERVER_PORT=$(podman machine ssh "$MACHINE_NAME" "grep -E '^Environment=PORT=' ~/.config/containers/systemd/signalk-server.container 2>/dev/null | awk -F= '{print \$NF}' || echo 80" 2>/dev/null || true)
 _VM_SERVER_PORT=${_VM_SERVER_PORT:-80}
+_LOCAL_UI_PORT=""
+_TUNNEL_READY=0
 
 pick_free_port() {
     local candidate
@@ -332,44 +378,62 @@ pick_free_port() {
             return 0
         fi
     done
-    echo "8080"
-    return 0
+    return 1
 }
 
 if [[ -n "$_VM_SSH_PORT" && -n "$_VM_SSH_USER" && -n "$_VM_SSH_KEY" ]]; then
+    _VM_KNOWN_HOSTS="${HOME}/.ssh/known_hosts.${MACHINE_NAME}"
+    mkdir -p "${HOME}/.ssh"
+    touch "$_VM_KNOWN_HOSTS"
+    chmod 600 "$_VM_KNOWN_HOSTS" 2>/dev/null || true
+
     if [[ "$_VM_SERVER_PORT" = "80" ]]; then
-        _LOCAL_UI_PORT=$(pick_free_port 8080 8000 8081 8181 18080)
-    else
-        _LOCAL_UI_PORT=$(pick_free_port 3000 3002 3004 8080 8081 18080)
-    fi
-    if ! pgrep -f "ssh .*${_LOCAL_UI_PORT}:127.0.0.1:${_VM_SERVER_PORT}.*-p ${_VM_SSH_PORT}.*${_VM_SSH_USER}@127.0.0.1" >/dev/null 2>&1; then
-        if ! ssh -f -N \
-            -L "${_LOCAL_UI_PORT}:127.0.0.1:${_VM_SERVER_PORT}" \
-            -i "$_VM_SSH_KEY" \
-            -p "$_VM_SSH_PORT" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o IdentitiesOnly=yes \
-            "${_VM_SSH_USER}@127.0.0.1"; then
-            warn "Could not establish localhost:${_LOCAL_UI_PORT} SSH tunnel to the VM's SignalK server on port ${_VM_SERVER_PORT}."
-        else
-            ok "localhost:${_LOCAL_UI_PORT} is forwarded to the VM's SignalK server on port ${_VM_SERVER_PORT}"
+        if ! _LOCAL_UI_PORT=$(pick_free_port 8080 8000 8081 8181 18080); then
+            warn "No free local UI port found for VM server port 80; skipping host-networked UI tunnel."
+            _LOCAL_UI_PORT=""
         fi
     else
-        ok "localhost:${_LOCAL_UI_PORT} SSH tunnel already running"
+        if ! _LOCAL_UI_PORT=$(pick_free_port 3000 3002 3004 8080 8081 18080); then
+            warn "No free local UI port found for VM server port ${_VM_SERVER_PORT}; skipping host-networked UI tunnel."
+            _LOCAL_UI_PORT=""
+        fi
+    fi
+    if [[ -n "$_LOCAL_UI_PORT" ]]; then
+        if ! pgrep -f "ssh .*${_LOCAL_UI_PORT}:127.0.0.1:${_VM_SERVER_PORT}.*-p ${_VM_SSH_PORT}.*${_VM_SSH_USER}@127.0.0.1" >/dev/null 2>&1; then
+            if ! ssh -f -N \
+                -L "${_LOCAL_UI_PORT}:127.0.0.1:${_VM_SERVER_PORT}" \
+                -i "$_VM_SSH_KEY" \
+                -p "$_VM_SSH_PORT" \
+                -o StrictHostKeyChecking=accept-new \
+                -o UserKnownHostsFile="$_VM_KNOWN_HOSTS" \
+                -o IdentitiesOnly=yes \
+                "${_VM_SSH_USER}@127.0.0.1"; then
+                warn "Could not establish localhost:${_LOCAL_UI_PORT} SSH tunnel to the VM's SignalK server on port ${_VM_SERVER_PORT}."
+            else
+                _TUNNEL_READY=1
+                ok "localhost:${_LOCAL_UI_PORT} is forwarded to the VM's SignalK server on port ${_VM_SERVER_PORT}"
+            fi
+        else
+            _TUNNEL_READY=1
+            ok "localhost:${_LOCAL_UI_PORT} SSH tunnel already running"
+        fi
     fi
 else
     warn "Could not determine the Podman machine SSH endpoint; skipping the host-networked UI tunnel."
 fi
 
 info "Visit the SignalK admin UI / Updater (:3003) / Doctor (:3004) from macOS."
-info "The main server is exposed on localhost:${_LOCAL_UI_PORT} via the VM tunnel."
+if (( _TUNNEL_READY )) && [[ -n "$_LOCAL_UI_PORT" ]]; then
+    info "The main server is exposed on localhost:${_LOCAL_UI_PORT} via the VM tunnel."
+else
+    info "No local UI tunnel was created automatically; choose a free local port and tunnel manually if needed."
+fi
 
 cat <<EOF
 
 OK — SignalK is up inside Podman Machine '$MACHINE_NAME'.
 
-  SignalK admin UI : http://localhost:${_LOCAL_UI_PORT}  (VM port ${_VM_SERVER_PORT})
+    SignalK admin UI : $([ "$_TUNNEL_READY" -eq 1 ] && printf 'http://localhost:%s' "$_LOCAL_UI_PORT" || printf 'not auto-forwarded')  (VM port ${_VM_SERVER_PORT})
   Updater Console  : http://localhost:3003
   Doctor Console   : http://localhost:3004
 
