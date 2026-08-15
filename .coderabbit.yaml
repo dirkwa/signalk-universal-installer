@@ -6,8 +6,16 @@ reviews:
     enabled: true
     auto_incremental_review: true
     drafts: false
+    # Matched against the PR TITLE as a substring, so these only fire when the
+    # title actually carries the prefix — AGENTS.md requires Angular-formatted
+    # PR titles and an exact `chore(release): X.Y.Z` for a release PR, and this
+    # is one of the two automations that depends on it. A version bump retitled
+    # as prose gets a full review of a one-line diff; worse, a bump folded into
+    # a fix would skip review of the fix, which is why AGENTS.md requires the
+    # bump to be its own PR.
     ignore_title_keywords:
       - "chore(release):"
+      - "chore(version):"
       - "chore(deps):"
       - "chore(deps-dev):"
       - "[skip review]"
