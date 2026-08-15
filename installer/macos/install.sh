@@ -280,7 +280,7 @@ probe_signalk_http() {
     podman exec "$doctor_container" node -e '
 const url = process.argv[1];
 const ok = (s) => s >= 200 && s < 400;
-fetch(url, { redirect: "manual" })
+fetch(url, { redirect: "manual", signal: AbortSignal.timeout(2500) })
     .then((r) => {
         console.log(ok(r.status) ? "ok" : `status-${r.status}`);
     })
