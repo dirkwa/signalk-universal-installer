@@ -1,0 +1,50 @@
+# Shapes the notes `gh release create --generate-notes` writes
+# (.github/workflows/release-branch.yml). Without this file the notes are one
+# flat list of PR titles in merge order; with it they are grouped, and the
+# noise is dropped.
+#
+# There is no hand-written CHANGELOG in this repo and there should not be one:
+# the tag is the release act, and the notes are generated from the PRs merged
+# since the previous version tag. A second, hand-maintained list would only
+# disagree with it.
+#
+# GitHub categorises by LABEL, not by commit type — it has no regex over PR
+# titles. So a PR lands in "Other" unless it carries a label. That is a
+# deliberate floor rather than a gap: every PR still appears, and the Angular
+# type in its title (required by AGENTS.md) already tells the reader what it
+# is. Labelling is the optional refinement that promotes a PR into a section.
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+    authors:
+      - dependabot
+      - github-actions
+
+  categories:
+    - title: 🚀 Features
+      labels:
+        - feature
+        - enhancement
+
+    - title: 🐛 Fixes
+      labels:
+        - bug
+        - fix
+
+    - title: 📖 Documentation
+      labels:
+        - documentation
+
+    # Dependabot PRs are excluded by author above, so this catches only
+    # hand-raised dependency work.
+    - title: 📦 Dependencies
+      labels:
+        - dependencies
+
+    # Everything unlabelled. Keep this last and keep the wildcard: without it
+    # an unlabelled PR vanishes from the notes entirely, which is worse than
+    # an uncategorised entry.
+    - title: Other changes
+      labels:
+        - "*"
