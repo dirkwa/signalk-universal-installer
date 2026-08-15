@@ -302,18 +302,35 @@ function Stop-ForReboot {
     Write-Host "    2. Open PowerShell as Administrator again."
     Write-Host "    3. Re-run the same command - it picks up where it left off:"
     # The resume command must carry the parameters THIS run was given. A plain
-    # `iwr … | iex` cannot: iex has nowhere to put arguments, so a
+    # `iwr ... | iex` cannot: iex has nowhere to put arguments, so a
     # `-Channel master` install would resume on the release channel and bake
     # `release` into the shim - silently installing something other than what
     # was asked for, at the one moment the operator is least likely to notice.
-    # With no non-default parameters the one-liner is still the friendlier form,
-    # so only fall back to download-then-invoke when there is something to carry.
+    # The same applies to every other parameter: -MachineName nav would resume
+    # against the default 'signalk' machine.
+    #
+    # Read $script:PSBoundParameters rather than listing names here, so a
+    # parameter added later is carried without anyone remembering to update
+    # this. Switches ($true) are emitted bare; everything else is single-quoted
+    # with embedded quotes doubled, so a value containing a space, an ampersand
+    # or an apostrophe survives as ONE argument instead of changing the parse.
     $resumeArgs = @()
-    if ($Channel -ne 'release') { $resumeArgs += "-Channel $Channel" }
-    if ($SkExplicitBase) { $resumeArgs += "-InstallerBaseUrl '$InstallerBaseUrl'" }
+    foreach ($kv in $script:PSBoundParameters.GetEnumerator() | Sort-Object Key) {
+        $v = $kv.Value
+        if ($v -is [switch]) {
+            if ($v.IsPresent) { $resumeArgs += "-$($kv.Key)" }
+        } else {
+            $resumeArgs += "-$($kv.Key) '$($v -replace "'", "''")'"
+        }
+    }
+    # With nothing to carry the one-liner is still the friendlier form, so only
+    # fall back to download-then-invoke when there is something to preserve.
     if ($resumeArgs.Count -gt 0) {
-        Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 -OutFile install.ps1"
-        Write-Host "       .\install.ps1 $($resumeArgs -join ' ')"
+        # A unique filename: -OutFile would silently overwrite an install.ps1
+        # already sitting in the operator's working directory.
+        $resumeFile = "signalk-install-$(Get-Random).ps1"
+        Write-Host "       iwr -useb '$InstallerBaseUrl/installer/windows/install.ps1' -OutFile $resumeFile"
+        Write-Host "       .\$resumeFile $($resumeArgs -join ' ')"
     } else {
         Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
     }
