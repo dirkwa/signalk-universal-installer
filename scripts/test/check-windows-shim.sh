@@ -87,6 +87,28 @@ else
     echo "  [OK]   no bash-style \\\$ escapes in the shim"
 fi
 
+# --- 2c. the channel must reach bash lowercased -----------------------------
+# PowerShell compares case-INSENSITIVELY: ValidateSet accepts `-Channel MASTER`
+# and passes the original spelling through, and `-notmatch` accepts it too. But
+# install.sh's `case` is case-SENSITIVE, so an uppercase spelling matches no
+# branch and aborts the install inside the VM - over a value the operator was
+# told was legal. Both the installer and the generated shim must fold the case
+# before the value crosses into bash.
+if grep -q 'Channel = \$Channel\.ToLowerInvariant()' "$PS1"; then
+    echo "  [OK]   installer lowercases the channel before the VM handoff"
+else
+    echo "[MISS] installer does not lowercase \$Channel - '-Channel MASTER' would"
+    echo "       pass ValidateSet and then match no branch of install.sh's case"
+    fail=1
+fi
+if printf '%s\n' "$body" | grep -q 'SIGNALK_CHANNEL\.ToLowerInvariant()'; then
+    echo "  [OK]   shim lowercases \$env:SIGNALK_CHANNEL before the VM handoff"
+else
+    echo "[MISS] shim does not lowercase \$env:SIGNALK_CHANNEL - an uppercase"
+    echo "       override would pass -notmatch and then be rejected by bash"
+    fail=1
+fi
+
 # --- 3. the one deliberate interpolation is still deliberate ----------------
 # $Channel and $MachineName are MEANT to interpolate at generation time (they
 # bake the install-time choice into the shim). Assert they are still spelled

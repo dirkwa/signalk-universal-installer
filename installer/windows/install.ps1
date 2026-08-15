@@ -51,7 +51,14 @@ if (-not $InstallerVersion) { $InstallerVersion = if ($env:INSTALLER_VERSION) { 
 # $PSBoundParameters.ContainsKey is the test that can - it is the PowerShell
 # analogue of bash's ${VAR:-default} precedence, and without it -Channel would
 # silently lose to the default base URL on every run.
+#
+# Lowercase the channel before it goes anywhere. PowerShell's ValidateSet is
+# CASE-INSENSITIVE and passes the caller's original spelling through, so
+# `-Channel MASTER` validates here and then matches no branch of install.sh's
+# case statement, aborting the install inside the VM with a message about a
+# value the operator believed was legal.
 $SkSiteRoot = 'https://dirkwa.github.io/signalk-universal-installer'
+$Channel = $Channel.ToLowerInvariant()
 $SkExplicitBase = $PSBoundParameters.ContainsKey('InstallerBaseUrl')
 if (-not $SkExplicitBase) {
     $InstallerBaseUrl = if ($Channel -eq 'release') { $SkSiteRoot } else { "$SkSiteRoot/dev" }
@@ -329,7 +336,11 @@ function Stop-ForReboot {
         # A unique filename: -OutFile would silently overwrite an install.ps1
         # already sitting in the operator's working directory.
         $resumeFile = "signalk-install-$(Get-Random).ps1"
-        Write-Host "       iwr -useb '$InstallerBaseUrl/installer/windows/install.ps1' -OutFile $resumeFile"
+        # Escape the URL the same way the arguments above are escaped: it is
+        # single-quoted here too, and an apostrophe in a mirror URL would
+        # otherwise close the string and break the printed command.
+        $resumeUrl = "$InstallerBaseUrl/installer/windows/install.ps1" -replace "'", "''"
+        Write-Host "       iwr -useb '$resumeUrl' -OutFile $resumeFile"
         Write-Host "       .\$resumeFile $($resumeArgs -join ' ')"
     } else {
         Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
@@ -1016,7 +1027,7 @@ $ps1Body = @"
 # the chosen channel into the generated shim. That is deliberate and is the one
 # intentional unescaped expansion in this here-string - every other `$ in this
 # block is escaped so it survives into the generated file.
-`$SkChannel = if (`$env:SIGNALK_CHANNEL) { `$env:SIGNALK_CHANNEL } else { '$Channel' }
+`$SkChannel = if (`$env:SIGNALK_CHANNEL) { `$env:SIGNALK_CHANNEL.ToLowerInvariant() } else { '$Channel' }
 # `$SkChannel lands inside single quotes in a bash command line, and the env-var
 # branch is whatever the caller exported - so a value containing a quote would
 # close that string and inject. install.sh accepts exactly three spellings, so
