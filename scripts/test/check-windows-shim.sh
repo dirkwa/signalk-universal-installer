@@ -94,7 +94,8 @@ fi
 # branch and aborts the install inside the VM - over a value the operator was
 # told was legal. Both the installer and the generated shim must fold the case
 # before the value crosses into bash.
-if grep -q 'Channel = \$Channel\.ToLowerInvariant()' "$PS1"; then
+# shellcheck disable=SC2016  # grep pattern is literal PowerShell source text
+if grep -qF 'Channel = $Channel.ToLowerInvariant()' "$PS1"; then
     echo "  [OK]   installer lowercases the channel before the VM handoff"
 else
     echo "[MISS] installer does not lowercase \$Channel - '-Channel MASTER' would"
