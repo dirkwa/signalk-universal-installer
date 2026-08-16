@@ -63,15 +63,7 @@ dtparam=sd=off
 
 `signalk halpi2 apply` runs the same ladder after installing `i2c-tools`, and — when `/dev/i2c-1` is missing and `dtparam` exists (Raspberry Pi OS) — enables I2C live with `dtparam i2c_arm=on` + `modprobe i2c-dev` first, exactly what raspi-config does, so a first run can confirm the board before the reboot.
 
-hardware.json then carries:
-
-```json
-"board": { "model": "halpi2", "candidate": false, "detectedVia": "i2c",
-           "hardwareVersion": "2.0.0", "firmwareVersion": "3.3.1" },
-"onboardSerial": [ { "device": "/dev/ttyAMA4", "label": "HALPI2 RS-485", "enabled": true } ]
-```
-
-`onboardSerial` is opt-out like USB serial; its `enabled` survives a re-detect. `board` is a hardware fact and is regenerated every time. The renderer emits `AddDevice=/dev/ttyAMA4` (existence-guarded, like USB serial) and `Volume=/run/halpid:/run/halpid:rw` (only while `/run/halpid/halpid.sock` exists), so the `signalk-halpi` plugin from the App Store can read the controller's voltages, temperatures and state.
+hardware.json then carries a `board` object and an `onboardSerial` list (shapes in [docs/hardware.md](hardware.md)). `onboardSerial` is opt-out like USB serial; its `enabled` survives a re-detect. `board` is a hardware fact and is regenerated every time. The renderer passes the RS-485 port into the container (existence-guarded, like USB serial) and bind-mounts `/run/halpid` read-only while `halpid.sock` exists, so the `signalk-halpi` plugin from the App Store can read the controller's voltages, temperatures and state.
 
 ## Why this helper edits config.txt when `signalk socketcan` only prints a recipe
 

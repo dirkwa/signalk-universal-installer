@@ -293,10 +293,14 @@ fi
 #    `board` must render exactly as before.
 mkdir -p "$tmp/tty" "$tmp/halpid"
 : >"$tmp/tty/ttyAMA4"
-python3 - "$tmp/halpid/halpid.sock" <<'PY_' 2>/dev/null || true
-import socket, sys
-s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])
-PY_
+# A unix socket node for the existence guard. Bash cannot create one; use
+# python3, else perl (both ship on ubuntu-latest and Debian), else the
+# volume-present case is skipped below.
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$tmp/halpid/halpid.sock" 2>/dev/null || true
+elif command -v perl >/dev/null 2>&1; then
+    perl -MSocket -e 'socket(S, PF_UNIX, SOCK_STREAM, 0) and bind(S, sockaddr_un($ARGV[0]))' "$tmp/halpid/halpid.sock" 2>/dev/null || true
+fi
 jq --arg dev "$tmp/tty/ttyAMA4" --arg gone "$tmp/tty/ttyAMA9" '
     .board = {model:"halpi2", candidate:false, detectedVia:"i2c"}
     | .onboardSerial = [ {device:$dev, label:"HALPI2 RS-485", enabled:true},
@@ -326,23 +330,29 @@ else
     echo "  [OK]   absent onboardSerial node is dropped by the existence guard"
 fi
 if [[ -S "$tmp/halpid/halpid.sock" ]]; then
-    if grep -qxF "Volume=$tmp/halpid:/run/halpid:rw" <<<"$out_halpi2"; then
+    if grep -qxF "Volume=$tmp/halpid:/run/halpid:ro" <<<"$out_halpi2"; then
         echo "  [OK]   halpi2 board + live halpid socket mounts /run/halpid"
     else
         echo "  [MISS] halpid volume missing with board=halpi2 and a live socket"
         fail=1
     fi
 else
-    echo "  [SKIP] halpid socket fixture unavailable (no python3) — volume-present case not run"
+    echo "  [SKIP] halpid socket fixture unavailable (no python3/perl) — volume-present case not run"
 fi
-out_halpi2_nosock=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-halpi2.json" "$TEMPLATE" 2>/dev/null) || true
+out_halpi2_nosock=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-halpi2.json" "$TEMPLATE" 2>/dev/null) || {
+    echo "  [MISS] render (halpi2, socket missing) exited non-zero"
+    fail=1
+}
 if grep -q ':/run/halpid:' <<<"$out_halpi2_nosock"; then
     echo "  [MISS] halpid volume rendered although the socket is missing"
     fail=1
 else
     echo "  [OK]   missing halpid socket suppresses the volume"
 fi
-out_noboard=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/halpid" bash "$RENDER" "$tmp/hardware.json" "$TEMPLATE" 2>/dev/null) || true
+out_noboard=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/halpid" bash "$RENDER" "$tmp/hardware.json" "$TEMPLATE" 2>/dev/null) || {
+    echo "  [MISS] render (no board) exited non-zero"
+    fail=1
+}
 if grep -q 'halpid\|ttyAMA' <<<"$out_noboard"; then
     echo "  [MISS] fixture without board rendered HALPI2 lines"
     fail=1

@@ -14,7 +14,8 @@
 #      Hat-Labs-specific installed, config.txt untouched, recipe printed, rc 1
 #   6. candidate + SIGNALK_HALPI2=yes → applied, rc 2
 #   7. terminal answers "n" → declined; answers "y" → applied
-#   8. stale block from an older template → replaced once, other sections kept
+#   8. stale block from an older template → replaced once, other sections kept;
+#      a lone/duplicated marker → refused, file untouched
 #   9. SIGNALK_HALPI2=no → nothing, rc 0
 #  10. SIGNALK_HALPI2_BLINKENLIGHTS=no → apt-get install lacks blinkenlights-daemon
 #
@@ -201,6 +202,13 @@ rc=$(run_apply)
 if [[ "$rc" == 2 && "$(block_count)" == 1 ]]; then ok "stale block: replaced once"; else miss "stale block: rc $rc, blocks $(block_count)"; fi
 if grep -qx 'arm_boost=1' "$root/config.txt"; then ok "stale block: trailing section kept"; else miss "stale block: trailing section lost"; fi
 if [[ "$(grep -cxF '# <<< signalk-installer halpi2 <<<' "$root/config.txt")" == 1 ]]; then ok "stale block: one end marker"; else miss "stale block: end marker count"; fi
+
+# 8b. malformed markers (lone begin) → refuse, file untouched
+reset_fs; touch "$root/i2c-1"
+printf '# >>> signalk-installer halpi2 >>>\n[all]\ndtparam=i2c_arm=on\n[pi4]\narm_boost=1\n' >>"$root/config.txt"
+before=$(sha256sum "$root/config.txt")
+rc=$(run_apply)
+if [[ "$rc" == 1 && "$(sha256sum "$root/config.txt")" == "$before" ]] && grep -q "malformed" "$root/out"; then ok "lone begin marker: refused, config.txt untouched"; else miss "lone begin marker: rc $rc, changed=$([[ "$(sha256sum "$root/config.txt")" == "$before" ]] && echo no || echo yes)"; fi
 
 # 9. SIGNALK_HALPI2=no
 reset_fs; touch "$root/i2c-1"

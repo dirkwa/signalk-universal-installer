@@ -186,11 +186,14 @@ hardware_block() {
     # /run/halpid/halpid.sock from inside the container; the socket is
     # root:halpid 0660 and the container reaches it through the host user's
     # `halpid` membership (GroupAdd=keep-groups), so this is a plain
-    # directory bind. Existence-guarded on the socket like avahi above.
+    # directory bind. ro: connect() on a socket does not need a writable
+    # mount (same as the usual docker.sock:ro pattern), and the container
+    # must not be able to create files in /run/halpid. Existence-guarded on
+    # the socket like avahi above.
     if command -v jq >/dev/null 2>&1 \
         && [ "$(jq -r '.board.model // empty' "$HW_FILE")" = "halpi2" ] \
         && [ -S "${HALPID_RUN_DIR}/halpid.sock" ]; then
-        echo "Volume=${HALPID_RUN_DIR}:/run/halpid:rw"
+        echo "Volume=${HALPID_RUN_DIR}:/run/halpid:ro"
     fi
 }
 

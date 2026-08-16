@@ -95,8 +95,12 @@ if command -v jq >/dev/null 2>&1; then
 fi
 
 # The staged signalk-halpi2.tmpl is the fallback `signalk halpi2` runs when
-# the CLI copy is missing; it must run from the payload dir with no libs.
-if [[ -f "$SRC/signalk-halpi2.tmpl" ]]; then
+# the CLI copy is missing; install.sh must stage it, and the staged copy
+# must run from the payload dir with no libs.
+if [[ " ${staged[*]} " != *" signalk-halpi2.tmpl "* ]]; then
+    echo "  [MISS] install.sh does not stage signalk-halpi2.tmpl into the payload"
+    fail=1
+elif [[ -f "$SRC/signalk-halpi2.tmpl" ]]; then
     install -m 0755 "$SRC/signalk-halpi2.tmpl" "$TMP/signalk-halpi2.tmpl"
     set +e
     out=$(bash "$TMP/signalk-halpi2.tmpl" detect 2>&1)

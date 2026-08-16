@@ -249,6 +249,17 @@ strip_block() {
     ' "$1"
 }
 
+# True when the file has either no markers or exactly one begin followed by
+# exactly one end. Anything else (a lone begin, an end first, duplicates)
+# would make strip_block drop lines silently, so apply refuses to touch it.
+markers_well_formed() {
+    awk -v b="$BLOCK_BEGIN" -v e="$BLOCK_END" '
+        $0 == b { if (began) bad = 1; began = 1; inside = 1; next }
+        $0 == e { if (!inside || ended) bad = 1; ended = 1; inside = 0; next }
+        END { exit (bad || inside || began != ended) }
+    ' "$1"
+}
+
 print_recipe() {
     local cfg=$1
     echo
@@ -274,6 +285,11 @@ apply_config_txt() {
     if [[ "$(existing_block "$cfg")" == "$block" ]]; then
         ok "${cfg}: HALPI2 block already present"
         return 1
+    fi
+    if ! markers_well_formed "$cfg"; then
+        err "${cfg}: the HALPI2 marker lines are malformed (lone or duplicated"
+        err "'${BLOCK_BEGIN}' / '${BLOCK_END}'); fix them by hand, then re-run."
+        return 2
     fi
     current=$(cat "$cfg")
     proposed=$(printf '%s\n\n%s\n' "$(strip_block "$cfg")" "$block")
