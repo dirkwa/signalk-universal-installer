@@ -1314,6 +1314,32 @@ switch (`$sub) {
     exit `$LASTEXITCODE
   }
 
+  'bluetooth' {
+    # BLE passthrough needs a bluez stack on the machine running the
+    # containers, and the Podman machine VM has none: no bluetoothd, no
+    # bluetoothctl, nothing under /sys/class/bluetooth. WSL2 also has no path
+    # to the Windows host's Bluetooth radio - only a USB dongle detached from
+    # Windows via usbipd could reach it, and the VM still has no bluez to
+    # drive it. Forwarding would install a proxy Quadlet that can never work.
+    Write-Host "'signalk bluetooth' is not available on Windows - BLE passthrough"
+    Write-Host 'needs a bluez stack on the machine running the containers, and the'
+    Write-Host 'Podman machine VM has none. WSL2 cannot reach the Windows Bluetooth'
+    Write-Host 'radio either. Use a USB or network gateway for that sensor instead.'
+    exit 1
+  }
+
+  'timesync' {
+    # Sets the HOST clock and timezone from SignalK's GPS, for boats with no
+    # NTP. On Windows the host is Windows - the VM's clock is slaved to it by
+    # WSL - so running this in the machine would set a clock nothing reads,
+    # and the root agent it execs is not installed there anyway.
+    Write-Host "'signalk timesync' is not available on Windows - it steps the HOST"
+    Write-Host 'clock from GPS on boats with no NTP, and here the host is Windows.'
+    Write-Host 'The VM takes its time from Windows, so set the Windows clock (or'
+    Write-Host 'let it sync) and the stack follows.'
+    exit 1
+  }
+
   'socketcan' {
     # Pi CAN-HAT (GPIO/SPI socketcan) setup. Meaningless on Windows: the stack
     # runs in the Podman machine's VM, which has no CAN hardware, no SPI bus,
