@@ -1068,6 +1068,17 @@ cmd_update() {
             echo "[i] SIGNALK_CHANNEL=${channel}: refreshing from master, not the release."
             echo "[i] The doctor refresh only serves the release channel, so this"
             echo "[i] re-runs the bootstrap against the /dev tree instead."
+            # --no-render cannot be honoured on this path: it re-runs the whole
+            # bootstrap, which renders the Quadlets as part of installing. Say
+            # so rather than accept the flag and ignore it - an operator who
+            # passed it to avoid restarting the data plane needs to know the
+            # restart is coming.
+            if [[ "$do_render" == false ]]; then
+                echo "[!] --no-render does not apply on the ${channel} channel: the" >&2
+                echo "    bootstrap re-render is part of installing. Re-run without it," >&2
+                echo "    or use the release channel, if the server must not restart." >&2
+                return 1
+            fi
             # `set -o pipefail` inside the child: without it a failed curl
             # still leaves the right-hand bash exiting 0 after reading an empty
             # script, and cmd_update would report success having done nothing.
