@@ -41,13 +41,16 @@ This repo is maintained by Dirk Wahrheit. Workflow is deliberate; AI tools shoul
 
 - Branch names use **hyphens**, never slashes: `fix-something`, `feat-something`, `chore-release-1-6-0`.
 - Angular conventional commits: `<type>(<scope>): <subject>`. Types: `feat|fix|docs|style|refactor|test|chore|perf`. Subject ≤ 50 chars, imperative mood, no period.
+- **Every** commit on the branch follows that format, not just the first.
 - One logical change per commit. Each commit is a meaningful, self-contained step.
+- A version bump is its own commit and its own PR: `chore(release): X.Y.Z` and nothing else. Never fold a bump into a fix or a feature, and never fold a fix into a bump. The release notes list PRs, so a mixed PR describes itself as whichever half is in its title and hides the other; a lone bump is also the only thing CodeRabbit can safely skip (see below).
 - No `Co-Authored-By` lines. No "Generated with Claude Code" attribution.
 
 ### PR rules
 
 - Never commit directly to `master`. Every change goes through a PR.
 - One logical change per PR. Refactors, behavior changes, and features belong in separate PRs.
+- PR titles use the same Angular format as commits: `<type>(<scope>): <subject>`. The generated release notes are a list of PR titles, so a prose title lands in the changelog as prose. The title is also the only thing `.coderabbit.yaml`'s `ignore_title_keywords` can match, so a release PR is titled exactly `chore(release): X.Y.Z` — retitle it and it gets a full review of a one-line diff.
 - PR titles describe what changes; PR bodies explain _why_.
 - No checkboxes in PR descriptions. If you need a "Tested" section, list what was actually verified, not what's planned.
 - PR descriptions must reflect reality. Never list speculative tests.
@@ -92,6 +95,8 @@ Skip `cr review` only for `chore(release): X.Y.Z` PRs.
 ### Release flow
 
 There is no npm publish for this repo — it's pure bash. GitHub Pages publishes the script tree on every push to `master` and on `v*` tags. Tag triggers add the tag name as `INSTALLER_VERSION` via a `sed` substitution at deploy time. A version tag (`vX.Y.Z` — deliberately narrower than the Pages `v*` trigger, which also matches non-version v-tags like `v1-keeper-final`) also force-updates the `release` branch (`.github/workflows/release-branch.yml`) — the channel `signalk devpod up` clones — so master is free to break between tags without breaking new dev workspaces. The same workflow creates a GitHub Release with auto-generated notes (the merged PRs since the previous version tag) — the changelog is generated, never hand-written.
+
+**There is no `CHANGELOG.md` and there should not be one.** The tag is the release act and the notes are generated from the PRs merged since the previous tag, so a hand-maintained file would only ever disagree with them. `.github/release.yml` shapes that output — read it for the current categories and exclusions. The constraint worth knowing before writing a PR: GitHub groups by **label**, not by commit type, and cannot read the Angular type out of a title. Labelling promotes a PR into a section; it is not what makes it appear, and a PR that matches no category still lands in the fallback rather than vanishing.
 
 ### Branch protection / merging
 
