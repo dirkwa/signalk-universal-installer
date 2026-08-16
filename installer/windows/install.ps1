@@ -36,6 +36,12 @@ param(
     # native PowerShell error, so the VM never sees a value bash would refuse.
     [ValidateSet('release', 'master', 'dev')]
     [string]$Channel = 'release',
+    # UDP ports carrying NMEA data INTO the stack (a Yacht Devices / Actisense
+    # gateway streaming to the boat PC, typically 2000 or 10110). Opt-in: the
+    # right ports are a property of the boat's gateway, not something the
+    # installer can detect, and opening ports nobody uses is not free.
+    #   .\install.ps1 -NmeaUdpPorts 2000,10110
+    [int[]]$NmeaUdpPorts = @(),
     [string]$InstallerBaseUrl = 'https://dirkwa.github.io/signalk-universal-installer'
 )
 
@@ -472,8 +478,62 @@ powershell -NoProfile -WindowStyle Hidden -Command "podman machine start $Machin
 # Scoped to LocalSubnet so the rule only admits same-LAN clients, not arbitrary
 # remote hosts. Profile stays Any (a boat's WiFi may be classified Public, and
 # we still want LAN access there); LocalSubnet is what bounds the exposure.
+# The WSL VMCreatorId. Every WSL2 distro - including the podman machine - sits
+# behind this one Hyper-V firewall profile; the GUID is Microsoft's, fixed, and
+# the only way to name that profile.
+$WslVmCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
+
+# Windows filters traffic to WSL at TWO independent layers, and opening one
+# does nothing for the other:
+#
+#   1. the ordinary host firewall (New-NetFirewallRule), which is what most
+#      people mean by "the Windows firewall"; and
+#   2. the HYPER-V firewall (New-NetFirewallHyperVRule), which sits between the
+#      host and the VM.
+#
+# Traffic must pass BOTH. The Hyper-V layer drops silently: the packet is
+# visible in Wireshark on Windows and simply absent inside the VM, with nothing
+# logged. That is the difference between "it works" and an afternoon lost.
+#
+# It is easy to miss because Windows preinstalls `WslCore ... mDNS Default
+# Allow Rule` for UDP 5353, so mDNS works out of the box while a custom port on
+# the same multicast group receives nothing - which reads as "multicast is
+# broken in WSL" when it is really "that port was never allowed".
+function Add-HyperVFirewallRules {
+    param(
+        [Parameter(Mandatory)][int[]]$Ports,
+        [Parameter(Mandatory)][ValidateSet('TCP', 'UDP')][string]$Protocol
+    )
+    # Windows 11 22H2 and later only. On older builds there is no Hyper-V
+    # firewall to program - and nothing filtering there either - so absence is
+    # not a failure worth warning about.
+    if (-not (Get-Command New-NetFirewallHyperVRule -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+    $ok = $true
+    foreach ($p in $Ports) {
+        # NOTE -LocalPorts (plural) here; the host cmdlet below takes
+        # -LocalPort (singular). Mixing them up is a silent parameter-binding
+        # error, not a typo the parser catches.
+        $ruleName = "SignalK-HyperV-$Protocol-$p"
+        try {
+            if (Get-NetFirewallHyperVRule -Name $ruleName -ErrorAction SilentlyContinue) { continue }
+            New-NetFirewallHyperVRule -Name $ruleName -DisplayName "SignalK $Protocol $p (WSL)" `
+                -VMCreatorId $WslVmCreatorId -Direction Inbound -Action Allow `
+                -Protocol $Protocol -LocalPorts "$p" -ErrorAction Stop | Out-Null
+        } catch {
+            $ok = $false
+            Warn "Could not add a Hyper-V firewall rule for $Protocol/$p ($($_.Exception.Message)); traffic to the VM on that port may be dropped silently."
+        }
+    }
+    return $ok
+}
+
 function Add-FirewallRules {
-    param([Parameter(Mandatory)][int[]]$Ports)
+    param(
+        [Parameter(Mandatory)][int[]]$Ports,
+        [int[]]$UdpPorts = @()
+    )
     $opened = @()
     foreach ($p in $Ports) {
         $ruleName = "SignalK-$p"
@@ -493,6 +553,36 @@ function Add-FirewallRules {
         Ok "Firewall allows LAN access on ports: $($opened -join ', ')"
     } else {
         Warn "No firewall rules could be added; other devices may not reach the stack until you open the ports."
+    }
+
+    # Same ports again at the Hyper-V layer. Without this the consoles are
+    # unreachable from the LAN on any box whose Hyper-V default is Block.
+    if (Add-HyperVFirewallRules -Ports $Ports -Protocol TCP) {
+        Ok "Hyper-V firewall allows traffic into the machine on those ports"
+    }
+
+    # UDP is opt-in because the port depends on the boat's gateway. NMEA over
+    # UDP is the case the two-layer trap bites hardest: broadcast and multicast
+    # both work under mirrored networking, so the feed reaches Windows and then
+    # vanishes at the Hyper-V layer with no error anywhere.
+    if ($UdpPorts.Count -gt 0) {
+        $udpOk = @()
+        foreach ($p in $UdpPorts) {
+            $ruleName = "SignalK-UDP-$p"
+            try {
+                if (-not (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue)) {
+                    New-NetFirewallRule -Name $ruleName -DisplayName "SignalK UDP $p" -Direction Inbound -Action Allow `
+                        -Protocol UDP -LocalPort $p -Profile Any -RemoteAddress LocalSubnet -ErrorAction Stop | Out-Null
+                }
+                $udpOk += $p
+            } catch {
+                Warn "Could not add a UDP firewall rule for port $p ($($_.Exception.Message))."
+            }
+        }
+        Add-HyperVFirewallRules -Ports $UdpPorts -Protocol UDP | Out-Null
+        if ($udpOk.Count -gt 0) {
+            Ok "Firewall allows inbound NMEA UDP on: $($udpOk -join ', ')"
+        }
     }
 }
 
@@ -1387,6 +1477,20 @@ switch (`$sub) {
     foreach (`$p in $($SignalkPorts -join ',')) {
         Remove-NetFirewallRule -Name "SignalK-`$p" -ErrorAction SilentlyContinue
     }
+    # UDP rules are opt-in at install time, so the port list is not known here.
+    # Match on the name prefix instead - a no-op when no UDP ports were opened.
+    Get-NetFirewallRule -Name 'SignalK-UDP-*' -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    # The Hyper-V layer exists only on Windows 11 22H2+. Calling a cmdlet that
+    # does not exist throws CommandNotFoundException BEFORE -ErrorAction is
+    # consulted, so guard on the command itself, not on the error action.
+    if (Get-Command Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue) {
+        foreach (`$p in $($SignalkPorts -join ',')) {
+            Remove-NetFirewallHyperVRule -Name "SignalK-HyperV-TCP-`$p" -ErrorAction SilentlyContinue
+        }
+        Get-NetFirewallHyperVRule -Name 'SignalK-HyperV-UDP-*' -ErrorAction SilentlyContinue |
+            Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue
+    }
     # Strip our dir from the user PATH.
     `$dir = Split-Path -Parent `$MyInvocation.MyCommand.Path
     `$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -1466,7 +1570,7 @@ try {
 # standard ports (80/443) and the declined-standard fallback (3000/3443), plus
 # the two consoles - opening a couple unused ports is harmless.
 Section "Firewall"
-Add-FirewallRules -Ports $SignalkPorts
+Add-FirewallRules -Ports $SignalkPorts -UdpPorts $NmeaUdpPorts
 
 # 5d. Start the machine automatically after a reboot (a podman machine doesn't
 # start on boot on its own). Registered last, once the stack is confirmed up.
