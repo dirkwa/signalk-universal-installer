@@ -140,7 +140,7 @@ fi
 if ! grep -qE 'Add-FirewallRules -Ports \$SignalkPorts -UdpPorts \$NmeaUdpPorts' "$PS1"; then
     echo "[MISS] Add-FirewallRules is not called with the UDP port list"; fw_ok=0
 fi
-if [[ $fw_ok -eq 1 ]]; then
+if [[ "$fw_ok" -eq 1 ]]; then
     echo "  [OK]   both firewall layers are programmed, TCP and opt-in UDP"
 else
     echo "       (traffic to the VM would be dropped silently at the unopened layer)"
@@ -269,7 +269,7 @@ else
             fi
         done < <(grep -oE "^  '[a-z-]+' \{" "$PS1" | sed "s/^  '//; s/' {$//")
 
-        if [[ $agree -eq 1 ]]; then
+        if [[ "$agree" -eq 1 ]]; then
             echo "  [OK]   Windows help and the shim's refusals name the same commands"
         else
             fail=1
@@ -317,7 +317,7 @@ else
     fail=1
 fi
 
-if [[ $fail -ne 0 ]]; then
+if [[ "$fail" -ne 0 ]]; then
     echo "[FAIL] windows shim"
     exit 1
 fi
