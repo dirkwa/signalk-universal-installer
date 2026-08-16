@@ -149,13 +149,43 @@ guarded=$(printf '%s\n' "$body" | awk '
     inblock { print }
     inblock && /^    \}$/ { inblock = 0 }
 ')
+# The UDP case is a two-stage pipeline; assert BOTH stages. Matching only the
+# Get- query passes even if the Remove- stage is deleted, which would leave the
+# UDP rules behind on uninstall while the test stayed green.
 if printf '%s\n' "$guarded" | grep -qF 'Remove-NetFirewallHyperVRule -Name "SignalK-HyperV-TCP-' \
-    && printf '%s\n' "$guarded" | grep -qF "Get-NetFirewallHyperVRule -Name 'SignalK-HyperV-UDP-"; then
+    && printf '%s\n' "$guarded" | grep -qF "Get-NetFirewallHyperVRule -Name 'SignalK-HyperV-UDP-" \
+    && printf '%s\n' "$guarded" | grep -qE '^\s*Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue\s*$'; then
     echo "  [OK]   both Hyper-V removals sit inside the capability guard"
 else
     echo "[MISS] a Hyper-V firewall removal is outside the Get-Command guard - it"
     echo "       throws CommandNotFoundException on Windows 10 / pre-22H2"
     fail=1
+fi
+
+# --- 2e. the documented port list must match the installer -------------------
+# install.ps1's $SignalkPorts is the single source of truth; docs/installation.md
+# spells the same six ports out in prose twice. Prose cannot import a variable,
+# so the only thing keeping them honest is this check.
+DOCS=${DOCS_INSTALL:-docs/installation.md}
+if [[ -f "$PS1" && -f "$DOCS" ]]; then
+    # shellcheck disable=SC2016  # literal PowerShell source text
+    ports=$(grep -oE '^\$SignalkPorts = @\([0-9, ]+\)' "$PS1" \
+        | grep -oE '[0-9]+' | sort -n | tr '\n' ' ')
+    if [[ -z "$ports" ]]; then
+        echo "[MISS] could not read \$SignalkPorts from $PS1"; fail=1
+    else
+        missing=""
+        for p in $ports; do
+            grep -qF "$p" "$DOCS" || missing="$missing $p"
+        done
+        if [[ -n "$missing" ]]; then
+            echo "[MISS] ports not mentioned in $DOCS:$missing"
+            echo "       the installer opens them; the docs promise a different set"
+            fail=1
+        else
+            echo "  [OK]   documented firewall ports match \$SignalkPorts"
+        fi
+    fi
 fi
 
 # --- 3. the one deliberate interpolation is still deliberate ----------------
