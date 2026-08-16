@@ -1351,6 +1351,16 @@ switch (`$sub) {
     exit 1
   }
 
+  'halpi2' {
+    # Hat Labs HALPI2 carrier-board setup (Raspberry Pi CM5: I2C controller,
+    # config.txt device tree, apt packages). None of that exists in the Podman
+    # machine VM. Reject with a clear note, same as socketcan.
+    Write-Host "'signalk halpi2' is not available on Windows - it configures a"
+    Write-Host 'Hat Labs HALPI2 (Raspberry Pi CM5) carrier board, which the Podman'
+    Write-Host 'machine VM has no access to.'
+    exit 1
+  }
+
   'resetadmin' {
     # The VM CLI can't prompt (no PTY, stdin busy). Prompt on Windows, confirm
     # the match here, then hand the password to the VM via the env var

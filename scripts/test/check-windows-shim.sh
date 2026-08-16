@@ -219,7 +219,7 @@ if [[ ! -f "$CLI" ]]; then
     echo "[MISS] $CLI not found - could not check help/shim agreement"
     fail=1
 else
-    hidden=$(grep -oE 'signalk \(socketcan\|[a-z|-]+\)' "$CLI" \
+    hidden=$(grep -oE 'signalk \(socketcan\|[a-z0-9|-]+\)' "$CLI" \
         | head -1 | sed 's/^signalk (//; s/)$//' | tr '|' ' ')
     if [[ -z "$hidden" ]]; then
         echo "[MISS] could not read the Windows help filter from $CLI"

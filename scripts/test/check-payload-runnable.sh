@@ -31,8 +31,8 @@ fail=0
 
 # Which scripts does install.sh stage into the payload?
 # shellcheck disable=SC2016  # these are grep patterns, $HERE must stay literal
-mapfile -t staged < <(grep -oE 'install -m 0755 "\$HERE/[a-z-]+\.sh" "\$PAYLOAD_DIR' "$INSTALL" \
-    | grep -oE '\$HERE/[a-z-]+\.sh' | sed 's|\$HERE/||' | sort -u)
+mapfile -t staged < <(grep -oE 'install -m 0755 "\$HERE/[a-z0-9-]+\.(sh|tmpl)" "\$PAYLOAD_DIR' "$INSTALL" \
+    | grep -oE '\$HERE/[a-z0-9-]+\.(sh|tmpl)' | sed 's|\$HERE/||' | sort -u)
 
 if [[ ${#staged[@]} -eq 0 ]]; then
     echo "  [MISS] could not identify any staged payload script"
@@ -90,6 +90,23 @@ if command -v jq >/dev/null 2>&1; then
         echo "  [OK]   its output is JSON carrying a serial key"
     else
         echo "  [MISS] output is not the expected JSON shape"
+        fail=1
+    fi
+fi
+
+# The staged signalk-halpi2.tmpl is the fallback `signalk halpi2` runs when
+# the CLI copy is missing; it must run from the payload dir with no libs.
+if [[ -f "$SRC/signalk-halpi2.tmpl" ]]; then
+    install -m 0755 "$SRC/signalk-halpi2.tmpl" "$TMP/signalk-halpi2.tmpl"
+    set +e
+    out=$(bash "$TMP/signalk-halpi2.tmpl" detect 2>&1)
+    rc=$?
+    set -e
+    if [[ $rc -le 2 ]] && [[ "$out" == \{* ]]; then
+        echo "  [OK]   a staged signalk-halpi2.tmpl runs detect (rc $rc) and emits JSON"
+    else
+        echo "  [MISS] the staged signalk-halpi2.tmpl does not run (rc $rc):"
+        printf '%s\n' "$out" | head -3 | sed 's/^/         /'
         fail=1
     fi
 fi

@@ -116,10 +116,12 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/install-signalk-command.sh \
         installer/linux/install-socketcan-script.sh \
         installer/linux/install-bluetooth-script.sh \
+        installer/linux/install-halpi2-script.sh \
         installer/linux/signalk.tmpl \
         installer/linux/signalk-recovery.tmpl \
         installer/linux/signalk-socketcan.tmpl \
         installer/linux/signalk-bluetooth.tmpl \
+        installer/linux/signalk-halpi2.tmpl \
         installer/linux/signalk-timesync.tmpl \
         installer/linux/legacy-cleanup.sh \
         installer/linux/lib/colors.sh \
@@ -662,6 +664,45 @@ elif (( PREFLIGHT_RC != 0 )); then
     exit "$PREFLIGHT_RC"
 fi
 
+# 2c. Hat Labs HALPI2 carrier board (Raspberry Pi CM5). On a CM5 the helper
+# probes the HALPI2 controller at I2C 0x6d, installs the Hat Labs packages
+# (halpid, halpi2-firmware, blinkenlights-daemon, i2c-tools, can-utils),
+# writes the config.txt device-tree block, the can0 bitrate and i2c-dev at
+# boot, then asks for a reboot — same exit-and-re-run contract as the
+# preflight cmdline patch above: the re-run finds can0 / ttyAMA4 / halpid
+# live and the normal hardware detection picks them up. Runs the template
+# directly because ~/.local/bin/signalk-halpi2 is installed later (11a).
+# SIGNALK_HALPI2=no skips it; SIGNALK_HALPI2=yes skips its prompts. Details
+# and the manual recipe: docs/halpi2.md. Never fails the install: rc 1 =
+# declined/incomplete, warned and carried on. Runs only when sudo is usable.
+case "${SIGNALK_HALPI2:-auto}" in
+    no|NO|0|false|FALSE) ;;
+    *)
+        if [[ "$SUDO" = "MISSING" ]]; then
+            # detect: 0 confirmed, 1 candidate, 2 not a CM5
+            set +e
+            bash "$HERE/signalk-halpi2.tmpl" detect >/dev/null 2>&1
+            HALPI2_DETECT_RC=$?
+            set -e
+            if (( HALPI2_DETECT_RC != 2 )); then
+                warn "Compute Module 5 detected but sudo is unavailable — HALPI2 setup skipped."
+                warn "Run 'signalk halpi2 apply' with sudo later (docs/halpi2.md)."
+            fi
+        else
+            set +e
+            bash "$HERE/signalk-halpi2.tmpl" apply
+            HALPI2_RC=$?
+            set -e
+            if (( HALPI2_RC == 2 )); then
+                info "HALPI2 support applied; reboot and re-run this installer."
+                exit 0
+            elif (( HALPI2_RC != 0 )); then
+                warn "HALPI2 setup incomplete (see above); continuing with the install."
+            fi
+        fi
+        ;;
+esac
+
 # 2b. Privileged-port sysctl (only when standard web ports were chosen)
 #
 # Lower net.ipv4.ip_unprivileged_port_start to 80 via a persistent
@@ -1086,13 +1127,16 @@ section "Group memberships"
 # device nodes keep their HOST group (root:audio), and the managed audio
 # container (wyoming-satellite) reaches them via the calling user's own
 # supplementary groups (crun keep-original-groups), not via a uid map.
-for g in dialout gpio netdev audio; do
+# `halpid` exists only after `signalk halpi2 apply` installed the Hat Labs
+# daemon; its socket is root:halpid 0660 and the signalk-halpi plugin reaches
+# it through this membership (GroupAdd=keep-groups). Silently absent elsewhere.
+for g in dialout gpio netdev audio halpid; do
     if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
         info "Adding $USER to $g (requires sudo)"
         $SUDO /usr/sbin/usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
     fi
 done
-ok "groups: dialout, gpio, netdev, audio (ensured if present on host)"
+ok "groups: dialout, gpio, netdev, audio, halpid (ensured if present on host)"
 
 # 6. Tokens
 section "Authentication tokens"
@@ -1434,6 +1478,10 @@ install -m 0755 "$HERE/detect-hardware.sh" "$PAYLOAD_DIR/detect-hardware.sh"
 # detect-hardware.sh it's fetched-not-invoked by the doctor; the host CLI runs
 # it. 0755 — it's an executable script.
 install -m 0755 "$HERE/render-server-quadlet.sh" "$PAYLOAD_DIR/render-server-quadlet.sh"
+# signalk-halpi2.tmpl is staged so a box that predates the CLI copy can still
+# run `signalk halpi2` from the payload after `signalk update` (the doctor
+# refresh list is what keeps it current). Self-contained: sources no lib.
+install -m 0755 "$HERE/signalk-halpi2.tmpl" "$PAYLOAD_DIR/signalk-halpi2.tmpl"
 # Stage the libs those scripts source, or the staged copies cannot run.
 # detect-hardware.sh sources lib/distro.sh unconditionally and died with
 # "lib/distro.sh: No such file or directory" — the staged copy was inert in the
@@ -1473,6 +1521,7 @@ bash "$HERE/install-recovery-script.sh"
 INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
 bash "$HERE/install-socketcan-script.sh"
 bash "$HERE/install-bluetooth-script.sh"
+bash "$HERE/install-halpi2-script.sh"
 
 # Container DNS self-heal (signalk-resolv-watch.path/.service): recreates
 # signalk-server if the boot beat DHCP and the container snapshotted an
@@ -2022,6 +2071,22 @@ else
     fi
 fi
 set -e   # end of the relaxed-set-e doctor-token section
+
+# 15c. HALPI2 Signal K connections. When hardware.json says the board is a
+# HALPI2, create the NMEA 2000 (can0) and RS-485 (/dev/ttyAMA4) connections
+# through the server's admin API with the token written just above — the
+# server randomises the N2K unique number and starts the providers itself,
+# so nothing under ~/.signalk is edited by the installer. GET-first, so a
+# migrated HaLOS settings.json (same ids) is left alone. Best-effort.
+if command -v jq >/dev/null 2>&1 \
+    && [[ -s "$UPDATER_DATA/hardware.json" ]] \
+    && [[ "$(jq -r '.board.model // empty' "$UPDATER_DATA/hardware.json" 2>/dev/null)" = "halpi2" ]] \
+    && [[ "$(jq -r '.board.candidate // true' "$UPDATER_DATA/hardware.json" 2>/dev/null)" = "false" ]]; then
+    section "HALPI2 Signal K connections"
+    if ! "$HOME/.local/bin/signalk-halpi2" connections; then
+        warn "HALPI2 connections not created — run 'signalk halpi2 connections' once the server is up"
+    fi
+fi
 
 # 16. Ensure ~/.local/bin is on PATH for future logins.
 #
