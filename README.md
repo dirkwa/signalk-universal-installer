@@ -95,7 +95,7 @@ signalk hardware rescan
 
 Then add the connection in the SignalK admin UI under **Server → Data Connections**, using the stable `by-id` path rather than `/dev/ttyUSB0` — with two USB serial devices the `ttyUSB` numbering can swap on reboot.
 
-See [docs/hardware.md](docs/hardware.md) for the walkthrough, SocketCAN, Bluetooth and audio passthrough, and what to check when a device does not appear.
+See [docs/hardware.md](docs/hardware.md) for the walkthrough, SocketCAN, Bluetooth and audio passthrough, and what to check when a device does not appear. On a Hat Labs HALPI2 the installer also sets up the carrier board itself (Hat Labs packages, CAN, RS-485, LEDs) — [docs/halpi2.md](docs/halpi2.md).
 
 See [docs/installation.md](docs/installation.md) for the full per-platform walkthrough, and [docs/recovery.md](docs/recovery.md) for the recovery playbook.
 

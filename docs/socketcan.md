@@ -264,6 +264,6 @@ You should see PGNs appearing in the **Data Browser** within seconds.
 
 ## Out of scope (today)
 
-- **Auto-applying the config.txt patch with sudo prompt.** The cmdline.txt patch the installer already does is a precedent, but config.txt's blast radius (HDMI, memory split, GPIO pinmux) is wider.
+- **Auto-applying the config.txt patch with sudo prompt.** The cmdline.txt patch the installer already does is a precedent, but config.txt's blast radius (HDMI, memory split, GPIO pinmux) is wider. The one exception is the Hat Labs HALPI2, where the overlay set is fixed for the board and the board is identified over I2C before anything is written — see [docs/halpi2.md](halpi2.md).
 - **CAN-FD data-phase bitrate.** Option 2 (Waveshare CAN FD HAT) runs its MCP2518FD controllers in **classical CAN @ 250 kbit/s** — the right mode for NMEA 2000, which is not an FD bus. True CAN-FD with a faster data phase (2 / 4 / 5 Mbit/s on top of the 250k/500k arbitration phase) is still out of scope: it needs a `[CAN] DataBitRate=` / `FDMode=` block on the networkd side and is only useful on non-NMEA-2000 FD buses.
 - **Auto-discovering SLCAN tty when more than one is plugged in.** The current flow asks the operator to paste a full path. A future version might offer a numbered sub-menu.

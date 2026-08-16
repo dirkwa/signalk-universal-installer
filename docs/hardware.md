@@ -10,9 +10,11 @@ The installer detects host hardware at install time and passes it through to the
 | **SocketCAN** | `ip -o link show type can` (every `can*` netlink interface) | Disabled (requires explicit opt-in) — CAN interfaces can be physical (NGT-1 plugged in over USB-CAN) or virtual (`vcan0` for testing) and surfacing them all by default is noisy | `{ interface, type: "socketcan", enabled }` per interface |
 | **Bluetooth (DBus)** | Presence of `/run/dbus/system_bus_socket` | Disabled — BLE on Linux requires the host DBus to be reachable from the container, and not every install needs it | `{ enabled, dbusAvailable }` (no per-device list; toggle mounts the dbus-auth-proxy socket volume — see [Bluetooth / BLE passthrough](#bluetooth--ble-passthrough)) |
 | **Raspberry Pi GPIO** | `/proc/device-tree/model` matched against `Pi[ ]*[3-5]` | Disabled (opt-in) — only meaningful on Pi hosts | `{ enabled, platform: "rpi5"\|"rpi4"\|"rpi3"\|"rpi-other"\|"none" }` |
+| **HALPI2 board** | `/proc/device-tree/model` says Compute Module 5, then `halpid` active or the controller answering at I2C `0x6d` (see [docs/halpi2.md](halpi2.md)) | Informational — drives the `/run/halpid` mount and the install-time `signalk halpi2 apply` step | `{ model: "halpi2", candidate, detectedVia: "model-string"\|"halpid"\|"i2c", hardwareVersion, firmwareVersion }` — absent on other hosts |
+| **Onboard serial** | Fixed UARTs a detected board provides (HALPI2: `/dev/ttyAMA4`, RS-485) | **Enabled** — same reasoning as USB serial | `{ device, label, enabled }` per port, under `onboardSerial` |
 | **ALSA audio** | Presence of `/dev/snd` | **Enabled when present** — the mount is a read-only *metadata view* for signalk-container's device probe, not direct audio access (see [Audio passthrough](#audio-passthrough)); the low risk doesn't warrant install-time friction for voice-stack users | `{ present, enabled }` |
 
-For each enabled entry the renderer (`render-server-quadlet.sh`) emits an `AddDevice=` line (USB serial, CAN) or a `Volume=` line (DBus, GPIO, audio) inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. Anything outside that block — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
+For each enabled entry the renderer (`render-server-quadlet.sh`) emits an `AddDevice=` line (USB serial, onboard serial, CAN) or a `Volume=` line (DBus, GPIO, audio, halpid socket) inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. Anything outside that block — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
 
 ## Group memberships
 
@@ -136,6 +138,10 @@ The `audio` group membership (step 5) is the other half: under rootless Podman t
 Detected automatically via `/proc/device-tree/model`. On the Pi the installer also nudges cgroup memory + pids delegation onto the user slice (some Pi-OS images ship without the right `Delegate=` set on `user@.service`), so engine containers can apply memory limits.
 
 GPIO passthrough mounts `/dev/gpiomem` only — not `/dev/mem`. Plugins that need the full memory map for low-level peripherals won't work in this configuration; they'd need to run on the host, not in the container.
+
+### Hat Labs HALPI2 (Compute Module 5 carrier)
+
+Detected via the Compute Module 5 model string plus the HALPI2 controller at I2C `0x6d` (or a running `halpid`). The installer then runs `signalk halpi2 apply`: Hat Labs' APT repository and packages (`halpid`, `halpi2-firmware`, `blinkenlights-daemon`), the device-tree block for CAN / RS-485 / I2C in `config.txt`, the can0 bitrate, and a reboot; the re-run passes `/dev/ttyAMA4` and `/run/halpid` into the container and creates the NMEA 2000 and RS-485 connections through the server's admin API. Everything, including the `sd=off` guard and the prompt rules, is in [docs/halpi2.md](halpi2.md).
 
 ### macOS (Apple Silicon and Intel)
 
