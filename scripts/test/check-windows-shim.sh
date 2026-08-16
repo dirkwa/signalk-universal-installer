@@ -210,6 +210,36 @@ else
     fi
 fi
 
+# --- 2f. help and the shim must agree about what Windows supports ------------
+# Two lists, one truth: signalk.tmpl's usage() hides subcommands from Windows
+# help, and the shim rejects them. If they drift, the operator is either told
+# about a command that dies in the VM, or denied one the help never mentioned.
+CLI=${CLI_TMPL:-installer/linux/signalk.tmpl}
+if [[ ! -f "$CLI" ]]; then
+    echo "[MISS] $CLI not found - could not check help/shim agreement"
+    fail=1
+else
+    hidden=$(grep -oE 'signalk \(socketcan\|[a-z|-]+\)' "$CLI" \
+        | head -1 | sed 's/^signalk (//; s/)$//' | tr '|' ' ')
+    if [[ -z "$hidden" ]]; then
+        echo "[MISS] could not read the Windows help filter from $CLI"
+        fail=1
+    else
+        read -r -a hidden_list <<<"$hidden"
+        drift=""
+        for c in "${hidden_list[@]}"; do
+            grep -qE "^  '${c}' \{" "$PS1" || drift="$drift $c"
+        done
+        if [[ -n "$drift" ]]; then
+            echo "[MISS] hidden from Windows help but not rejected by the shim:$drift"
+            echo "       they fall through and fail inside the VM instead"
+            fail=1
+        else
+            echo "  [OK]   every command hidden from Windows help is rejected by the shim"
+        fi
+    fi
+fi
+
 # --- 3. the one deliberate interpolation is still deliberate ----------------
 # $Channel and $MachineName are MEANT to interpolate at generation time (they
 # bake the install-time choice into the shim). Assert they are still spelled

@@ -179,6 +179,18 @@ The installer also drops a `signalk` command on your PATH (open a **new** termin
 - `signalk machine stop` / `signalk machine start` — Windows-only, one level **above** `signalk stop`: stops the Podman machine itself (the whole VM goes down and frees RAM, consoles included) and disables the boot task so a restart won't bring it back. `machine start` reverses both. Nothing is removed.
 - `signalk uninstall` — removes the stack inside the machine, then offers to remove the Podman machine itself (and with it **all** SignalK data — on Windows there is no `~/.signalk*` on the host; everything lives in the VM) plus the `signalk` command and its PATH entry.
 
+Three subcommands are refused outright, with a note explaining why, rather than failing somewhere inside the VM. They are hidden from `signalk help` on Windows for the same reason:
+
+| Command | Why not on Windows |
+|---|---|
+| `signalk socketcan` | Sets up a Pi CAN HAT over SPI. The VM has no CAN hardware and no SPI bus. |
+| `signalk bluetooth` | BLE passthrough needs a bluez stack on the machine running the containers; the VM has none, and WSL2 cannot reach the Windows Bluetooth radio. |
+| `signalk timesync` | Steps the **host** clock from GPS for boats without NTP. Here the host is Windows, and the VM already takes its time from Windows. |
+
+For all three, a USB or network gateway is the way to get that data into SignalK.
+
+Everything else forwards into the machine and behaves as documented for Linux — including `render-server`, `resolv-watch` and `netgate-watch`, which operate on the Quadlets and `systemd --user` units that live **inside** the machine.
+
 `signalk stop`, `start` and `restart` are **not** Windows-specific — they run inside the machine and mean exactly what they mean on Linux: `stop` pauses signalk-server (the data plane) and durably keeps it down across reboots, while the Updater (`:3003`) and Doctor (`:3004`) consoles **stay reachable** so you can still diagnose and recover. `restart` bounces signalk-server to pick up config changes without touching boot behaviour.
 
 So there are two levels of "off", and which you want depends on why:
