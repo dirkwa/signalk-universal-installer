@@ -533,7 +533,13 @@ apply_packages() {
 
 apply_groups() {
     local user g changed=1
-    user=${USER:-$(id -un)}
+    # Under `sudo signalk halpi2 apply` USER is root; the memberships belong
+    # to the operator who invoked sudo.
+    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        user="$SUDO_USER"
+    else
+        user=${USER:-$(id -un)}
+    fi
     for g in halpid dialout; do
         getent group "$g" >/dev/null 2>&1 || continue
         if ! id -nG "$user" | tr ' ' '\n' | grep -qx "$g"; then
@@ -708,6 +714,20 @@ cmd_connections() {
             ok "connection '${id}' already exists"
             continue
         fi
+        # Only for devices that exist now: a connection to an absent can0 or
+        # ttyAMA4 would sit in the server's log as a permanent open failure.
+        case "$id" in
+            "$N2K_ID")
+                if ! ip -o link show can0 >/dev/null 2>&1; then
+                    warn "connection '${id}' skipped: no can0 interface yet (reboot after 'signalk halpi2 apply', then re-run)"
+                    rc=1; continue
+                fi ;;
+            "$RS485_ID")
+                if [[ ! -e "$HALPI2_RS485_DEV" ]]; then
+                    warn "connection '${id}' skipped: ${HALPI2_RS485_DEV} absent (reboot after 'signalk halpi2 apply', then re-run)"
+                    rc=1; continue
+                fi ;;
+        esac
         code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' \
             -X POST -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
             --data "$(provider_body "$id")" "${base}/skServer/providers" || echo 000)

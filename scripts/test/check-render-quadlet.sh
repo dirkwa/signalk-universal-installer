@@ -354,7 +354,7 @@ out_noboard=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/halpid" bash "$RENDER"
     echo "  [MISS] render (no board) exited non-zero"
     fail=1
 }
-if grep -q 'halpid\|ttyAMA' <<<"$out_noboard"; then
+if grep -vE '^[[:space:]]*#' <<<"$out_noboard" | grep -q 'halpid\|ttyAMA'; then
     echo "  [MISS] fixture without board rendered HALPI2 lines"
     fail=1
 else

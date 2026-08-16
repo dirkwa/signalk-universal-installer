@@ -21,7 +21,7 @@ Fresh install on a HALPI2:
 2. `sudo reboot`.
 3. Run the one-liner again. `can0`, `/dev/ttyAMA4` and `halpid` are live now; the normal hardware detection records them, the server Quadlet gets `AddDevice=/dev/ttyAMA4` and the `/run/halpid` mount, and step 15c creates the two Signal K connections.
 
-Existing install: `signalk halpi2 apply`, reboot, `signalk hardware rescan`, `signalk halpi2 connections`.
+Existing install: `signalk halpi2 apply`, reboot, `signalk hardware rescan`, `signalk halpi2 connections`. `connections` creates a connection only when its device exists (`can0`, `/dev/ttyAMA4`), so it belongs after the reboot; a skipped one is reported and re-running adds it.
 
 ## What gets installed and configured
 

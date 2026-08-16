@@ -222,6 +222,18 @@ before=$(sha256sum "$root/config.txt")
 rc=$(run_apply)
 if [[ "$rc" == 1 && "$(sha256sum "$root/config.txt")" == "$before" ]] && grep -q "malformed" "$root/out"; then ok "lone begin marker: refused, config.txt untouched"; else miss "lone begin marker: rc $rc, changed=$([[ "$(sha256sum "$root/config.txt")" == "$before" ]] && echo no || echo yes)"; fi
 
+for fixture in "dup-begin" "dup-end" "end-first"; do
+    reset_fs; touch "$root/i2c-1"
+    case $fixture in
+        dup-begin) printf '# >>> signalk-installer halpi2 >>>\n[all]\n# >>> signalk-installer halpi2 >>>\ndtparam=i2c_arm=on\n# <<< signalk-installer halpi2 <<<\n' >>"$root/config.txt" ;;
+        dup-end)   printf '# >>> signalk-installer halpi2 >>>\ndtparam=i2c_arm=on\n# <<< signalk-installer halpi2 <<<\n# <<< signalk-installer halpi2 <<<\n' >>"$root/config.txt" ;;
+        end-first) printf '# <<< signalk-installer halpi2 <<<\n# >>> signalk-installer halpi2 >>>\ndtparam=i2c_arm=on\n' >>"$root/config.txt" ;;
+    esac
+    before=$(sha256sum "$root/config.txt")
+    rc=$(run_apply)
+    if [[ "$rc" == 1 && "$(sha256sum "$root/config.txt")" == "$before" ]] && grep -q "malformed" "$root/out"; then ok "${fixture} markers: refused, config.txt untouched"; else miss "${fixture} markers: rc $rc, changed=$([[ "$(sha256sum "$root/config.txt")" == "$before" ]] && echo no || echo yes)"; fi
+done
+
 # 8c. docs/halpi2.md shows the block's effective lines — keep them in sync
 DOC=${DOC:-docs/halpi2.md}
 if [[ -f "$DOC" ]]; then

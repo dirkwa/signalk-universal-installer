@@ -109,7 +109,13 @@ else
     out=$(bash "$TMP/signalk-halpi2.tmpl" detect 2>&1)
     rc=$?
     set -e
-    if [[ $rc -le 2 ]] && [[ "$out" == \{* ]]; then
+    json_ok=1
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$out" | jq -e . >/dev/null 2>&1 || json_ok=0
+    else
+        [[ "$out" == \{* ]] || json_ok=0
+    fi
+    if [[ $rc -le 2 && $json_ok -eq 1 ]]; then
         echo "  [OK]   a staged signalk-halpi2.tmpl runs detect (rc $rc) and emits JSON"
     else
         echo "  [MISS] the staged signalk-halpi2.tmpl does not run (rc $rc):"

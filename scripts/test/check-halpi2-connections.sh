@@ -9,7 +9,8 @@
 #   2. empty provider list      → two POSTs with the exact bodies, rc 0
 #   3. both ids already present → zero POSTs, rc 0
 #   4. one present              → exactly the missing one is posted
-#   5. server unreachable (GET fails) → rc 1, no POST
+#   5. server unreachable (GET fails) → rc 1, no POST; an absent can0 or
+#      /dev/ttyAMA4 skips its own connection (rc 1, other one still posted)
 #
 # Run from the repo root.
 
@@ -36,7 +37,7 @@ LOG="$root/log"; mkdir -p "$LOG"
 
 # curl shim: GET → $SHIM_GET_FILE (rc 22 when SHIM_GET_FAIL=1, like curl -f
 # on a 5xx); POST → log the --data body, print $SHIM_POST_CODE (default 200).
-# shellcheck disable=SC2016  # literal shim body
+# shellcheck disable=SC2016  # literal shim bodies (curl, ip)
 cat >"$bin/curl" <<'SHIM'
 #!/usr/bin/env bash
 method=GET; data=""; url=""
@@ -60,11 +61,16 @@ fi
 cat "$SHIM_GET_FILE"
 SHIM
 chmod +x "$bin/curl"
+# ip shim: can0 exists unless SHIM_NO_CAN0=1
+# shellcheck disable=SC2016  # literal shim body
+printf '#!/usr/bin/env bash\n[[ "${SHIM_NO_CAN0:-0}" == 1 ]] && exit 1; echo "3: can0: <NOARP,UP,LOWER_UP,ECHO> mtu 16"\n' >"$bin/ip"
+chmod +x "$bin/ip"
+: >"$root/ttyAMA4"
 
 run_connections() {
     set +e
     env -i HOME="$root" PATH="$bin:$PATH" DOCTOR_DATA="$root/doctor" SIGNALK_URL="http://127.0.0.1:80/signalk" \
-        LOG="$LOG" NO_COLOR=1 "$@" bash "$TMPL" connections >"$root/out" 2>&1
+        HALPI2_RS485_DEV="$root/ttyAMA4" LOG="$LOG" NO_COLOR=1 "$@" bash "$TMPL" connections >"$root/out" 2>&1
     local rc=$?
     set -e
     echo "$rc"
@@ -95,8 +101,8 @@ if [[ "$n2k" == '{"id":"halpi2-nmea2000","enabled":true,"type":"NMEA2000","loggi
 else
     miss "N2K body: $n2k"
 fi
-if [[ "$rs" == '{"id":"halpi2-rs485","enabled":true,"type":"NMEA0183","logging":false,"options":{"type":"serial","device":"/dev/ttyAMA4","baudrate":4800}}' ]]; then
-    ok "RS-485 body: serial /dev/ttyAMA4 @ 4800"
+if [[ "$rs" == "{\"id\":\"halpi2-rs485\",\"enabled\":true,\"type\":\"NMEA0183\",\"logging\":false,\"options\":{\"type\":\"serial\",\"device\":\"$root/ttyAMA4\",\"baudrate\":4800}}" ]]; then
+    ok "RS-485 body: serial <rs485 device> @ 4800"
 else
     miss "RS-485 body: $rs"
 fi
@@ -122,6 +128,22 @@ fi
 reset_log
 rc=$(run_connections SHIM_GET_FILE="$root/empty.json" SHIM_GET_FAIL=1)
 if [[ "$rc" == 1 && "$(posts)" == 0 ]]; then ok "server unreachable: rc 1, no POST"; else miss "server unreachable: rc $rc, $(posts) POSTs"; fi
+
+# 5b. devices absent → the matching connection is skipped, not created
+reset_log
+rc=$(run_connections SHIM_GET_FILE="$root/empty.json" HALPI2_RS485_DEV="$root/no-tty")
+if [[ "$rc" == 1 && "$(posts)" == 1 ]] && jq -e 'select(.id=="halpi2-nmea2000")' "$LOG/post-bodies" >/dev/null && grep -q "halpi2-rs485' skipped" "$root/out"; then
+    ok "RS-485 node absent: only halpi2-nmea2000 posted, skip reported"
+else
+    miss "RS-485 node absent: rc $rc, bodies: $(cat "$LOG/post-bodies" 2>/dev/null)"
+fi
+reset_log
+rc=$(run_connections SHIM_GET_FILE="$root/empty.json" SHIM_NO_CAN0=1)
+if [[ "$rc" == 1 && "$(posts)" == 1 ]] && jq -e 'select(.id=="halpi2-rs485")' "$LOG/post-bodies" >/dev/null && grep -q "halpi2-nmea2000' skipped" "$root/out"; then
+    ok "can0 absent: only halpi2-rs485 posted, skip reported"
+else
+    miss "can0 absent: rc $rc, bodies: $(cat "$LOG/post-bodies" 2>/dev/null)"
+fi
 
 # 6. POST answered 401 → reported, rc 1
 reset_log
