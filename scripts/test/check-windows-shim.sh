@@ -154,7 +154,7 @@ guarded=$(printf '%s\n' "$body" | awk '
 # UDP rules behind on uninstall while the test stayed green.
 if printf '%s\n' "$guarded" | grep -qF 'Remove-NetFirewallHyperVRule -Name "SignalK-HyperV-TCP-' \
     && printf '%s\n' "$guarded" | grep -qF "Get-NetFirewallHyperVRule -Name 'SignalK-HyperV-UDP-" \
-    && printf '%s\n' "$guarded" | grep -qE '^\s*Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue\s*$'; then
+    && printf '%s\n' "$guarded" | grep -qE '^[[:space:]]*Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue[[:space:]]*$'; then
     echo "  [OK]   both Hyper-V removals sit inside the capability guard"
 else
     echo "[MISS] a Hyper-V firewall removal is outside the Get-Command guard - it"
@@ -166,13 +166,24 @@ fi
 # install.ps1's $SignalkPorts is the single source of truth; docs/installation.md
 # spells the same six ports out in prose twice. Prose cannot import a variable,
 # so the only thing keeping them honest is this check.
+# Fail closed: an unreadable input means the check did not run, which must not
+# read as a pass. (The `-f "$PS1"` case is already fatal at the top of the file.)
 DOCS=${DOCS_INSTALL:-docs/installation.md}
-if [[ -f "$PS1" && -f "$DOCS" ]]; then
+if [[ ! -f "$DOCS" ]]; then
+    echo "[MISS] $DOCS not found - the documented port list could not be checked"
+    fail=1
+else
+    # `if ! ports=$(...)` rather than a bare assignment: under `set -e` a failed
+    # assignment exits the script immediately, so the empty-value branch below
+    # would be dead code and a broken extraction would abort rather than report.
     # shellcheck disable=SC2016  # literal PowerShell source text
-    ports=$(grep -oE '^\$SignalkPorts = @\([0-9, ]+\)' "$PS1" \
-        | grep -oE '[0-9]+' | sort -n | tr '\n' ' ')
+    if ! ports=$(grep -oE '^\$SignalkPorts = @\([0-9, ]+\)' "$PS1" \
+        | grep -oE '[0-9]+' | sort -n | tr '\n' ' '); then
+        ports=""
+    fi
     if [[ -z "$ports" ]]; then
-        echo "[MISS] could not read \$SignalkPorts from $PS1"; fail=1
+        echo "[MISS] could not read \$SignalkPorts from $PS1"
+        fail=1
     else
         missing=""
         for p in $ports; do
