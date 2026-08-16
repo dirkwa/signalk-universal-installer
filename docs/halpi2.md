@@ -4,6 +4,8 @@ The HALPI2 is Hat Labs' marine computer: a Raspberry Pi Compute Module 5 on a ca
 
 `signalk halpi2` is the helper; `install.sh` runs it automatically on a Compute Module 5 (step 2c, right after preflight).
 
+This installer is not a Hat Labs product and is not endorsed by Hat Labs. The device-tree lines, the can0 network/udev settings and the Signal K connection ids are taken from Hat Labs' `halos-pi-gen` (BSD-3-Clause, © Hat Labs oy) and their published HALPI2 documentation; the daemons themselves are installed unmodified from `apt.hatlabs.fi` (halpid and blinkenlights-daemon BSD-3-Clause, halpi2-firmware MIT).
+
 ## TL;DR
 
 ```bash
