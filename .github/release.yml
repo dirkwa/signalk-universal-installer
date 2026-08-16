@@ -9,10 +9,12 @@
 # disagree with it.
 #
 # GitHub categorises by LABEL, not by commit type — it has no regex over PR
-# titles. So a PR lands in "Other" unless it carries a label. That is a
-# deliberate floor rather than a gap: every PR still appears, and the Angular
-# type in its title (required by AGENTS.md) already tells the reader what it
-# is. Labelling is the optional refinement that promotes a PR into a section.
+# titles. So a PR lands in "Other changes" unless one of the category labels
+# below matches; carrying some other label (`question`, `wontfix`) is not
+# enough. That is a deliberate floor rather than a gap: every PR that is not
+# excluded still appears, and the Angular type in its title (required by
+# AGENTS.md) already tells the reader what it is. Labelling is the optional
+# refinement that promotes a PR into a section.
 changelog:
   exclude:
     labels:
@@ -42,9 +44,10 @@ changelog:
       labels:
         - dependencies
 
-    # Everything unlabelled. Keep this last and keep the wildcard: without it
-    # an unlabelled PR vanishes from the notes entirely, which is worse than
-    # an uncategorised entry.
+    # Fallback for every PR no earlier category matched (excluded PRs stay
+    # excluded — this does not resurrect them). Keep it last and keep the
+    # wildcard: without it an unmatched PR vanishes from the notes entirely,
+    # which is worse than an uncategorised entry.
     - title: Other changes
       labels:
         - "*"
