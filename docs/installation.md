@@ -231,7 +231,7 @@ Then paste the path into Explorer's address bar, substituting that name:
 \\wsl.localhost\<distro>\home\user\.signalk
 ```
 
-`plugin-config-data\` holds the per-plugin JSON, and `~/.signalk-updater/` and `~/.signalk-doctor/` sit alongside it. Files copy in and out like any network share. To put it on a drive letter:
+Inside `.signalk\`, `plugin-config-data\` holds the per-plugin JSON. The updater's and doctor's own state live one level up, in `.signalk-updater\` and `.signalk-doctor\` next to `.signalk\` rather than inside it. Files copy in and out like any network share. To put it on a drive letter:
 
 ```powershell
 net use Z: \\wsl.localhost\<distro>\home\user /persistent:yes
