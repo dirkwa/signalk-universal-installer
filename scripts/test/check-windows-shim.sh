@@ -116,22 +116,45 @@ fi
 # layer leaves traffic dropped SILENTLY inside the Hyper-V layer - no log, no
 # error, packets visible in Wireshark on Windows and absent in the VM. So the
 # installer must call both cmdlets, and the uninstall must remove both.
-if grep -qF 'New-NetFirewallHyperVRule' "$PS1" && grep -qF 'New-NetFirewallRule' "$PS1"; then
-    echo "  [OK]   installer programs both the host and Hyper-V firewall layers"
+# Assert the CALL SITES, not just that the cmdlet name appears somewhere: a
+# defined-but-never-called helper would satisfy a bare name grep while leaving
+# the Hyper-V layer shut.
+fw_ok=1
+# shellcheck disable=SC2016  # grep patterns are literal PowerShell source text
+if ! grep -qE 'Add-HyperVFirewallRules -Ports \$Ports -Protocol TCP' "$PS1"; then
+    echo "[MISS] the console ports are not opened at the Hyper-V layer"; fw_ok=0
+fi
+# shellcheck disable=SC2016  # grep patterns are literal PowerShell source text
+if ! grep -qE 'Add-HyperVFirewallRules -Ports \$UdpPorts -Protocol UDP' "$PS1"; then
+    echo "[MISS] the opt-in UDP ports are not opened at the Hyper-V layer"; fw_ok=0
+fi
+# shellcheck disable=SC2016  # grep patterns are literal PowerShell source text
+if ! grep -qE 'Add-FirewallRules -Ports \$SignalkPorts -UdpPorts \$NmeaUdpPorts' "$PS1"; then
+    echo "[MISS] Add-FirewallRules is not called with the UDP port list"; fw_ok=0
+fi
+if [[ $fw_ok -eq 1 ]]; then
+    echo "  [OK]   both firewall layers are programmed, TCP and opt-in UDP"
 else
-    echo "[MISS] only one firewall layer is programmed - traffic to the VM would"
-    echo "       be dropped silently at the other"
+    echo "       (traffic to the VM would be dropped silently at the unopened layer)"
     fail=1
 fi
 
 # The Hyper-V cmdlets exist only on Windows 11 22H2+. Calling a missing cmdlet
 # throws CommandNotFoundException BEFORE -ErrorAction is consulted, so the
-# uninstall path must guard on the command, not on the error action.
-if printf '%s\n' "$body" | grep -qF 'Get-Command Remove-NetFirewallHyperVRule'; then
-    echo "  [OK]   uninstall guards the Hyper-V cmdlet on older Windows"
+# uninstall path must guard on the command itself. Check that BOTH removals sit
+# INSIDE that guard, not merely that the guard exists somewhere: awk prints the
+# guarded block only, and the removals must be found within it.
+guarded=$(printf '%s\n' "$body" | awk '
+    /Get-Command Remove-NetFirewallHyperVRule/ { inblock = 1 }
+    inblock { print }
+    inblock && /^    \}$/ { inblock = 0 }
+')
+if printf '%s\n' "$guarded" | grep -qF 'Remove-NetFirewallHyperVRule -Name "SignalK-HyperV-TCP-' \
+    && printf '%s\n' "$guarded" | grep -qF "Get-NetFirewallHyperVRule -Name 'SignalK-HyperV-UDP-"; then
+    echo "  [OK]   both Hyper-V removals sit inside the capability guard"
 else
-    echo "[MISS] uninstall calls a Hyper-V firewall cmdlet unguarded - it throws"
-    echo "       CommandNotFoundException on Windows 10 / pre-22H2"
+    echo "[MISS] a Hyper-V firewall removal is outside the Get-Command guard - it"
+    echo "       throws CommandNotFoundException on Windows 10 / pre-22H2"
     fail=1
 fi
 
