@@ -27,7 +27,7 @@ Existing install: `signalk halpi2 apply`, reboot, `signalk hardware rescan`, `si
 
 | Item | Where | Source of the value |
 |---|---|---|
-| Hat Labs APT key + source | `/etc/apt/trusted.gpg.d/hatlabs.asc`, `/etc/apt/sources.list.d/hatlabs.sources` (`Suites: trixie-stable` / `bookworm-stable`, `Components: hatlabs`; other distros `stable`/`main`) | `https://apt.hatlabs.fi` |
+| Hat Labs APT key + source | `/etc/apt/keyrings/hatlabs.asc`, `/etc/apt/sources.list.d/hatlabs.sources` (`Suites: trixie-stable` / `bookworm-stable`, `Components: hatlabs`; other distros `stable`/`main`) | `https://apt.hatlabs.fi` |
 | `halpid` | Power/watchdog daemon; `halpi` CLI; sockets `/run/halpid/halpid.sock` (group `halpid`, GID 960) and `/run/halpid/led.sock` | hatlabs/HALPI2-rust-daemon |
 | `halpi2-firmware` | Controller firmware; its postinst flashes via `halpi flash` (`AUTO_FLASH_ON_INSTALL` in `/etc/halpid/firmware.conf`) | hatlabs/HALPI2-firmware |
 | `blinkenlights-daemon` | Front-panel LED display daemon (default: CPU bar; marine examples under `/usr/share/blinkenlights/examples/`) | hatlabs/HALPI2-blinkenlights |

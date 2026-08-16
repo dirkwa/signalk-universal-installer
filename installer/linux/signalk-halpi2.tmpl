@@ -58,7 +58,7 @@ HALPI2_APT_KEY_URL="${HALPI2_APT_KEY_URL:-https://apt.hatlabs.fi/hat-labs-apt-ke
 TTY_IN="${HALPI2_TTY_IN:-/dev/tty}"
 TTY_OUT="${HALPI2_TTY_OUT:-/dev/tty}"
 
-APT_KEY_FILE="${HALPI2_ETC}/etc/apt/trusted.gpg.d/hatlabs.asc"
+APT_KEY_FILE="${HALPI2_ETC}/etc/apt/keyrings/hatlabs.asc"
 APT_SOURCE_FILE="${HALPI2_ETC}/etc/apt/sources.list.d/hatlabs.sources"
 MODULES_FILE="${HALPI2_ETC}/etc/modules-load.d/i2c-dev.conf"
 # Same filename `signalk socketcan` prints in its recipe (a second file
@@ -415,7 +415,7 @@ Types: deb
 URIs: https://apt.hatlabs.fi/
 Suites: ${suite}
 Components: ${component}
-Signed-By: /etc/apt/trusted.gpg.d/hatlabs.asc
+Signed-By: /etc/apt/keyrings/hatlabs.asc
 EOF
 }
 

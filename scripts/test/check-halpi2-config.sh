@@ -120,7 +120,7 @@ touch "$root/i2c-1"
 rc=$(run_apply)
 if [[ "$rc" == 2 ]]; then ok "confirmed/NVMe/no-tty: rc 2 (reboot)"; else miss "confirmed: rc $rc (want 2)"; cat "$root/out"; fi
 if grep -q "apt.hatlabs.fi" "$root/etc/apt/sources.list.d/hatlabs.sources" 2>/dev/null && grep -q "^Suites: trixie-stable" "$root/etc/apt/sources.list.d/hatlabs.sources"; then ok "hatlabs.sources written with trixie-stable"; else miss "hatlabs.sources missing/wrong"; fi
-if [[ -s "$root/etc/apt/trusted.gpg.d/hatlabs.asc" ]]; then ok "apt key written"; else miss "apt key missing"; fi
+if [[ -s "$root/etc/apt/keyrings/hatlabs.asc" ]]; then ok "apt key written"; else miss "apt key missing"; fi
 if grep -q "^install .*halpid" "$LOG/apt-get" 2>/dev/null && grep -q "blinkenlights-daemon" "$LOG/apt-get"; then ok "apt-get install ran with halpid + blinkenlights-daemon"; else miss "apt-get install missing packages"; fi
 if grep -q "^update" "$LOG/apt-get"; then ok "apt-get update ran before install"; else miss "apt-get update did not run"; fi
 if [[ "$(block_count)" == 1 ]]; then ok "config.txt: block appended once"; else miss "config.txt: block count $(block_count)"; fi
