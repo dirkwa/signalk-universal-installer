@@ -218,10 +218,11 @@ The installer opens **inbound TCP** on the console ports only (`80`, `443`, `300
 
 ### Reaching SignalK's files from Windows
 
-The stack's data lives inside the machine, but Windows Explorer can open it directly. The machine is a WSL distro; find its exact name with:
+The stack's data lives inside the machine, but Windows Explorer can open it directly. The machine is a WSL distro, and `wsl --list` shows every distro on the box — including any unrelated Ubuntu or Debian you may have. The SignalK one is the `podman-` entry matching your machine name (`podman-signalk` for the default install):
 
 ```powershell
-wsl --list --quiet          # e.g. podman-signalk, or podman-machine-default
+podman machine list         # the machine name, e.g. signalk
+wsl --list --quiet          # the distro: that name with a podman- prefix
 ```
 
 Then paste the path into Explorer's address bar, substituting that name:
@@ -230,11 +231,13 @@ Then paste the path into Explorer's address bar, substituting that name:
 \\wsl.localhost\<distro>\home\user\.signalk
 ```
 
-`plugin-config-data\` holds the per-plugin JSON, and `~/.signalk-updater/` and `~/.signalk-doctor/` sit alongside it. Files copy in and out like any network share. To keep it on a drive letter across reboots:
+`plugin-config-data\` holds the per-plugin JSON, and `~/.signalk-updater/` and `~/.signalk-doctor/` sit alongside it. Files copy in and out like any network share. To put it on a drive letter:
 
 ```powershell
 net use Z: \\wsl.localhost\<distro>\home\user /persistent:yes
 ```
+
+`/persistent:yes` makes Windows *remember* the mapping, not keep it live: `\\wsl.localhost` only answers while the machine is running, so after a reboot `Z:` shows as disconnected until the machine starts and you open the drive again.
 
 For a support bundle, prefer `signalk bug-report` — it collects logs and config inside the machine and drops the `.tar.gz` on your **Desktop**.
 
