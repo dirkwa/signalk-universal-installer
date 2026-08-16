@@ -719,7 +719,11 @@ cmd_connections() {
 }
 
 # ─── status ────────────────────────────────────────────────────────────
-unit_state() { systemctl is-active "$1" 2>/dev/null || echo "not running"; }
+unit_state() {
+    local st
+    st=$(systemctl is-active "$1" 2>/dev/null || true)
+    printf '%s' "${st:-unknown}"
+}
 
 cmd_status() {
     section "HALPI2 status"

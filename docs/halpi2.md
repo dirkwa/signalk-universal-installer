@@ -17,7 +17,7 @@ signalk halpi2 connections   # create the NMEA 2000 / RS-485 Signal K connection
 
 Fresh install on a HALPI2:
 
-1. Run the usual one-liner. On a Compute Module 5 the installer probes the HALPI2 controller at I2C address `0x6d`, shows the proposed `config.txt` change, installs the packages, and stops with "reboot and re-run this installer".
+1. Run the usual one-liner. On a Compute Module 5 the installer probes the HALPI2 controller at I2C address `0x6d`, installs the Hat Labs packages, shows the proposed `config.txt` change, and stops with "reboot and re-run this installer".
 2. `sudo reboot`.
 3. Run the one-liner again. `can0`, `/dev/ttyAMA4` and `halpid` are live now; the normal hardware detection records them, the server Quadlet gets `AddDevice=/dev/ttyAMA4` and the `/run/halpid` mount, and step 15c creates the two Signal K connections.
 
@@ -63,7 +63,7 @@ dtparam=sd=off
 
 `signalk halpi2 apply` runs the same ladder after installing `i2c-tools`, and — when `/dev/i2c-1` is missing and `dtparam` exists (Raspberry Pi OS) — enables I2C live with `dtparam i2c_arm=on` + `modprobe i2c-dev` first, exactly what raspi-config does, so a first run can confirm the board before the reboot.
 
-hardware.json then carries a `board` object and an `onboardSerial` list (shapes in [docs/hardware.md](hardware.md)). `onboardSerial` is opt-out like USB serial; its `enabled` survives a re-detect. `board` is a hardware fact and is regenerated every time. The renderer passes the RS-485 port into the container (existence-guarded, like USB serial) and bind-mounts `/run/halpid` read-only while `halpid.sock` exists, so the `signalk-halpi` plugin from the App Store can read the controller's voltages, temperatures and state.
+hardware.json then carries a `board` object and an `onboardSerial` list (shapes in [docs/hardware.md](hardware.md)). `onboardSerial` is listed whenever `/dev/ttyAMA4` exists (the node only appears once the `uart4-pi5` overlay is active), is opt-out like USB serial, and its `enabled` survives a re-detect. `board` is a hardware fact and is regenerated every time. The renderer passes the RS-485 port into the container (existence-guarded, like USB serial) and bind-mounts `/run/halpid` read-only while `halpid.sock` exists, so the `signalk-halpi` plugin from the App Store can read the controller's voltages, temperatures and state.
 
 ## Why this helper edits config.txt when `signalk socketcan` only prints a recipe
 
@@ -76,7 +76,7 @@ Prompt behaviour:
 | Terminal, controller confirmed | installs the packages, shows the config.txt diff, asks `[Y/n]` |
 | Terminal, candidate only | asks "continue with the HALPI2 setup anyway? `[y/N]`" before installing anything; on yes proceeds as confirmed |
 | No terminal, controller confirmed | installs and writes without a prompt |
-| No terminal, candidate only | prints the manual recipe, installs and changes nothing, exit 1 |
+| No terminal, candidate only | prints the manual recipe and stops before the Hat Labs packages (only `i2c-tools` was installed for the probe), exit 1 |
 | `SIGNALK_HALPI2=yes` | no prompts; installs and writes even when the probe could not run (the Compute Module 5 check still applies) |
 | `SIGNALK_HALPI2=no` | skips the whole step |
 

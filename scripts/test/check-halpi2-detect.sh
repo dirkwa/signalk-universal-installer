@@ -6,7 +6,8 @@
 # (halpid unit state), HALPI2_I2C_DEV + a PATH shim for i2ctransfer (the
 # controller at 0x6d), HALPI2_RS485_DEV (/dev/ttyAMA4). Cases:
 #   1. not a CM5            → no `board`, no `onboardSerial`; tmpl detect rc 2
-#   2. CM5, nothing else    → board candidate via model-string; tmpl rc 1
+#   2. CM5, nothing else    → board candidate via model-string; tmpl rc 1;
+#                             onboardSerial follows the RS-485 node, not the probe
 #   3. CM5 + halpid active  → confirmed via halpid, onboardSerial present
 #   4. CM5 + controller answers over I2C → confirmed via i2c with versions
 #   5. CM5 + I2C answers but /dev/ttyAMA4 absent → onboardSerial empty
@@ -87,7 +88,7 @@ if [[ "$(jq -c '.board' <<<"$hw")" == '{"model":"halpi2","candidate":true,"detec
 else
     miss "CM5 alone: board = $(jq -c '.board' <<<"$hw")"
 fi
-if [[ "$(jq -c '.onboardSerial' <<<"$hw")" == "[]" ]]; then ok "CM5 alone: onboardSerial empty (not confirmed)"; else miss "CM5 alone: onboardSerial = $(jq -c '.onboardSerial' <<<"$hw")"; fi
+if [[ "$(jq -r '.onboardSerial[0].device' <<<"$hw")" == "$root/ttyAMA4" ]]; then ok "CM5 alone: onboardSerial follows the RS-485 node"; else miss "CM5 alone: onboardSerial = $(jq -c '.onboardSerial' <<<"$hw")"; fi
 read -r rc json <<<"$(run_tmpl_detect "$root/model-cm5" "$root/no-i2c" "$root/ttyAMA4")"
 if [[ "$rc" == 1 && "$(jq -r '.candidate' <<<"$json")" == true ]]; then ok "tmpl detect: candidate rc 1"; else miss "tmpl detect: candidate rc $rc json $json"; fi
 
@@ -112,8 +113,26 @@ if [[ "$rc" == 0 && "$(jq -r '.firmwareVersion' <<<"$json")" == "3.3.1" ]]; then
 hw=$(run_detect "$root/model-cm5" "$root/i2c-1" "$root/no-tty" SHIM_I2C=ok)
 if [[ "$(jq -c '.onboardSerial' <<<"$hw")" == "[]" ]]; then ok "RS-485 node absent: onboardSerial empty"; else miss "RS-485 node absent: onboardSerial = $(jq -c '.onboardSerial' <<<"$hw")"; fi
 
+# 6. install.sh's step-15c gate must accept a confirmed board and reject a
+#    candidate — jq's `//` turns candidate:false into true, so evaluate the
+#    real expression from install.sh against real detection output.
+INSTALL=${INSTALL:-installer/linux/install.sh}
+gate=$(grep -oE "jq -e '[^']*board\.candidate[^']*'" "$INSTALL" | head -1 | sed "s/^jq -e '//; s/'$//")
+if [[ -z "$gate" ]]; then
+    miss "could not find the step-15c board gate in $INSTALL"
+else
+    hw_ok=$(run_detect "$root/model-cm5" "$root/i2c-1" "$root/ttyAMA4" SHIM_I2C=ok)
+    hw_cand=$(run_detect "$root/model-cm5" "$root/no-i2c" "$root/ttyAMA4")
+    hw_none=$(run_detect "$root/model-pi5" "$root/no-i2c" "$root/ttyAMA4")
+    if jq -e "$gate" <<<"$hw_ok" >/dev/null && ! jq -e "$gate" <<<"$hw_cand" >/dev/null 2>&1 && ! jq -e "$gate" <<<"$hw_none" >/dev/null 2>&1; then
+        ok "install.sh step-15c gate: confirmed passes, candidate and non-CM5 do not"
+    else
+        miss "install.sh step-15c gate '$gate' misjudges detection output"
+    fi
+fi
+
 if (( fail )); then
     echo "[FAIL] HALPI2 detection ladder — see entries above" >&2
     exit 1
 fi
-echo "[OK] HALPI2 detection ladder: model-string → halpid → i2c, onboardSerial only when confirmed."
+echo "[OK] HALPI2 detection ladder: model-string → halpid → i2c; onboardSerial follows the RS-485 node; step-15c gate agrees."

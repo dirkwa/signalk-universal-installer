@@ -2078,10 +2078,11 @@ set -e   # end of the relaxed-set-e doctor-token section
 # server randomises the N2K unique number and starts the providers itself,
 # so nothing under ~/.signalk is edited by the installer. GET-first, so a
 # migrated HaLOS settings.json (same ids) is left alone. Best-effort.
+# `== false`, not `// true`: jq's `//` treats false as empty, so a confirmed
+# board (candidate:false) would read as true and never pass this gate.
 if command -v jq >/dev/null 2>&1 \
     && [[ -s "$UPDATER_DATA/hardware.json" ]] \
-    && [[ "$(jq -r '.board.model // empty' "$UPDATER_DATA/hardware.json" 2>/dev/null)" = "halpi2" ]] \
-    && [[ "$(jq -r '.board.candidate // true' "$UPDATER_DATA/hardware.json" 2>/dev/null)" = "false" ]]; then
+    && jq -e '.board.model == "halpi2" and .board.candidate == false' "$UPDATER_DATA/hardware.json" >/dev/null 2>&1; then
     section "HALPI2 Signal K connections"
     if ! "$HOME/.local/bin/signalk-halpi2" connections; then
         warn "HALPI2 connections not created — run 'signalk halpi2 connections' once the server is up"

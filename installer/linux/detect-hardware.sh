@@ -41,7 +41,9 @@ halpi2_i2c_version() {
 
 # Sets BOARD_JSON to the `board` object (empty when not a CM5) and
 # ONBOARD_SERIAL_ITEMS to the onboardSerial entries (empty unless the
-# board is confirmed and the RS-485 node exists).
+# RS-485 node exists — /dev/ttyAMA4 only appears once the uart4-pi5
+# overlay is active, so its presence is evidence of the HALPI2 setup even
+# when the controller probe could not run).
 detect_board() {
     BOARD_JSON=""
     ONBOARD_SERIAL_ITEMS=()
@@ -59,7 +61,7 @@ detect_board() {
         fi
     fi
     BOARD_JSON="{\"model\":\"halpi2\",\"candidate\":$candidate,\"detectedVia\":\"$via\",\"hardwareVersion\":$hw,\"firmwareVersion\":$fw}"
-    if [[ "$candidate" == false && -e "$HALPI2_RS485_DEV" ]]; then
+    if [[ -e "$HALPI2_RS485_DEV" ]]; then
         ONBOARD_SERIAL_ITEMS+=("{\"device\":\"$HALPI2_RS485_DEV\",\"label\":\"HALPI2 RS-485\",\"enabled\":true}")
     fi
 }
