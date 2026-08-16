@@ -36,6 +36,14 @@ if [[ -z "$body" ]]; then
     exit 1
 fi
 
+# Searches below feed grep from a here-string, never `printf ... | grep -q`.
+# That pipe races: grep -q exits at the first match and closes the pipe, printf
+# takes SIGPIPE, and `set -o pipefail` turns that into a failed command - so a
+# check reports MISS on a body that DOES match, intermittently, depending on
+# whether printf finished writing first. Seen in CI on one of two identical
+# jobs against the same commit. A here-string is a temp file, so no pipe exists
+# to break.
+
 # --- 1. single backticks before an escape-significant letter ----------------
 # PowerShell eats `r `n `t `b `a `f `v `0 `e. Doubled backticks are the
 # documented way to write a literal one, so only flag a SINGLE backtick. A
@@ -102,7 +110,7 @@ else
     echo "       pass ValidateSet and then match no branch of install.sh's case"
     fail=1
 fi
-if printf '%s\n' "$body" | grep -q 'SIGNALK_CHANNEL\.ToLowerInvariant()'; then
+if grep -q 'SIGNALK_CHANNEL\.ToLowerInvariant()' <<<"$body"; then
     echo "  [OK]   shim lowercases \$env:SIGNALK_CHANNEL before the VM handoff"
 else
     echo "[MISS] shim does not lowercase \$env:SIGNALK_CHANNEL - an uppercase"
@@ -152,9 +160,9 @@ guarded=$(printf '%s\n' "$body" | awk '
 # The UDP case is a two-stage pipeline; assert BOTH stages. Matching only the
 # Get- query passes even if the Remove- stage is deleted, which would leave the
 # UDP rules behind on uninstall while the test stayed green.
-if printf '%s\n' "$guarded" | grep -qF 'Remove-NetFirewallHyperVRule -Name "SignalK-HyperV-TCP-' \
-    && printf '%s\n' "$guarded" | grep -qF "Get-NetFirewallHyperVRule -Name 'SignalK-HyperV-UDP-" \
-    && printf '%s\n' "$guarded" | grep -qE '^[[:space:]]*Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue[[:space:]]*$'; then
+if grep -qF 'Remove-NetFirewallHyperVRule -Name "SignalK-HyperV-TCP-' <<<"$guarded" \
+    && grep -qF "Get-NetFirewallHyperVRule -Name 'SignalK-HyperV-UDP-" <<<"$guarded" \
+    && grep -qE '^[[:space:]]*Remove-NetFirewallHyperVRule -ErrorAction SilentlyContinue[[:space:]]*$' <<<"$guarded"; then
     echo "  [OK]   both Hyper-V removals sit inside the capability guard"
 else
     echo "[MISS] a Hyper-V firewall removal is outside the Get-Command guard - it"
@@ -203,7 +211,7 @@ fi
 # $Channel and $MachineName are MEANT to interpolate at generation time (they
 # bake the install-time choice into the shim). Assert they are still spelled
 # bare, so a well-meaning "fix" that escapes them gets caught.
-if printf '%s\n' "$body" | grep -qE "else \{ '\\\$Channel' \}"; then
+if grep -qE "else \{ '\\\$Channel' \}" <<<"$body"; then
     echo "  [OK]   \$Channel still bakes the install-time channel into the shim"
 else
     echo "[MISS] \$Channel is no longer interpolated into the shim - 'signalk update'"
@@ -215,12 +223,12 @@ fi
 # They mean the same thing as on Linux now; the VM-level operation is
 # `signalk machine`. An intercepting case here would silently re-diverge them.
 for verb in stop start restart; do
-    if printf '%s\n' "$body" | grep -qE "^  '${verb}' \{"; then
+    if grep -qE "^  '${verb}' \{" <<<"$body"; then
         echo "[MISS] '${verb}' is intercepted by the shim - it must pass through to the VM"
         fail=1
     fi
 done
-if printf '%s\n' "$body" | grep -qE "^  'machine' \{"; then
+if grep -qE "^  'machine' \{" <<<"$body"; then
     echo "  [OK]   VM-level control lives under 'machine', stop/start pass through"
 else
     echo "[MISS] no 'machine' case - VM-level stop/start has no home"
@@ -231,8 +239,8 @@ fi
 # `signalk help` renders from the in-VM CLI, which knows nothing about the
 # verbs this shim adds. Without a help case, `machine` exists but appears in no
 # help output on the only platform that has it.
-if printf '%s\n' "$body" | grep -qE "^  'help' \{" \
-    && printf '%s\n' "$body" | grep -q 'signalk machine stop|start'; then
+if grep -qE "^  'help' \{" <<<"$body" \
+    && grep -q 'signalk machine stop|start' <<<"$body"; then
     echo "  [OK]   'signalk help' advertises the Windows-only machine verb"
 else
     echo "[MISS] 'machine' is not mentioned in 'signalk help' - undiscoverable"
