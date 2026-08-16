@@ -214,7 +214,7 @@ fi
 # Two lists, one truth: signalk.tmpl's usage() hides subcommands from Windows
 # help, and the shim rejects them. If they drift, the operator is either told
 # about a command that dies in the VM, or denied one the help never mentioned.
-CLI=${CLI_TMPL:-installer/linux/signalk.tmpl}
+CLI="${CLI_TMPL:-installer/linux/signalk.tmpl}"
 if [[ ! -f "$CLI" ]]; then
     echo "[MISS] $CLI not found - could not check help/shim agreement"
     fail=1
@@ -226,16 +226,53 @@ else
         fail=1
     else
         read -r -a hidden_list <<<"$hidden"
-        drift=""
+        agree=1
+
+        # Direction 1: hidden must be rejected, and the rejection must actually
+        # FAIL. A case that prints a note and exits 0 reads as success to any
+        # script calling it, so assert `exit 1` inside the case body.
         for c in "${hidden_list[@]}"; do
-            grep -qE "^  '${c}' \{" "$PS1" || drift="$drift $c"
+            case_body=$(awk -v pat="^  '${c}' \\\\{" '
+                $0 ~ pat { inblock = 1 }
+                inblock { print }
+                inblock && /^  \}$/ { exit }
+            ' "$PS1")
+            if [[ -z "$case_body" ]]; then
+                echo "[MISS] '$c' is hidden from Windows help but the shim has no case"
+                echo "       for it - it falls through and fails inside the VM instead"
+                agree=0
+            elif ! grep -qE '^[[:space:]]*exit 1[[:space:]]*$' <<<"$case_body"; then
+                echo "[MISS] the shim's '$c' case does not exit 1 - a refusal that"
+                echo "       reports success is indistinguishable from having worked"
+                agree=0
+            fi
         done
-        if [[ -n "$drift" ]]; then
-            echo "[MISS] hidden from Windows help but not rejected by the shim:$drift"
-            echo "       they fall through and fail inside the VM instead"
-            fail=1
+
+        # Direction 2: a shim case that refuses (exits 1 without forwarding)
+        # must also be hidden from help, or the help advertises a command the
+        # shim will not run. Cases that forward - machine, hardware, help,
+        # resetadmin, bug-report, uninstall - are Windows-side handling, not
+        # refusals, and belong in help.
+        while IFS= read -r c; do
+            [[ -z "$c" ]] && continue
+            case_src=$(awk -v pat="^  '${c}' \\\\{" '
+                $0 ~ pat { inblock = 1 }
+                inblock { print }
+                inblock && /^  \}$/ { exit }
+            ' "$PS1")
+            grep -q 'Send-Vm' <<<"$case_src" && continue          # forwards: not a refusal
+            grep -qE '^[[:space:]]*exit 1[[:space:]]*$' <<<"$case_src" || continue
+            grep -q "exit 0" <<<"$case_src" && continue           # has a success path
+            if ! grep -qw -- "$c" <<<"$hidden"; then
+                echo "[MISS] the shim refuses '$c' but Windows help still lists it"
+                agree=0
+            fi
+        done < <(grep -oE "^  '[a-z-]+' \{" "$PS1" | sed "s/^  '//; s/' {$//")
+
+        if [[ $agree -eq 1 ]]; then
+            echo "  [OK]   Windows help and the shim's refusals name the same commands"
         else
-            echo "  [OK]   every command hidden from Windows help is rejected by the shim"
+            fail=1
         fi
     fi
 fi

@@ -187,9 +187,9 @@ Three subcommands are refused outright, with a note explaining why, rather than 
 | `signalk bluetooth` | BLE passthrough needs a bluez stack on the machine running the containers; the VM has none, and WSL2 cannot reach the Windows Bluetooth radio. |
 | `signalk timesync` | Steps the **host** clock from GPS for boats without NTP. Here the host is Windows, and the VM already takes its time from Windows. |
 
-For all three, a USB or network gateway is the way to get that data into SignalK.
+For `socketcan` and `bluetooth`, a USB or network gateway is the way to get that data into SignalK. For `timesync`, keep the **Windows** clock correct — set it manually or let Windows sync it — and the machine follows.
 
-Everything else forwards into the machine and behaves as documented for Linux — including `render-server`, `resolv-watch` and `netgate-watch`, which operate on the Quadlets and `systemd --user` units that live **inside** the machine.
+Apart from those three and the Windows-side commands listed above, every subcommand forwards into the machine and behaves as documented for Linux. That includes `render-server`, `resolv-watch` and `netgate-watch`, which operate on the Quadlets and `systemd --user` units living **inside** the machine.
 
 `signalk stop`, `start` and `restart` are **not** Windows-specific — they run inside the machine and mean exactly what they mean on Linux: `stop` pauses signalk-server (the data plane) and durably keeps it down across reboots, while the Updater (`:3003`) and Doctor (`:3004`) consoles **stay reachable** so you can still diagnose and recover. `restart` bounces signalk-server to pick up config changes without touching boot behaviour.
 
