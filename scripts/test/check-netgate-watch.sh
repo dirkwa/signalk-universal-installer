@@ -380,13 +380,16 @@ else
     miss "install.sh never installs the netgate-watch units"
 fi
 
-# The Windows shim hides Linux-host-only commands from its help output.
-# Assert the token is inside the alternation, not that it sits next to a
-# particular sibling -- reordering the alternation is harmless.
+# netgate-watch must NOT be hidden from Windows help. It heals the pasta
+# gateway with `podman exec` and `systemctl --user`, both of which exist inside
+# the Podman machine, and install.sh installs its units on the Windows path
+# like any other. It was suppressed here on the same mistaken grounds that hid
+# render-server -- that the VM has no host-side state -- which told Windows
+# operators a working recovery tool did not exist.
 if grep -qE '^[[:space:]]*/\^.*signalk \([a-z|-]*netgate-watch[a-z|-]*\)' "$CLI_TMPL"; then
-    ok "Windows shim help-suppression lists netgate-watch"
+    miss "netgate-watch is hidden from Windows help, but it works inside the VM"
 else
-    miss "netgate-watch missing from the Windows shim help-suppression regex"
+    ok "netgate-watch stays visible in Windows help"
 fi
 
 if [[ "$fail" == 0 ]]; then

@@ -140,10 +140,17 @@ usage() {
     local help
     help=$(sed -n '2,${/^#/!q;p}' "$0" | sed 's/^# \{0,1\}//')
     if [[ "${SIGNALK_WINDOWS_SHIM:-0}" == "1" ]]; then
-        # bluetooth is filtered for the same reason as socketcan: host
-        # bluez/D-Bus passthrough has no equivalent inside the Podman
-        # machine VM. render-server too: there is no host signalk-server
-        # Quadlet to render inside the VM.
+        # Hide exactly what the Windows shim REJECTS, so help and behaviour
+        # agree: socketcan (no CAN/SPI in the VM), bluetooth (no bluez there,
+        # and WSL2 cannot reach the Windows radio), timesync (it steps the HOST
+        # clock, and on Windows that is Windows' own clock).
+        #
+        # render-server, resolv-watch and netgate-watch were hidden here too,
+        # on the grounds that there is no host signalk-server Quadlet inside
+        # the VM. That is wrong on Windows: the whole Linux installer runs IN
+        # the machine, so ~/.config/containers/systemd/ and the systemd --user
+        # units are right there and all three work. Hiding them told Windows
+        # operators three working recovery tools did not exist.
         #
         # Some of these entries (render-server, update) span a header line
         # plus indented continuation lines, so a per-line `grep -v` on the
@@ -157,7 +164,7 @@ usage() {
         # strip). A subcommand HEADER is "  signalk <name>"; CONTINUATION
         # lines are indented deeper and do not start a new "signalk" entry.
         printf '%s\n' "$help" | awk '
-            /^[[:space:]]*signalk (socketcan|bluetooth|timesync|render-server|resolv-watch|netgate-watch)( |$)/ { drop = 1; next }
+            /^[[:space:]]*signalk (socketcan|bluetooth|timesync)( |$)/ { drop = 1; next }
             /^[[:space:]]*signalk / { drop = 0; print; next }
             drop { next }
             { print }
@@ -1061,6 +1068,17 @@ cmd_update() {
             echo "[i] SIGNALK_CHANNEL=${channel}: refreshing from master, not the release."
             echo "[i] The doctor refresh only serves the release channel, so this"
             echo "[i] re-runs the bootstrap against the /dev tree instead."
+            # --no-render cannot be honoured on this path: it re-runs the whole
+            # bootstrap, which renders the Quadlets as part of installing. Say
+            # so rather than accept the flag and ignore it - an operator who
+            # passed it to avoid restarting the data plane needs to know the
+            # restart is coming.
+            if [[ "$do_render" == false ]]; then
+                echo "[!] --no-render does not apply on the ${channel} channel: the" >&2
+                echo "    bootstrap re-render is part of installing. Re-run without it," >&2
+                echo "    or use the release channel, if the server must not restart." >&2
+                return 1
+            fi
             # `set -o pipefail` inside the child: without it a failed curl
             # still leaves the right-hand bash exiting 0 after reading an empty
             # script, and cmd_update would report success having done nothing.
@@ -1152,12 +1170,15 @@ cmd_update() {
 
     # Only the 200 path reaches here (every other status exit'd above), so
     # the refresh succeeded. Apply the refreshed server template to the live
-    # Quadlet unless the operator opted out, or we're inside the Windows
-    # Podman-machine VM (no host signalk-server Quadlet to render there — the
-    # render step is a Linux-host concern, same reasoning that hides
-    # render-server from the shim's help). cmd_render_server is idempotent and
-    # returns 0 when nothing changed, so this is safe to run every update.
-    if [[ "$do_render" == true && "${SIGNALK_WINDOWS_SHIM:-0}" != "1" ]]; then
+    # Quadlet unless the operator opted out. This used to be skipped under the
+    # Windows shim, on the same mistaken grounds that hid render-server from
+    # its help: the Quadlet does live inside the Podman machine, because the
+    # whole Linux installer runs there. Skipping it meant `signalk update` on
+    # Windows refreshed the templates and then never applied them, so a
+    # hardware change needed a full bootstrap re-run. cmd_render_server is
+    # idempotent and returns 0 when nothing changed, so this is safe to run
+    # every update on every platform.
+    if [[ "$do_render" == true ]]; then
         echo
         cmd_render_server
     fi
