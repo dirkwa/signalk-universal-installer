@@ -19,8 +19,10 @@
 # prints a recipe: socketcan's header names the missing piece as a safety
 # story for a user-chosen dtoverlay. Here the overlay set is fixed for one
 # board, the board answers at I2C 0x6d before anything is written, the one
-# line that can make a box unbootable (dtparam=sd=off) is dropped whenever
-# / or /boot/firmware is on mmcblk, and the write follows preflight.sh's
+# line that can make a box unbootable (dtparam=sd=off) is written only when
+# /, /boot/firmware and /boot all resolve to /dev/nvme*, /dev/sd* or
+# /dev/disk/* (mmcblk, /dev/root, an overlay, empty or missing findmnt
+# output all keep the SD interface on), and the write follows preflight.sh's
 # offer_pi_cmdline_fix() shape: diff preview, confirm, timestamped backup,
 # post-write check, restore on failure. Without a controlling terminal the
 # block is written only when the controller answered or SIGNALK_HALPI2=yes.

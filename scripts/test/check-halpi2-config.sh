@@ -9,7 +9,7 @@
 #      config.txt block appended once with dtparam=sd=off, backup taken,
 #      networkd/udev/modules files written, rc 2 (reboot)
 #   3. re-run (offline) → nothing rewritten, no apt-get, no key fetch, rc 0
-#   4. SD/eMMC root, /dev/root, or no findmnt → sd=off is NOT emitted
+#   4. SD/eMMC root, /dev/root, or a failing findmnt → sd=off is NOT emitted
 #   5. candidate only (controller silent), no terminal, auto → nothing
 #      Hat-Labs-specific installed, config.txt untouched, recipe printed, rc 1
 #   6. candidate + SIGNALK_HALPI2=yes → applied, rc 2
@@ -155,10 +155,13 @@ if grep -q 'sd=off omitted' "$root/config.txt"; then ok "SD root: omission noted
 reset_fs; touch "$root/i2c-1"
 rc=$(run_apply SHIM_ROOTDEV=/dev/root)
 if [[ "$rc" == 2 ]] && ! grep -qx 'dtparam=sd=off' "$root/config.txt"; then ok "/dev/root source: sd=off omitted (fail-safe)"; else miss "/dev/root source: rc $rc, sd=off present=$(grep -cx 'dtparam=sd=off' "$root/config.txt")"; fi
-reset_fs; touch "$root/i2c-1"; mv "$bin/findmnt" "$bin/findmnt.off"
+# findmnt failing / printing nothing (a shim that exits 1 — PATH still holds
+# the host's coreutils, so removing the shim would just expose the real one)
+reset_fs; touch "$root/i2c-1"; mv "$bin/findmnt" "$bin/findmnt.ok"
+shim findmnt 'exit 1'
 rc=$(run_apply)
-if [[ "$rc" == 2 ]] && ! grep -qx 'dtparam=sd=off' "$root/config.txt"; then ok "no findmnt: sd=off omitted (fail-safe)"; else miss "no findmnt: rc $rc, sd=off present=$(grep -cx 'dtparam=sd=off' "$root/config.txt")"; fi
-mv "$bin/findmnt.off" "$bin/findmnt"
+if [[ "$rc" == 2 ]] && ! grep -qx 'dtparam=sd=off' "$root/config.txt"; then ok "findmnt failing: sd=off omitted (fail-safe)"; else miss "findmnt failing: rc $rc, sd=off present=$(grep -cx 'dtparam=sd=off' "$root/config.txt")"; fi
+mv "$bin/findmnt.ok" "$bin/findmnt"
 
 # 5. candidate only, non-interactive, auto → untouched
 reset_fs
