@@ -44,8 +44,8 @@ changelog:
       labels:
         - dependencies
 
-    # Fallback for every PR no earlier category matched (excluded PRs stay
-    # excluded — this does not resurrect them). Keep it last and keep the
+    # Fallback for every PR that matched no earlier category (excluded PRs
+    # stay excluded — this does not resurrect them). Keep it last and keep the
     # wildcard: without it an unmatched PR vanishes from the notes entirely,
     # which is worse than an uncategorised entry.
     - title: Other changes
