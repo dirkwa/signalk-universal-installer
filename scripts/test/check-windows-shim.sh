@@ -267,7 +267,7 @@ else
                 echo "[MISS] the shim refuses '$c' but Windows help still lists it"
                 agree=0
             fi
-        done < <(grep -oE "^  '[a-z-]+' \{" "$PS1" | sed "s/^  '//; s/' {$//")
+        done < <(grep -oE "^  '[a-z0-9-]+' \{" "$PS1" | sed "s/^  '//; s/' {$//")
 
         if [[ "$agree" -eq 1 ]]; then
             echo "  [OK]   Windows help and the shim's refusals name the same commands"

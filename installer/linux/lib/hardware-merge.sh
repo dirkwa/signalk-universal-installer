@@ -40,7 +40,8 @@ hardware_merge() {
           then .onboardSerial |= map(
                  . as $dev
                  | ([($old.onboardSerial // [])[] | select(.device == $dev.device)] | first) as $prev
-                 | if $prev == null then $dev else $dev + {enabled: $prev.enabled} end)
+                 | if $prev == null or ($prev | has("enabled") | not)
+                   then $dev else $dev + {enabled: $prev.enabled} end)
           else . end
     ' "$1" "$2"
 }

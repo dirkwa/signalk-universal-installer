@@ -210,6 +210,15 @@ before=$(sha256sum "$root/config.txt")
 rc=$(run_apply)
 if [[ "$rc" == 1 && "$(sha256sum "$root/config.txt")" == "$before" ]] && grep -q "malformed" "$root/out"; then ok "lone begin marker: refused, config.txt untouched"; else miss "lone begin marker: rc $rc, changed=$([[ "$(sha256sum "$root/config.txt")" == "$before" ]] && echo no || echo yes)"; fi
 
+# 8c. docs/halpi2.md shows the block's effective lines — keep them in sync
+DOC=${DOC:-docs/halpi2.md}
+if [[ -f "$DOC" ]]; then
+    doc_lines=$(awk '/^```text$/{f=1; next} /^```$/{f=0} f' "$DOC" | grep -E '^(\[all\]|dt(param|overlay)=)' | sort)
+    # shellcheck disable=SC2016  # the -c body is sourced later, not expanded here
+    real_lines=$(env -i HOME="$root" PATH="$bin:$PATH" bash -c '. "$1"; render_block' _ "$funcs" | grep -E '^(\[all\]|dt(param|overlay)=)' | sort)
+    if [[ -n "$doc_lines" && "$doc_lines" == "$real_lines" ]]; then ok "docs/halpi2.md block matches render_block"; else miss "docs/halpi2.md block drifted from render_block"; diff <(echo "$doc_lines") <(echo "$real_lines") || true; fi
+fi
+
 # 9. SIGNALK_HALPI2=no
 reset_fs; touch "$root/i2c-1"
 rc=$(run_apply SIGNALK_HALPI2=no)

@@ -23,6 +23,5 @@ if [[ ! -f "$TEMPLATE" ]]; then
     exit 1
 fi
 
-cp "$TEMPLATE" "$TARGET"
-chmod 0755 "$TARGET"
+install -m 0755 "$TEMPLATE" "$TARGET"
 ok "signalk-halpi2 installed at $TARGET"

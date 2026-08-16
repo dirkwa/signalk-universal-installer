@@ -51,7 +51,7 @@ dtoverlay=uart4-pi5
 dtparam=sd=off
 ```
 
-`dtparam=sd=off` is what HaLOS ships to avoid a shutdown stall long enough to drain the supercapacitors (raspberrypi/linux#7014). It also disables the microSD slot and, on a CM5 with eMMC, the eMMC. The helper writes it only when neither `/` nor `/boot/firmware` is on `/dev/mmcblk*`; on an SD/eMMC-booted system the block carries a comment saying the line was omitted.
+`dtparam=sd=off` is what HaLOS ships to avoid a shutdown stall long enough to drain the supercapacitors (raspberrypi/linux#7014). It also disables the microSD slot and, on a CM5 with eMMC, the eMMC. The helper writes it only when none of `/`, `/boot/firmware` and `/boot` is on `/dev/mmcblk*`; on an SD/eMMC-booted system the block carries a comment saying the line was omitted. `check-halpi2-config.sh` compares the lines above with what `render_block()` emits, so this excerpt cannot drift silently.
 
 ## How detection works
 

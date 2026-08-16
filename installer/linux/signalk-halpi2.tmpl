@@ -475,6 +475,13 @@ apply_packages() {
         err "could not fetch the Hat Labs APT key from ${HALPI2_APT_KEY_URL}"
         return 2
     fi
+    # Sanity, not pinning: the fetch is HTTPS and the key is scoped to the
+    # Hat Labs source by Signed-By; refuse an HTML error page or a truncated
+    # download before it lands in /etc/apt/keyrings.
+    if [[ "$key" != *"-----BEGIN PGP PUBLIC KEY BLOCK-----"* || "$key" != *"-----END PGP PUBLIC KEY BLOCK-----"* ]]; then
+        err "the download from ${HALPI2_APT_KEY_URL} is not an armored PGP public key"
+        return 2
+    fi
     if write_root_file "$APT_KEY_FILE" 0644 "$key"; then
         ok "${APT_KEY_FILE}: Hat Labs APT key installed"
         changed=0; need_update=1
@@ -512,7 +519,7 @@ apply_groups() {
     for g in halpid dialout; do
         getent group "$g" >/dev/null 2>&1 || continue
         if ! id -nG "$user" | tr ' ' '\n' | grep -qx "$g"; then
-            if run_root usermod -aG "$g" "$user"; then
+            if run_root /usr/sbin/usermod -aG "$g" "$user"; then
                 ok "added ${user} to ${g} (takes effect at next login)"
                 changed=0
             else

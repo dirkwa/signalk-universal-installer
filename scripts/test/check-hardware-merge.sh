@@ -116,6 +116,11 @@ check "board versions come from the fresh detection" '.board.firmwareVersion' "3
 # without it (board no longer confirmed) does not resurrect the class.
 merge "$tmp/old-noaudio.json" "$tmp/fresh-halpi2.json" >"$tmp/merged.json"
 check "onboardSerial default kept when old file lacks it" '.onboardSerial[0].enabled' "true"
+cat >"$tmp/old-halpi2-noflag.json" <<'JSON'
+{ "onboardSerial": [ { "device": "/dev/ttyAMA4", "label": "HALPI2 RS-485" } ] }
+JSON
+merge "$tmp/old-halpi2-noflag.json" "$tmp/fresh-halpi2.json" >"$tmp/merged.json"
+check "prior onboardSerial entry without enabled keeps the fresh default" '.onboardSerial[0].enabled' "true"
 merge "$tmp/old-halpi2.json" "$tmp/fresh.json" >"$tmp/merged.json"
 check "onboardSerial not resurrected when the fresh detection lacks it" 'has("onboardSerial")' "false"
 check "board not resurrected when the fresh detection lacks it" 'has("board")' "false"

@@ -294,12 +294,12 @@ fi
 mkdir -p "$tmp/tty" "$tmp/halpid"
 : >"$tmp/tty/ttyAMA4"
 # A unix socket node for the existence guard. Bash cannot create one; use
-# python3, else perl (both ship on ubuntu-latest and Debian), else the
-# volume-present case is skipped below.
+# python3, else perl (both ship on ubuntu-latest and Debian). No socket →
+# the volume-present assertion below fails rather than skipping.
 if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$tmp/halpid/halpid.sock" 2>/dev/null || true
+    python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$tmp/halpid/halpid.sock" || true
 elif command -v perl >/dev/null 2>&1; then
-    perl -MSocket -e 'socket(S, PF_UNIX, SOCK_STREAM, 0) and bind(S, sockaddr_un($ARGV[0]))' "$tmp/halpid/halpid.sock" 2>/dev/null || true
+    perl -MSocket -e 'socket(S, PF_UNIX, SOCK_STREAM, 0) and bind(S, sockaddr_un($ARGV[0])) or die' "$tmp/halpid/halpid.sock" || true
 fi
 jq --arg dev "$tmp/tty/ttyAMA4" --arg gone "$tmp/tty/ttyAMA9" '
     .board = {model:"halpi2", candidate:false, detectedVia:"i2c"}
@@ -337,7 +337,8 @@ if [[ -S "$tmp/halpid/halpid.sock" ]]; then
         fail=1
     fi
 else
-    echo "  [SKIP] halpid socket fixture unavailable (no python3/perl) — volume-present case not run"
+    echo "  [MISS] could not create the halpid socket fixture (python3/perl missing or bind failed)"
+    fail=1
 fi
 out_halpi2_nosock=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-halpi2.json" "$TEMPLATE" 2>/dev/null) || {
     echo "  [MISS] render (halpi2, socket missing) exited non-zero"
