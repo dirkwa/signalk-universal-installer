@@ -201,19 +201,20 @@ To **pause** SignalK for later (the common "I don't need it running right now" c
 
 ### Windows NMEA over the network (UDP)
 
-If a gateway streams NMEA **into** the boat PC over UDP — a Yacht Devices or Actisense unit on `2000`, an NMEA-0183 feed on `10110` — open those ports at install time:
+If a gateway streams NMEA **into** the boat PC over UDP — a Yacht Devices or Actisense unit on `2000`, an NMEA-0183 feed on `10110` — open those ports at install time with `-NmeaUdpPorts`.
+
+The quick-start one-liner pipes the script straight to `iex`, which has nowhere to put parameters, so download it first:
 
 ```powershell
+iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows/install.ps1 -OutFile install.ps1
 .\install.ps1 -NmeaUdpPorts 2000,10110
 ```
 
-Two ports on the same machine, either of which drops the feed:
-
-Windows filters traffic to WSL at **two independent layers** — the ordinary Windows firewall, and a separate **Hyper-V firewall** between the host and the VM. Traffic has to pass both, and the Hyper-V layer drops **silently**: the packets are visible in Wireshark on Windows and simply never arrive inside the machine, with nothing logged anywhere. `-NmeaUdpPorts` opens both layers.
+Either firewall layer can drop the feed, so both have to allow the port. Windows filters traffic to WSL at **two independent layers** — the ordinary Windows firewall, and a separate **Hyper-V firewall** between the host and the VM. The Hyper-V layer drops **silently**: the packets are visible in Wireshark on Windows and simply never arrive inside the machine, with nothing logged anywhere. `-NmeaUdpPorts` opens both.
 
 This is also why "multicast doesn't work in WSL" is a common and wrong conclusion. Windows preinstalls an allow rule for UDP 5353, so mDNS works out of the box while the *same* multicast group on any other port receives nothing — the port was never allowed, and nothing said so.
 
-The console ports (80/443, 3000/3443, 3003, 3004) are opened at both layers automatically. TCP inputs need no flag. On Windows 10 and pre-22H2 Windows 11 there is no Hyper-V firewall layer to program, and none filtering either.
+The installer opens **inbound TCP** on the console ports only (`80`, `443`, `3000`, `3443`, `3003`, `3004`), at both layers, with no flag needed. It does not open arbitrary TCP ports: a TCP or UDP connection the server makes *outbound* — SignalK dialling a gateway rather than receiving a stream — needs no rule in either layer, because the reply arrives on an established connection. Only unsolicited **inbound** traffic on a non-console port needs `-NmeaUdpPorts`. On Windows 10 and pre-22H2 Windows 11 there is no Hyper-V firewall layer to program, and none filtering either.
 
 ### Reaching SignalK's files from Windows
 
@@ -225,11 +226,15 @@ wsl --list --quiet          # e.g. podman-signalk, or podman-machine-default
 
 Then paste the path into Explorer's address bar, substituting that name:
 
-```
+```text
 \\wsl.localhost\<distro>\home\user\.signalk
 ```
 
-`plugin-config-data\` holds the per-plugin JSON, and `~/.signalk-updater/` and `~/.signalk-doctor/` sit alongside it. Files copy in and out like any network share, and `net use Z: \\wsl.localhost\<distro>\home\user` maps it to a drive letter if you want it permanently.
+`plugin-config-data\` holds the per-plugin JSON, and `~/.signalk-updater/` and `~/.signalk-doctor/` sit alongside it. Files copy in and out like any network share. To keep it on a drive letter across reboots:
+
+```powershell
+net use Z: \\wsl.localhost\<distro>\home\user /persistent:yes
+```
 
 For a support bundle, prefer `signalk bug-report` — it collects logs and config inside the machine and drops the `.tar.gz` on your **Desktop**.
 
