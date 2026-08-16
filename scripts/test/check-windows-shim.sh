@@ -193,8 +193,11 @@ else
         echo "[MISS] could not read \$SignalkPorts from $PS1"
         fail=1
     else
+        # Split the extracted list into an array once, then iterate it quoted,
+        # rather than relying on an unquoted expansion to word-split each time.
+        read -r -a port_list <<<"$ports"
         missing=""
-        for p in $ports; do
+        for p in "${port_list[@]}"; do
             grep -qF "$p" "$DOCS" || missing="$missing $p"
         done
         if [[ -n "$missing" ]]; then
