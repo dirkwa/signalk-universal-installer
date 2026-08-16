@@ -100,7 +100,10 @@ fi
 if [[ " ${staged[*]} " != *" signalk-halpi2.tmpl "* ]]; then
     echo "  [MISS] install.sh does not stage signalk-halpi2.tmpl into the payload"
     fail=1
-elif [[ -f "$SRC/signalk-halpi2.tmpl" ]]; then
+elif [[ ! -f "$SRC/signalk-halpi2.tmpl" ]]; then
+    echo "  [MISS] $SRC/signalk-halpi2.tmpl is staged by install.sh but missing from the tree"
+    fail=1
+else
     install -m 0755 "$SRC/signalk-halpi2.tmpl" "$TMP/signalk-halpi2.tmpl"
     set +e
     out=$(bash "$TMP/signalk-halpi2.tmpl" detect 2>&1)

@@ -9,7 +9,7 @@
 #      config.txt block appended once with dtparam=sd=off, backup taken,
 #      networkd/udev/modules files written, rc 2 (reboot)
 #   3. re-run (offline) → nothing rewritten, no apt-get, no key fetch, rc 0
-#   4. SD/eMMC root → sd=off is NOT emitted
+#   4. SD/eMMC root, /dev/root, or no findmnt → sd=off is NOT emitted
 #   5. candidate only (controller silent), no terminal, auto → nothing
 #      Hat-Labs-specific installed, config.txt untouched, recipe printed, rc 1
 #   6. candidate + SIGNALK_HALPI2=yes → applied, rc 2
@@ -150,6 +150,15 @@ rc=$(run_apply SHIM_ROOTDEV=/dev/mmcblk0p2)
 if [[ "$rc" == 2 ]]; then ok "SD root: rc 2"; else miss "SD root: rc $rc"; fi
 if grep -qx 'dtparam=sd=off' "$root/config.txt"; then miss "SD root: sd=off emitted (would disable the boot device)"; else ok "SD root: sd=off omitted"; fi
 if grep -q 'sd=off omitted' "$root/config.txt"; then ok "SD root: omission noted in the block"; else miss "SD root: omission note missing"; fi
+
+# 4b. undeterminable boot device (/dev/root, or no findmnt) → no sd=off
+reset_fs; touch "$root/i2c-1"
+rc=$(run_apply SHIM_ROOTDEV=/dev/root)
+if [[ "$rc" == 2 ]] && ! grep -qx 'dtparam=sd=off' "$root/config.txt"; then ok "/dev/root source: sd=off omitted (fail-safe)"; else miss "/dev/root source: rc $rc, sd=off present=$(grep -cx 'dtparam=sd=off' "$root/config.txt")"; fi
+reset_fs; touch "$root/i2c-1"; mv "$bin/findmnt" "$bin/findmnt.off"
+rc=$(run_apply)
+if [[ "$rc" == 2 ]] && ! grep -qx 'dtparam=sd=off' "$root/config.txt"; then ok "no findmnt: sd=off omitted (fail-safe)"; else miss "no findmnt: rc $rc, sd=off present=$(grep -cx 'dtparam=sd=off' "$root/config.txt")"; fi
+mv "$bin/findmnt.off" "$bin/findmnt"
 
 # 5. candidate only, non-interactive, auto → untouched
 reset_fs

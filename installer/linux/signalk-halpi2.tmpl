@@ -199,14 +199,22 @@ config_txt_path() {
     return 1
 }
 
-# True when / or the boot partition lives on an SD/eMMC device. Then
-# dtparam=sd=off (which HaLOS ships for its NVMe images) would disable the
-# very device the box boots from.
+# True unless / and the boot partition are POSITIVELY on NVMe/SATA/USB
+# block devices. dtparam=sd=off (which HaLOS ships for its NVMe images)
+# would disable the very device an SD/eMMC box boots from, so anything
+# undeterminable — no findmnt, empty output, /dev/root, an overlay — is
+# treated as SD boot and the line is omitted. -T resolves a path that is
+# not itself a mountpoint (/boot on Raspberry Pi OS trixie) to its mount.
 sd_boot() {
-    local src
+    local m src
+    command -v findmnt >/dev/null 2>&1 || return 0
     for m in / /boot/firmware /boot; do
-        src=$(findmnt -no SOURCE "$m" 2>/dev/null || true)
-        [[ "$src" == *mmcblk* ]] && return 0
+        src=$(findmnt -no SOURCE -T "$m" 2>/dev/null || true)
+        [[ -n "$src" ]] || return 0
+        case "$src" in
+            /dev/nvme*|/dev/sd*|/dev/disk/*) ;;
+            *) return 0 ;;
+        esac
     done
     return 1
 }
@@ -214,7 +222,7 @@ sd_boot() {
 render_block() {
     local sd_line="dtparam=sd=off"
     if sd_boot; then
-        sd_line="# dtparam=sd=off omitted: this system boots from SD/eMMC"
+        sd_line="# dtparam=sd=off omitted: this system boots from SD/eMMC (or the boot device could not be determined)"
     fi
     cat <<EOF
 ${BLOCK_BEGIN}
@@ -359,26 +367,33 @@ apply_config_txt() {
 # ─── root-owned config files ───────────────────────────────────────────
 # write_root_file <path> <mode> <content> — content-compare idempotency,
 # same idiom as install.sh's journald/timesync drop-ins. Returns 0 written,
-# 1 unchanged.
+# 1 unchanged, 2 write failed.
 write_root_file() {
     local path=$1 mode=$2 content=$3
     if [[ -r "$path" ]] && [[ "$(cat "$path")" == "$content" ]]; then
         return 1
     fi
-    printf '%s\n' "$content" | run_root install -D -m "$mode" /dev/stdin "$path"
-}
-
-apply_modules_load() {
-    if write_root_file "$MODULES_FILE" 0644 "i2c-dev"; then
-        ok "${MODULES_FILE}: i2c-dev loads at boot"
+    if printf '%s\n' "$content" | run_root install -D -m "$mode" /dev/stdin "$path"; then
         return 0
     fi
-    ok "${MODULES_FILE}: already present"
-    return 1
+    err "could not write ${path}"
+    return 2
 }
 
+# Returns 0 changed, 1 unchanged, 2 failed.
+apply_modules_load() {
+    local rc=0
+    write_root_file "$MODULES_FILE" 0644 "i2c-dev" || rc=$?
+    case $rc in
+        0) ok "${MODULES_FILE}: i2c-dev loads at boot" ;;
+        1) ok "${MODULES_FILE}: already present" ;;
+    esac
+    return "$rc"
+}
+
+# Returns 0 changed, 1 unchanged, 2 failed.
 apply_can_network() {
-    local changed=1
+    local changed=1 rc
     local net udev
     net=$(cat <<'EOF'
 [Match]
@@ -390,18 +405,18 @@ RestartSec=100ms
 EOF
 )
     udev='SUBSYSTEM=="net", KERNEL=="can*", ACTION=="add|change", ATTR{tx_queue_len}="1000"'
-    if write_root_file "$CAN_NETWORK_FILE" 0644 "$net"; then
-        ok "${CAN_NETWORK_FILE}: can0 @ 250 kbit/s via systemd-networkd"
-        changed=0
-    else
-        ok "${CAN_NETWORK_FILE}: already present"
-    fi
-    if write_root_file "$CAN_UDEV_FILE" 0644 "$udev"; then
-        ok "${CAN_UDEV_FILE}: tx_queue_len=1000"
-        changed=0
-    else
-        ok "${CAN_UDEV_FILE}: already present"
-    fi
+    rc=0; write_root_file "$CAN_NETWORK_FILE" 0644 "$net" || rc=$?
+    case $rc in
+        0) ok "${CAN_NETWORK_FILE}: can0 @ 250 kbit/s via systemd-networkd"; changed=0 ;;
+        1) ok "${CAN_NETWORK_FILE}: already present" ;;
+        *) return 2 ;;
+    esac
+    rc=0; write_root_file "$CAN_UDEV_FILE" 0644 "$udev" || rc=$?
+    case $rc in
+        0) ok "${CAN_UDEV_FILE}: tx_queue_len=1000"; changed=0 ;;
+        1) ok "${CAN_UDEV_FILE}: already present" ;;
+        *) return 2 ;;
+    esac
     if systemctl is-enabled --quiet systemd-networkd 2>/dev/null; then
         ok "systemd-networkd already enabled"
     else
@@ -482,18 +497,19 @@ apply_packages() {
         err "the download from ${HALPI2_APT_KEY_URL} is not an armored PGP public key"
         return 2
     fi
-    if write_root_file "$APT_KEY_FILE" 0644 "$key"; then
-        ok "${APT_KEY_FILE}: Hat Labs APT key installed"
-        changed=0; need_update=1
-    else
-        ok "${APT_KEY_FILE}: already present"
-    fi
-    if write_root_file "$APT_SOURCE_FILE" 0644 "$(apt_source_content)"; then
-        ok "${APT_SOURCE_FILE}: $(apt_source_content | sed -n 's/^Suites: //p')"
-        changed=0; need_update=1
-    else
-        ok "${APT_SOURCE_FILE}: already present"
-    fi
+    local rc=0
+    write_root_file "$APT_KEY_FILE" 0644 "$key" || rc=$?
+    case $rc in
+        0) ok "${APT_KEY_FILE}: Hat Labs APT key installed"; changed=0; need_update=1 ;;
+        1) ok "${APT_KEY_FILE}: already present" ;;
+        *) return 2 ;;
+    esac
+    rc=0; write_root_file "$APT_SOURCE_FILE" 0644 "$(apt_source_content)" || rc=$?
+    case $rc in
+        0) ok "${APT_SOURCE_FILE}: $(apt_source_content | sed -n 's/^Suites: //p')"; changed=0; need_update=1 ;;
+        1) ok "${APT_SOURCE_FILE}: already present" ;;
+        *) return 2 ;;
+    esac
     if (( ${#missing[@]} == 0 )); then
         ok "packages already installed: $(halpi2_packages | tr '\n' ' ')"
         return "$changed"
@@ -607,11 +623,18 @@ cmd_apply() {
         1) ;;
         *) declined=1 ;;
     esac
-    if apply_modules_load; then reboot=1; fi
-    if apply_can_network; then reboot=1; fi
+    local failed=0
+    rc=0; apply_modules_load || rc=$?
+    case $rc in 0) reboot=1 ;; 2) failed=1 ;; esac
+    rc=0; apply_can_network || rc=$?
+    case $rc in 0) reboot=1 ;; 2) failed=1 ;; esac
     apply_groups || true
 
     echo
+    if (( failed )); then
+        err "some HALPI2 configuration files could not be written (see above)"
+        return 1
+    fi
     if (( declined )); then
         warn "config.txt was not changed — CAN, RS-485 and the controller stay unavailable"
         warn "until the block above is applied and the system rebooted."

@@ -684,7 +684,7 @@ case "${SIGNALK_HALPI2:-auto}" in
             bash "$HERE/signalk-halpi2.tmpl" detect >/dev/null 2>&1
             HALPI2_DETECT_RC=$?
             set -e
-            if (( HALPI2_DETECT_RC != 2 )); then
+            if (( HALPI2_DETECT_RC == 0 || HALPI2_DETECT_RC == 1 )); then
                 warn "Compute Module 5 detected but sudo is unavailable — HALPI2 setup skipped."
                 warn "Run 'signalk halpi2 apply' with sudo later (docs/halpi2.md)."
             fi
