@@ -1,0 +1,752 @@
+#!/usr/bin/env bash
+# signalk-halpi2 — Hat Labs HALPI2 (Raspberry Pi CM5 carrier) detection and
+# hardware setup helper. Installed by signalk-universal-installer to
+# ~/.local/bin/signalk-halpi2; invoked via `signalk halpi2 …` and, before
+# the CLI exists, directly by install.sh (step 2c) — the file is a complete
+# script, not a function library.
+#
+# What `apply` does (docs/halpi2.md has the full table): adds the Hat Labs
+# APT repository and installs halpid (power/watchdog daemon), halpi2-firmware,
+# blinkenlights-daemon (front-panel LEDs), i2c-tools and can-utils; appends
+# the HALPI2 device-tree block to config.txt (I2C for the controller, the
+# MCP251xFD CAN controller for NMEA 2000, UART4 for RS-485 NMEA 0183, the
+# external antenna, and — NVMe boot only — the SD interface off); persists
+# the can0 bitrate through systemd-networkd; loads i2c-dev at boot; adds the
+# user to the halpid group. `connections` creates the two Signal K
+# connections through the server's admin API. Everything is idempotent.
+#
+# Why this helper auto-edits config.txt while `signalk socketcan` still
+# prints a recipe: socketcan's header names the missing piece as a safety
+# story for a user-chosen dtoverlay. Here the overlay set is fixed for one
+# board, the board answers at I2C 0x6d before anything is written, the one
+# line that can make a box unbootable (dtparam=sd=off) is dropped whenever
+# / or /boot/firmware is on mmcblk, and the write follows preflight.sh's
+# offer_pi_cmdline_fix() shape: diff preview, confirm, timestamped backup,
+# post-write check, restore on failure. Without a controlling terminal the
+# block is written only when the controller answered or SIGNALK_HALPI2=yes.
+#
+# Usage:
+#   signalk-halpi2 status        — what is detected/installed/configured (default)
+#   signalk-halpi2 detect        — JSON board summary; exit 0 confirmed, 1 candidate, 2 not a CM5
+#   signalk-halpi2 apply         — install packages + write config (sudo); exit 2 = reboot needed
+#   signalk-halpi2 connections   — create the NMEA 2000 / RS-485 Signal K connections
+#   signalk-halpi2 help
+#
+# Environment:
+#   SIGNALK_HALPI2=auto|yes|no          auto (default): confirmed board → apply
+#                                        after a diff/confirm; candidate → ask.
+#                                        yes: no prompts, apply even when the
+#                                        controller probe cannot run. no: skip.
+#   SIGNALK_HALPI2_BLINKENLIGHTS=no      do not install blinkenlights-daemon.
+#
+# Test overrides (scripts/test/check-halpi2-*.sh): HALPI2_CONFIG_TXT,
+# HALPI2_ETC (prefix for /etc writes), DT_MODEL_FILE, HALPI2_I2C_DEV,
+# HALPI2_RS485_DEV, HALPI2_TTY_IN, HALPI2_TTY_OUT, HALPI2_APT_KEY_URL,
+# HALPI2_OS_RELEASE, DOCTOR_DATA, SIGNALK_URL.
+
+set -euo pipefail
+
+DOCTOR_DATA="${DOCTOR_DATA:-${HOME}/.signalk-doctor}"
+DOC_URL="https://github.com/dirkwa/signalk-universal-installer/blob/master/docs/halpi2.md"
+
+DT_MODEL_FILE="${DT_MODEL_FILE:-/proc/device-tree/model}"
+HALPI2_I2C_DEV="${HALPI2_I2C_DEV:-/dev/i2c-1}"
+HALPI2_RS485_DEV="${HALPI2_RS485_DEV:-/dev/ttyAMA4}"
+HALPI2_ETC="${HALPI2_ETC:-}"
+HALPI2_OS_RELEASE="${HALPI2_OS_RELEASE:-/etc/os-release}"
+HALPI2_APT_KEY_URL="${HALPI2_APT_KEY_URL:-https://apt.hatlabs.fi/hat-labs-apt-key.asc}"
+TTY_IN="${HALPI2_TTY_IN:-/dev/tty}"
+TTY_OUT="${HALPI2_TTY_OUT:-/dev/tty}"
+
+APT_KEY_FILE="${HALPI2_ETC}/etc/apt/trusted.gpg.d/hatlabs.asc"
+APT_SOURCE_FILE="${HALPI2_ETC}/etc/apt/sources.list.d/hatlabs.sources"
+MODULES_FILE="${HALPI2_ETC}/etc/modules-load.d/i2c-dev.conf"
+# Same filename `signalk socketcan` prints in its recipe (a second file
+# matching can0 would race it in networkd's alphabetical order).
+CAN_NETWORK_FILE="${HALPI2_ETC}/etc/systemd/network/80-signalk-can0.network"
+CAN_UDEV_FILE="${HALPI2_ETC}/etc/udev/rules.d/80-signalk-can.rules"
+
+BLOCK_BEGIN='# >>> signalk-installer halpi2 >>>'
+BLOCK_END='# <<< signalk-installer halpi2 <<<'
+
+# ─── output helpers ────────────────────────────────────────────────────
+# Mirrors installer/linux/lib/colors.sh (same escapes, same gate); inlined
+# because this script ships standalone to ~/.local/bin/.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_RED=$'\033[0;31m'
+    C_GREEN=$'\033[0;32m'
+    C_YELLOW=$'\033[0;33m'
+    C_BLUE=$'\033[0;34m'
+    C_BOLD=$'\033[1m'
+    C_RESET=$'\033[0m'
+else
+    C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_BOLD=''; C_RESET=''
+fi
+info()    { printf '%s[i]%s %s\n' "$C_BLUE"   "$C_RESET" "$*"; }
+ok()      { printf '%s[OK]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn()    { printf '%s[!]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+err()     { printf '%s[ERR]%s %s\n' "$C_RED"  "$C_RESET" "$*" >&2; }
+section() { printf '\n%s== %s ==%s\n' "$C_BOLD" "$*" "$C_RESET"; }
+
+# ─── privilege ─────────────────────────────────────────────────────────
+# Same shape as preflight.sh::offer_pi_cmdline_fix(): bare when root,
+# `sudo` otherwise, and a clear failure when neither is available.
+SUDO=()
+HAVE_ROOT=1
+if [[ $EUID -ne 0 ]]; then
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO=(sudo)
+    else
+        HAVE_ROOT=0
+    fi
+fi
+run_root() { "${SUDO[@]}" "$@"; }
+
+interactive() { [[ -r "$TTY_IN" && -w "$TTY_OUT" ]]; }
+
+halpi2_mode() {
+    case "${SIGNALK_HALPI2:-auto}" in
+        yes|YES|1|true|TRUE) echo yes ;;
+        no|NO|0|false|FALSE) echo no ;;
+        *) echo auto ;;
+    esac
+}
+
+# ─── detection ─────────────────────────────────────────────────────────
+# Mirrors detect-hardware.sh::detect_board (the hardware.json owner); kept
+# in sync by hand because this file ships standalone.
+dt_model() {
+    if [[ -r "$DT_MODEL_FILE" ]]; then
+        tr -d '\0' <"$DT_MODEL_FILE" 2>/dev/null || true
+    fi
+}
+is_cm5() { [[ "$(dt_model)" == *"Compute Module 5"* ]]; }
+halpid_active() { systemctl is-active --quiet halpid 2>/dev/null; }
+
+# Controller version register: write the register byte, read 4 bytes
+# (major, minor, patch, alpha|0xff) — halpid's own read_bytes() shape.
+# `root` runs the transfer via sudo (apply); anything else runs it as the
+# caller (status/detect must never prompt for a password).
+halpi2_i2c_version() {
+    local reg=$1 as=${2:-user} bus out
+    bus=${HALPI2_I2C_DEV##*i2c-}
+    command -v i2ctransfer >/dev/null 2>&1 || return 1
+    if [[ "$as" == root ]]; then
+        out=$(run_root i2ctransfer -y "$bus" w1@0x6d "$reg" r4 2>/dev/null) || return 1
+    else
+        [[ -r "$HALPI2_I2C_DEV" && -w "$HALPI2_I2C_DEV" ]] || return 1
+        out=$(i2ctransfer -y "$bus" w1@0x6d "$reg" r4 2>/dev/null) || return 1
+    fi
+    # shellcheck disable=SC2086
+    set -- $out
+    [[ $# -eq 4 ]] || return 1
+    printf '%d.%d.%d' "$1" "$2" "$3"
+}
+
+# Sets BOARD_VIA (model-string|halpid|i2c), BOARD_FW, BOARD_HW.
+# Returns 0 confirmed, 1 candidate, 2 not a CM5.
+detect_board() {
+    BOARD_VIA=""; BOARD_FW=""; BOARD_HW=""
+    is_cm5 || return 2
+    BOARD_VIA="model-string"
+    if halpid_active; then
+        BOARD_VIA="halpid"
+        return 0
+    fi
+    local v
+    if v=$(halpi2_i2c_version 0x04 "${1:-user}") && [[ -n "$v" ]]; then
+        BOARD_VIA="i2c"; BOARD_FW="$v"
+        v=$(halpi2_i2c_version 0x03 "${1:-user}") && BOARD_HW="$v"
+        return 0
+    fi
+    return 1
+}
+
+board_json() {
+    local rc=$1 candidate=true
+    (( rc == 0 )) && candidate=false
+    local fw="null" hw="null"
+    [[ -n "$BOARD_FW" ]] && fw="\"$BOARD_FW\""
+    [[ -n "$BOARD_HW" ]] && hw="\"$BOARD_HW\""
+    printf '{"model":"halpi2","candidate":%s,"detectedVia":"%s","hardwareVersion":%s,"firmwareVersion":%s}\n' \
+        "$candidate" "$BOARD_VIA" "$hw" "$fw"
+}
+
+cmd_detect() {
+    local rc=0
+    detect_board user || rc=$?
+    if (( rc == 2 )); then
+        printf '{"model":null}\n'
+        return 2
+    fi
+    board_json "$rc"
+    return "$rc"
+}
+
+# ─── config.txt ────────────────────────────────────────────────────────
+config_txt_path() {
+    if [[ -n "${HALPI2_CONFIG_TXT:-}" ]]; then
+        [[ -e "$HALPI2_CONFIG_TXT" ]] && { echo "$HALPI2_CONFIG_TXT"; return 0; }
+        return 1
+    fi
+    local p
+    for p in /boot/firmware/config.txt /boot/config.txt; do
+        if [[ -r "$p" ]]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# True when / or the boot partition lives on an SD/eMMC device. Then
+# dtparam=sd=off (which HaLOS ships for its NVMe images) would disable the
+# very device the box boots from.
+sd_boot() {
+    local src
+    for m in / /boot/firmware /boot; do
+        src=$(findmnt -no SOURCE "$m" 2>/dev/null || true)
+        [[ "$src" == *mmcblk* ]] && return 0
+    done
+    return 1
+}
+
+render_block() {
+    local sd_line="dtparam=sd=off"
+    if sd_boot; then
+        sd_line="# dtparam=sd=off omitted: this system boots from SD/eMMC"
+    fi
+    cat <<EOF
+${BLOCK_BEGIN}
+# Hat Labs HALPI2 carrier — written by \`signalk halpi2 apply\`. Lines inside
+# this block are replaced on the next apply; keep your own edits outside.
+[all]
+# controller (halpid) on I2C bus 1
+dtparam=i2c_arm=on
+# Wi-Fi/BT external antenna
+dtparam=ant2
+# MCP2518FD CAN controller on SPI0 CS1 (GPIO6), INT on GPIO26 -> can0 (NMEA 2000)
+dtoverlay=spi0-2cs,cs1_pin=6
+dtoverlay=mcp251xfd,spi0-1,interrupt=26,oscillator=40000000
+# UART4 -> /dev/ttyAMA4 (RS-485, NMEA 0183)
+dtoverlay=uart4-pi5
+# SD interface off: avoids a shutdown stall long enough to drain the
+# supercaps (raspberrypi/linux#7014). Also disables microSD/eMMC.
+${sd_line}
+${BLOCK_END}
+EOF
+}
+
+existing_block() {
+    sed -n "/^${BLOCK_BEGIN}\$/,/^${BLOCK_END}\$/p" "$1"
+}
+
+strip_block() {
+    awk -v b="$BLOCK_BEGIN" -v e="$BLOCK_END" '
+        $0 == b { skip = 1; next }
+        $0 == e { skip = 0; next }
+        !skip   { print }
+    ' "$1"
+}
+
+print_recipe() {
+    local cfg=$1
+    echo
+    echo "Manual recipe (or re-run with SIGNALK_HALPI2=yes to skip the prompts):"
+    echo
+    echo "  1. Append to ${cfg}:"
+    render_block | sed 's/^/       /'
+    echo
+    echo "  2. sudo reboot"
+    echo
+    echo "  Details: ${DOC_URL}"
+}
+
+# Writes the block. Returns 0 written, 1 already present, 2 declined/skipped.
+apply_config_txt() {
+    local confirmed=$1 mode=$2
+    local cfg block current proposed
+    if ! cfg=$(config_txt_path); then
+        warn "no /boot/firmware/config.txt or /boot/config.txt found — skipping device-tree setup"
+        return 2
+    fi
+    block=$(render_block)
+    if [[ "$(existing_block "$cfg")" == "$block" ]]; then
+        ok "${cfg}: HALPI2 block already present"
+        return 1
+    fi
+    current=$(cat "$cfg")
+    proposed=$(printf '%s\n\n%s\n' "$(strip_block "$cfg")" "$block")
+
+    # Gate. `yes` skips prompts. Interactive: preview + confirm, defaulting
+    # to yes only when the controller answered. Non-interactive: write only
+    # when the controller answered.
+    if [[ "$mode" != yes ]]; then
+        if interactive; then
+            printf '\n%sProposed change to %s:%s\n' "$C_BOLD" "$cfg" "$C_RESET" >>"$TTY_OUT"
+            diff -u --label current --label proposed \
+                <(printf '%s\n' "$current") <(printf '%s\n' "$proposed") >>"$TTY_OUT" || true
+            local reply="" prompt="[Y/n]" default=y
+            if [[ "$confirmed" != 1 ]]; then
+                printf '\n%sThe HALPI2 controller did not answer at I2C 0x6d.%s\n' "$C_YELLOW" "$C_RESET" >>"$TTY_OUT"
+                prompt="[y/N]"; default=n
+            fi
+            printf 'Write this block to %s now (sudo, reboot afterwards)? %s ' "$cfg" "$prompt" >>"$TTY_OUT"
+            read -r reply <"$TTY_IN" || reply=""
+            reply=${reply:-$default}
+            case "$reply" in
+                y|Y|yes|YES) ;;
+                *)
+                    info "Skipped ${cfg}."
+                    print_recipe "$cfg"
+                    return 2
+                    ;;
+            esac
+        elif [[ "$confirmed" != 1 ]]; then
+            warn "no terminal and the controller did not answer — not touching ${cfg}"
+            print_recipe "$cfg"
+            return 2
+        else
+            info "controller confirmed at I2C 0x6d; writing ${cfg} without a prompt (no terminal)"
+        fi
+    fi
+
+    local ts backup
+    ts=$(date +%Y%m%d-%H%M%S)
+    backup="${cfg}.bak.${ts}"
+    info "Backing up ${cfg} → ${backup}"
+    if ! run_root cp -p "$cfg" "$backup"; then
+        err "Backup failed; not editing ${cfg}."
+        return 2
+    fi
+    if ! printf '%s\n' "$proposed" | run_root tee "$cfg" >/dev/null; then
+        err "Write to ${cfg} failed; restoring backup."
+        run_root cp -p "$backup" "$cfg" || err "Restore from ${backup} also failed — fix manually before rebooting."
+        return 2
+    fi
+    # Post-write check: exactly one marker pair, and the file kept every
+    # line outside the block.
+    local begins ends before after
+    begins=$(grep -cxF "$BLOCK_BEGIN" "$cfg" || true)
+    ends=$(grep -cxF "$BLOCK_END" "$cfg" || true)
+    before=$(strip_block <(printf '%s\n' "$current") | grep -c '' || true)
+    after=$(strip_block "$cfg" | grep -c '' || true)
+    if [[ "$begins" != 1 || "$ends" != 1 || "$after" -lt "$before" ]]; then
+        err "${cfg} failed the post-write check (markers ${begins}/${ends}, lines ${before}→${after}); restoring backup."
+        run_root cp -p "$backup" "$cfg" || err "Restore from ${backup} also failed — fix manually before rebooting."
+        return 2
+    fi
+    ok "Wrote HALPI2 block to ${cfg} (backup at ${backup})."
+    return 0
+}
+
+# ─── root-owned config files ───────────────────────────────────────────
+# write_root_file <path> <mode> <content> — content-compare idempotency,
+# same idiom as install.sh's journald/timesync drop-ins. Returns 0 written,
+# 1 unchanged.
+write_root_file() {
+    local path=$1 mode=$2 content=$3
+    if [[ -r "$path" ]] && [[ "$(cat "$path")" == "$content" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$content" | run_root install -D -m "$mode" /dev/stdin "$path"
+}
+
+apply_modules_load() {
+    if write_root_file "$MODULES_FILE" 0644 "i2c-dev"; then
+        ok "${MODULES_FILE}: i2c-dev loads at boot"
+        return 0
+    fi
+    ok "${MODULES_FILE}: already present"
+    return 1
+}
+
+apply_can_network() {
+    local changed=1
+    local net udev
+    net=$(cat <<'EOF'
+[Match]
+Name=can0
+
+[CAN]
+BitRate=250000
+RestartSec=100ms
+EOF
+)
+    udev='SUBSYSTEM=="net", KERNEL=="can*", ACTION=="add|change", ATTR{tx_queue_len}="1000"'
+    if write_root_file "$CAN_NETWORK_FILE" 0644 "$net"; then
+        ok "${CAN_NETWORK_FILE}: can0 @ 250 kbit/s via systemd-networkd"
+        changed=0
+    else
+        ok "${CAN_NETWORK_FILE}: already present"
+    fi
+    if write_root_file "$CAN_UDEV_FILE" 0644 "$udev"; then
+        ok "${CAN_UDEV_FILE}: tx_queue_len=1000"
+        changed=0
+    else
+        ok "${CAN_UDEV_FILE}: already present"
+    fi
+    if systemctl is-enabled --quiet systemd-networkd 2>/dev/null; then
+        ok "systemd-networkd already enabled"
+    else
+        if run_root systemctl enable systemd-networkd >/dev/null 2>&1; then
+            ok "systemd-networkd enabled (brings can0 up at boot; NetworkManager ignores CAN)"
+        else
+            warn "could not enable systemd-networkd — can0 will not come up automatically"
+        fi
+        changed=0
+    fi
+    return "$changed"
+}
+
+# ─── packages ──────────────────────────────────────────────────────────
+os_codename() {
+    # shellcheck disable=SC1090
+    ( [[ -r "$HALPI2_OS_RELEASE" ]] && . "$HALPI2_OS_RELEASE" && printf '%s' "${VERSION_CODENAME:-}" ) 2>/dev/null || true
+}
+
+apt_source_content() {
+    local suite="stable" component="main"
+    case "$(os_codename)" in
+        trixie|bookworm) suite="$(os_codename)-stable"; component="hatlabs" ;;
+    esac
+    cat <<EOF
+Types: deb
+URIs: https://apt.hatlabs.fi/
+Suites: ${suite}
+Components: ${component}
+Signed-By: /etc/apt/trusted.gpg.d/hatlabs.asc
+EOF
+}
+
+pkg_installed() {
+    dpkg-query -W -f '${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
+}
+
+halpi2_packages() {
+    local pkgs=(i2c-tools can-utils halpid halpi2-firmware)
+    case "${SIGNALK_HALPI2_BLINKENLIGHTS:-yes}" in
+        no|NO|0|false|FALSE) ;;
+        *) pkgs+=(blinkenlights-daemon) ;;
+    esac
+    printf '%s\n' "${pkgs[@]}"
+}
+
+# i2c-tools alone (Debian main, no Hat Labs repo) so the controller probe
+# can run before anything board-specific is installed.
+ensure_i2c_tools() {
+    command -v i2ctransfer >/dev/null 2>&1 && return 0
+    info "apt-get install i2c-tools (for the controller probe)"
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq i2c-tools >/dev/null 2>&1 \
+        || { run_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 \
+             && run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq i2c-tools >/dev/null 2>&1; } \
+        || { warn "could not install i2c-tools; the controller probe cannot run"; return 1; }
+}
+
+# Returns 0 when something was installed/changed, 1 when nothing was.
+apply_packages() {
+    local changed=1 need_update=0 key
+    local missing=() p
+    while IFS= read -r p; do
+        pkg_installed "$p" || missing+=("$p")
+    done < <(halpi2_packages)
+    # Fully configured box: no network round-trip on a re-run.
+    if (( ${#missing[@]} == 0 )) && [[ -s "$APT_KEY_FILE" && -s "$APT_SOURCE_FILE" ]]; then
+        ok "Hat Labs repository and packages already installed: $(halpi2_packages | tr '\n' ' ')"
+        return 1
+    fi
+    if ! key=$(curl -fsSL -m 30 "$HALPI2_APT_KEY_URL"); then
+        err "could not fetch the Hat Labs APT key from ${HALPI2_APT_KEY_URL}"
+        return 2
+    fi
+    if write_root_file "$APT_KEY_FILE" 0644 "$key"; then
+        ok "${APT_KEY_FILE}: Hat Labs APT key installed"
+        changed=0; need_update=1
+    else
+        ok "${APT_KEY_FILE}: already present"
+    fi
+    if write_root_file "$APT_SOURCE_FILE" 0644 "$(apt_source_content)"; then
+        ok "${APT_SOURCE_FILE}: $(apt_source_content | sed -n 's/^Suites: //p')"
+        changed=0; need_update=1
+    else
+        ok "${APT_SOURCE_FILE}: already present"
+    fi
+    if (( ${#missing[@]} == 0 )); then
+        ok "packages already installed: $(halpi2_packages | tr '\n' ' ')"
+        return "$changed"
+    fi
+    if (( need_update )) || [[ ! -d "${HALPI2_ETC}/var/lib/apt/lists" ]] \
+        || ! find "${HALPI2_ETC}/var/lib/apt/lists" -name 'apt.hatlabs.fi_*Packages' -print -quit 2>/dev/null | grep -q .; then
+        info "apt-get update"
+        run_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq || {
+            err "apt-get update failed"; return 2; }
+    fi
+    info "apt-get install ${missing[*]}"
+    if ! run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"; then
+        err "apt-get install failed for: ${missing[*]}"
+        return 2
+    fi
+    ok "installed: ${missing[*]}"
+    return 0
+}
+
+apply_groups() {
+    local user g changed=1
+    user=${USER:-$(id -un)}
+    for g in halpid dialout; do
+        getent group "$g" >/dev/null 2>&1 || continue
+        if ! id -nG "$user" | tr ' ' '\n' | grep -qx "$g"; then
+            if run_root usermod -aG "$g" "$user"; then
+                ok "added ${user} to ${g} (takes effect at next login)"
+                changed=0
+            else
+                warn "could not add ${user} to ${g}"
+            fi
+        fi
+    done
+    return "$changed"
+}
+
+# ─── apply ─────────────────────────────────────────────────────────────
+cmd_apply() {
+    local mode
+    mode=$(halpi2_mode)
+    if [[ "$mode" == no ]]; then
+        info "SIGNALK_HALPI2=no — skipping HALPI2 setup"
+        return 0
+    fi
+    if ! is_cm5; then
+        info "not a Raspberry Pi Compute Module 5 (${DT_MODEL_FILE}: '$(dt_model)') — nothing to do"
+        return 0
+    fi
+    if (( ! HAVE_ROOT )); then
+        err "HALPI2 setup needs root and neither root nor sudo is available."
+        err "See ${DOC_URL} for the manual recipe."
+        return 1
+    fi
+
+    section "HALPI2 carrier board"
+    local reboot=0 declined=0 rc
+
+    # Confirm the board BEFORE anything Hat-Labs-specific is installed: a
+    # different CM5 carrier must not end up with halpid and the LED daemon.
+    # Only i2c-tools (Debian) goes in first, for the probe. Enabling I2C live
+    # (what raspi-config does) lets a first run probe before the config.txt
+    # reboot; dtparam is Raspberry Pi OS specific, so its absence only means
+    # "cannot confirm yet".
+    ensure_i2c_tools || true
+    if [[ ! -e "$HALPI2_I2C_DEV" ]] && command -v dtparam >/dev/null 2>&1; then
+        run_root dtparam i2c_arm=on 2>/dev/null || true
+        run_root modprobe i2c-dev 2>/dev/null || true
+    fi
+    local confirmed=0
+    rc=0; detect_board root || rc=$?
+    if (( rc == 0 )); then
+        confirmed=1
+        case "$BOARD_VIA" in
+            i2c)    ok "HALPI2 controller answered at I2C 0x6d (firmware ${BOARD_FW}${BOARD_HW:+, hardware ${BOARD_HW}})" ;;
+            halpid) ok "halpid is running — HALPI2 confirmed" ;;
+        esac
+    elif [[ "$mode" == yes ]]; then
+        warn "controller did not answer at I2C 0x6d; continuing because SIGNALK_HALPI2=yes"
+    else
+        warn "Compute Module 5 detected but the HALPI2 controller did not answer at I2C 0x6d"
+        warn "(no ${HALPI2_I2C_DEV} yet, or a different CM5 carrier)."
+        if interactive; then
+            local reply=""
+            printf 'Continue with the HALPI2 setup anyway (Hat Labs packages, config.txt)? [y/N] ' >>"$TTY_OUT"
+            read -r reply <"$TTY_IN" || reply=""
+            case "$reply" in
+                y|Y|yes|YES) confirmed=1; info "continuing on operator confirmation" ;;
+                *)
+                    info "Skipped HALPI2 setup. Re-run 'signalk halpi2 apply' on a HALPI2, or"
+                    info "SIGNALK_HALPI2=yes to skip the check. Details: ${DOC_URL}"
+                    return 1
+                    ;;
+            esac
+        else
+            local cfg
+            cfg=$(config_txt_path || echo /boot/firmware/config.txt)
+            print_recipe "$cfg"
+            return 1
+        fi
+    fi
+
+    rc=0; apply_packages || rc=$?
+    case $rc in
+        0|1) ;;
+        *) return 1 ;;
+    esac
+
+    rc=0; apply_config_txt "$confirmed" "$mode" || rc=$?
+    case $rc in
+        0) reboot=1 ;;
+        1) ;;
+        *) declined=1 ;;
+    esac
+    if apply_modules_load; then reboot=1; fi
+    if apply_can_network; then reboot=1; fi
+    apply_groups || true
+
+    echo
+    if (( declined )); then
+        warn "config.txt was not changed — CAN, RS-485 and the controller stay unavailable"
+        warn "until the block above is applied and the system rebooted."
+        return 1
+    fi
+    if (( reboot )); then
+        warn "Reboot required to load the device-tree changes:  sudo reboot"
+        warn "Then re-run the installer (or 'signalk hardware rescan') so can0 and"
+        warn "${HALPI2_RS485_DEV} are picked up."
+        if pkg_installed halpi2-firmware; then
+            info "If apt just flashed new controller firmware it activates on the next full"
+            info "power-off, not on reboot; do that when someone can reach the power button."
+        fi
+        return 2
+    fi
+    ok "HALPI2 setup already complete — nothing changed"
+    return 0
+}
+
+# ─── Signal K connections ──────────────────────────────────────────────
+sk_http_port() {
+    local q="${HOME}/.config/containers/systemd/signalk-server.container"
+    local p
+    p=$(sed -n 's/^Environment=PORT=\([0-9][0-9]*\).*/\1/p' "$q" 2>/dev/null | head -1 || true)
+    printf '%s' "${p:-80}"
+}
+
+sk_base_url() {
+    local u="${SIGNALK_URL:-http://127.0.0.1:$(sk_http_port)/signalk}"
+    printf '%s' "${u%/signalk}"
+}
+
+# Same ids HaLOS writes into settings.json, so a migrated config is
+# recognised as already configured.
+N2K_ID="halpi2-nmea2000"
+RS485_ID="halpi2-rs485"
+
+provider_body() {
+    case "$1" in
+        "$N2K_ID")
+            printf '{"id":"%s","enabled":true,"type":"NMEA2000","logging":false,"options":{"type":"canbus-canboatjs","interface":"can0"}}' "$N2K_ID" ;;
+        "$RS485_ID")
+            printf '{"id":"%s","enabled":true,"type":"NMEA0183","logging":false,"options":{"type":"serial","device":"%s","baudrate":4800}}' "$RS485_ID" "$HALPI2_RS485_DEV" ;;
+    esac
+}
+
+cmd_connections() {
+    local token_file="${DOCTOR_DATA}/signalk-token" token base existing
+    if [[ ! -s "$token_file" ]]; then
+        err "no admin token at ${token_file} — the installer writes it once security is"
+        err "enabled (re-run with SIGNALK_ADMIN_USER/SIGNALK_ADMIN_PASSWORD), or add the"
+        err "connections in the admin UI: NMEA 2000 canbus-canboatjs on can0, NMEA 0183"
+        err "serial on ${HALPI2_RS485_DEV} @ 4800."
+        return 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        err "jq is required for 'signalk halpi2 connections'"
+        return 1
+    fi
+    token=$(cat "$token_file")
+    base=$(sk_base_url)
+    if ! existing=$(curl -fsS -m 10 -H "Authorization: Bearer $token" "${base}/skServer/providers"); then
+        err "could not list Signal K connections at ${base}/skServer/providers (server down or token rejected)"
+        return 1
+    fi
+    local id code rc=0
+    for id in "$N2K_ID" "$RS485_ID"; do
+        if jq -e --arg id "$id" 'map(.id) | index($id) != null' <<<"$existing" >/dev/null 2>&1; then
+            ok "connection '${id}' already exists"
+            continue
+        fi
+        code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' \
+            -X POST -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+            --data "$(provider_body "$id")" "${base}/skServer/providers" || echo 000)
+        case "$code" in
+            200) ok "created connection '${id}'" ;;
+            401) warn "connection '${id}': server answered 401 (already exists, or the token was rejected)"; rc=1 ;;
+            *)   warn "connection '${id}': server answered HTTP ${code}"; rc=1 ;;
+        esac
+    done
+    return "$rc"
+}
+
+# ─── status ────────────────────────────────────────────────────────────
+unit_state() { systemctl is-active "$1" 2>/dev/null || echo "not running"; }
+
+cmd_status() {
+    section "HALPI2 status"
+    local rc=0
+    detect_board user || rc=$?
+    case $rc in
+        2) info "board: not a Raspberry Pi Compute Module 5 ('$(dt_model)')"; return 0 ;;
+        1) warn "board: Compute Module 5, controller not confirmed (via ${BOARD_VIA})" ;;
+        0) ok "board: HALPI2 (via ${BOARD_VIA}${BOARD_FW:+, firmware ${BOARD_FW}}${BOARD_HW:+, hardware ${BOARD_HW}})" ;;
+    esac
+    local p
+    while IFS= read -r p; do
+        if pkg_installed "$p"; then ok "package ${p}: installed"; else warn "package ${p}: missing"; fi
+    done < <(halpi2_packages)
+    info "halpid: $(unit_state halpid)"
+    info "blinkenlights-daemon: $(unit_state blinkenlights-daemon)"
+    if command -v halpi >/dev/null 2>&1; then
+        halpi status 2>/dev/null | sed 's/^/    /' || info "halpi status: not reachable as $(id -un) (group halpid applies at next login)"
+    fi
+    local cfg
+    if cfg=$(config_txt_path); then
+        if [[ "$(existing_block "$cfg")" == "$(render_block)" ]]; then
+            ok "${cfg}: HALPI2 block present"
+        elif [[ -n "$(existing_block "$cfg")" ]]; then
+            warn "${cfg}: HALPI2 block present but differs from the current template ('signalk halpi2 apply' updates it)"
+        else
+            warn "${cfg}: HALPI2 block missing"
+        fi
+    fi
+    if [[ -r "$MODULES_FILE" ]]; then ok "${MODULES_FILE}: present"; else warn "${MODULES_FILE}: missing"; fi
+    if [[ -r "$CAN_NETWORK_FILE" ]]; then ok "${CAN_NETWORK_FILE}: present"; else warn "${CAN_NETWORK_FILE}: missing"; fi
+    if command -v ip >/dev/null 2>&1; then
+        info "can0: $(ip -br link show can0 2>/dev/null || echo 'absent')"
+    fi
+    if [[ -e "$HALPI2_RS485_DEV" ]]; then ok "${HALPI2_RS485_DEV}: present"; else warn "${HALPI2_RS485_DEV}: absent"; fi
+    local token_file="${DOCTOR_DATA}/signalk-token" existing id
+    if [[ -s "$token_file" ]] && command -v jq >/dev/null 2>&1 \
+        && existing=$(curl -fsS -m 5 -H "Authorization: Bearer $(cat "$token_file")" "$(sk_base_url)/skServer/providers" 2>/dev/null); then
+        for id in "$N2K_ID" "$RS485_ID"; do
+            if jq -e --arg id "$id" 'map(.id) | index($id) != null' <<<"$existing" >/dev/null 2>&1; then
+                ok "Signal K connection '${id}': present"
+            else
+                warn "Signal K connection '${id}': missing ('signalk halpi2 connections')"
+            fi
+        done
+    else
+        info "Signal K connections: not checked (server not reachable or no admin token)"
+    fi
+}
+
+usage() {
+    cat <<EOF
+signalk halpi2 — Hat Labs HALPI2 (Raspberry Pi CM5 carrier) hardware setup
+
+  signalk halpi2 status        what is detected, installed and configured (default)
+  signalk halpi2 detect        JSON board summary; exit 0 confirmed, 1 candidate, 2 not a CM5
+  signalk halpi2 apply         install Hat Labs packages (halpid, halpi2-firmware,
+                               blinkenlights-daemon, i2c-tools, can-utils), write the
+                               config.txt device-tree block, can0 bitrate and i2c-dev;
+                               exit 2 = reboot needed
+  signalk halpi2 connections   create the NMEA 2000 (can0) and RS-485 (${HALPI2_RS485_DEV})
+                               Signal K connections through the admin API
+
+Environment: SIGNALK_HALPI2=auto|yes|no, SIGNALK_HALPI2_BLINKENLIGHTS=no
+Docs: ${DOC_URL}
+EOF
+}
+
+case "${1:-status}" in
+    status)      cmd_status ;;
+    detect)      cmd_detect ;;
+    apply)       cmd_apply ;;
+    connections) cmd_connections ;;
+    help|-h|--help) usage ;;
+    *) err "unknown subcommand: $1"; usage; exit 2 ;;
+esac
