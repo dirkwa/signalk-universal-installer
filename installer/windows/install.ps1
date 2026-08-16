@@ -332,6 +332,16 @@ function Stop-ForReboot {
         $v = $kv.Value
         if ($v -is [switch]) {
             if ($v.IsPresent) { $resumeArgs += "-$($kv.Key)" }
+        } elseif ($v -is [array]) {
+            # An array MUST be emitted element by element. "$v" stringifies it
+            # by joining with $OFS (a space by default) INSIDE the quotes, so
+            # -NmeaUdpPorts 2000,10110 came out as '200010110' - one nonsense
+            # port that binds without error and opens the wrong thing. An empty
+            # array contributes no argument at all.
+            if ($v.Count -gt 0) {
+                $items = ($v | ForEach-Object { "'$($_ -replace "'", "''")'" }) -join ','
+                $resumeArgs += "-$($kv.Key) $items"
+            }
         } else {
             $resumeArgs += "-$($kv.Key) '$($v -replace "'", "''")'"
         }
