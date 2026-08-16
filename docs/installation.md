@@ -199,6 +199,40 @@ To **pause** SignalK for later (the common "I don't need it running right now" c
 - **"Podman isn't on PATH"** — open a new Administrator PowerShell after the winget install and re-run.
 - Reset the machine if needed: `podman machine stop signalk; podman machine rm signalk` then re-run. **Note:** unlike Linux/macOS, on Windows your SignalK data lives **inside** the machine, so removing it discards all configs, plugins, and tokens — back up anything you need first. Run the backup through `cmd /c` so the redirect goes through the native shell, not PowerShell's pipeline (PowerShell before 7.4 transcodes a `>`-redirected byte stream and corrupts the `.tgz`): `cmd /c "podman machine ssh signalk -- tar czf - .signalk > backup.tgz"`. `signalk uninstall` does this teardown for you, with a confirmation prompt.
 
+### Windows NMEA over the network (UDP)
+
+If a gateway streams NMEA **into** the boat PC over UDP — a Yacht Devices or Actisense unit on `2000`, an NMEA-0183 feed on `10110` — open those ports at install time:
+
+```powershell
+.\install.ps1 -NmeaUdpPorts 2000,10110
+```
+
+Two ports on the same machine, either of which drops the feed:
+
+Windows filters traffic to WSL at **two independent layers** — the ordinary Windows firewall, and a separate **Hyper-V firewall** between the host and the VM. Traffic has to pass both, and the Hyper-V layer drops **silently**: the packets are visible in Wireshark on Windows and simply never arrive inside the machine, with nothing logged anywhere. `-NmeaUdpPorts` opens both layers.
+
+This is also why "multicast doesn't work in WSL" is a common and wrong conclusion. Windows preinstalls an allow rule for UDP 5353, so mDNS works out of the box while the *same* multicast group on any other port receives nothing — the port was never allowed, and nothing said so.
+
+The console ports (80/443, 3000/3443, 3003, 3004) are opened at both layers automatically. TCP inputs need no flag. On Windows 10 and pre-22H2 Windows 11 there is no Hyper-V firewall layer to program, and none filtering either.
+
+### Reaching SignalK's files from Windows
+
+The stack's data lives inside the machine, but Windows Explorer can open it directly. The machine is a WSL distro; find its exact name with:
+
+```powershell
+wsl --list --quiet          # e.g. podman-signalk, or podman-machine-default
+```
+
+Then paste the path into Explorer's address bar, substituting that name:
+
+```
+\\wsl.localhost\<distro>\home\user\.signalk
+```
+
+`plugin-config-data\` holds the per-plugin JSON, and `~/.signalk-updater/` and `~/.signalk-doctor/` sit alongside it. Files copy in and out like any network share, and `net use Z: \\wsl.localhost\<distro>\home\user` maps it to a drive letter if you want it permanently.
+
+For a support bundle, prefer `signalk bug-report` — it collects logs and config inside the machine and drops the `.tar.gz` on your **Desktop**.
+
 ### Windows USB serial
 
 Podman Machine's VM doesn't expose USB devices by default. Use [usbipd-win](https://github.com/dorssel/usbipd-win) to attach a USB-serial device to the WSL2 backend the machine runs on:
