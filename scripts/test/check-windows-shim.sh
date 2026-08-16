@@ -110,6 +110,31 @@ else
     fail=1
 fi
 
+# --- 2d. both firewall layers must be programmed -----------------------------
+# Windows filters traffic to WSL at two independent layers: the ordinary host
+# firewall and the Hyper-V firewall between host and VM. Opening only the host
+# layer leaves traffic dropped SILENTLY inside the Hyper-V layer - no log, no
+# error, packets visible in Wireshark on Windows and absent in the VM. So the
+# installer must call both cmdlets, and the uninstall must remove both.
+if grep -qF 'New-NetFirewallHyperVRule' "$PS1" && grep -qF 'New-NetFirewallRule' "$PS1"; then
+    echo "  [OK]   installer programs both the host and Hyper-V firewall layers"
+else
+    echo "[MISS] only one firewall layer is programmed - traffic to the VM would"
+    echo "       be dropped silently at the other"
+    fail=1
+fi
+
+# The Hyper-V cmdlets exist only on Windows 11 22H2+. Calling a missing cmdlet
+# throws CommandNotFoundException BEFORE -ErrorAction is consulted, so the
+# uninstall path must guard on the command, not on the error action.
+if printf '%s\n' "$body" | grep -qF 'Get-Command Remove-NetFirewallHyperVRule'; then
+    echo "  [OK]   uninstall guards the Hyper-V cmdlet on older Windows"
+else
+    echo "[MISS] uninstall calls a Hyper-V firewall cmdlet unguarded - it throws"
+    echo "       CommandNotFoundException on Windows 10 / pre-22H2"
+    fail=1
+fi
+
 # --- 3. the one deliberate interpolation is still deliberate ----------------
 # $Channel and $MachineName are MEANT to interpolate at generation time (they
 # bake the install-time choice into the shim). Assert they are still spelled
