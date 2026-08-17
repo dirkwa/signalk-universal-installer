@@ -378,12 +378,15 @@ pick_signalk_http_port() {
 }
 
 sync_host="host.containers.internal"
-selected_host="$sync_host"
 resolved_http_port=""
 if resolved_http_port="$(pick_signalk_http_port "$sync_host")"; then
     sk_http_port="$resolved_http_port"
+    if ! probe_signalk_http "$sync_host" "$sk_http_port"; then
+        echo "WARN: required host alias ${sync_host}:${sk_http_port} is unavailable; leaving existing updater/doctor health URLs unchanged" >&2
+        exit 0
+    fi
     tmp="${updater_quadlet}.tmp"
-    awk -v host="$selected_host" -v p="$sk_http_port" '
+    awk -v host="$sync_host" -v p="$sk_http_port" '
         index($0, "Environment=SIGNALK_HEALTH_URL=") == 1 { $0 = "Environment=SIGNALK_HEALTH_URL=http://" host ":" p "/signalk" }
         index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" host ":" p }
         { print }
@@ -391,7 +394,7 @@ if resolved_http_port="$(pick_signalk_http_port "$sync_host")"; then
     mv "$tmp" "$updater_quadlet"
 
     tmp="${doctor_quadlet}.tmp"
-    awk -v host="$selected_host" -v hp="$sk_http_port" -v sp="$sk_https_port" '
+    awk -v host="$sync_host" -v hp="$sk_http_port" -v sp="$sk_https_port" '
         index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" host ":" hp "/signalk" }
         index($0, "Environment=SIGNALK_HTTPS_URL=") == 1 { $0 = "Environment=SIGNALK_HTTPS_URL=https://" host ":" sp "/signalk" }
         { print }
@@ -400,7 +403,7 @@ if resolved_http_port="$(pick_signalk_http_port "$sync_host")"; then
 
     systemctl --user daemon-reload
     systemctl --user restart signalk-updater-server.service signalk-doctor-server.service
-    echo "Synchronized updater/doctor health URLs to ${selected_host}:${sk_http_port}"
+    echo "Synchronized updater/doctor health URLs to ${sync_host}:${sk_http_port}"
     exit 0
 fi
 
@@ -432,7 +435,10 @@ if [[ -z "$resolved_http_port" ]]; then
     exit 0
 fi
 sk_http_port="$resolved_http_port"
-selected_host="$fallback_ip"
+if ! probe_signalk_http "$sync_host" "$sk_http_port"; then
+    echo "WARN: required host alias ${sync_host}:${sk_http_port} is unavailable; leaving existing updater/doctor health URLs unchanged" >&2
+    exit 0
+fi
 
 tmp="${updater_quadlet}.tmp"
 awk -v host="$sync_host" -v p="$sk_http_port" '
