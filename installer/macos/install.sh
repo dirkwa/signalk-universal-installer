@@ -378,28 +378,29 @@ pick_signalk_http_port() {
 }
 
 sync_host="host.containers.internal"
+selected_host="$sync_host"
 resolved_http_port=""
 if resolved_http_port="$(pick_signalk_http_port "$sync_host")"; then
     sk_http_port="$resolved_http_port"
     tmp="${updater_quadlet}.tmp"
-    awk -v p="$sk_http_port" '
-        index($0, "Environment=SIGNALK_HEALTH_URL=") == 1 { $0 = "Environment=SIGNALK_HEALTH_URL=http://host.containers.internal:" p "/signalk" }
-        index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://host.containers.internal:" p }
+    awk -v host="$selected_host" -v p="$sk_http_port" '
+        index($0, "Environment=SIGNALK_HEALTH_URL=") == 1 { $0 = "Environment=SIGNALK_HEALTH_URL=http://" host ":" p "/signalk" }
+        index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" host ":" p }
         { print }
     ' "$updater_quadlet" > "$tmp"
     mv "$tmp" "$updater_quadlet"
 
     tmp="${doctor_quadlet}.tmp"
-    awk -v hp="$sk_http_port" -v sp="$sk_https_port" '
-        index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://host.containers.internal:" hp "/signalk" }
-        index($0, "Environment=SIGNALK_HTTPS_URL=") == 1 { $0 = "Environment=SIGNALK_HTTPS_URL=https://host.containers.internal:" sp "/signalk" }
+    awk -v host="$selected_host" -v hp="$sk_http_port" -v sp="$sk_https_port" '
+        index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" host ":" hp "/signalk" }
+        index($0, "Environment=SIGNALK_HTTPS_URL=") == 1 { $0 = "Environment=SIGNALK_HTTPS_URL=https://" host ":" sp "/signalk" }
         { print }
     ' "$doctor_quadlet" > "$tmp"
     mv "$tmp" "$doctor_quadlet"
 
     systemctl --user daemon-reload
     systemctl --user restart signalk-updater-server.service signalk-doctor-server.service
-    echo "Synchronized updater/doctor health URLs to host.containers.internal:${sk_http_port}"
+    echo "Synchronized updater/doctor health URLs to ${selected_host}:${sk_http_port}"
     exit 0
 fi
 
@@ -431,6 +432,7 @@ if [[ -z "$resolved_http_port" ]]; then
     exit 0
 fi
 sk_http_port="$resolved_http_port"
+selected_host="$fallback_ip"
 
 tmp="${updater_quadlet}.tmp"
 awk -v host="$sync_host" -v p="$sk_http_port" '
