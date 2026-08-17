@@ -91,6 +91,26 @@ ok "podman $(podman --version | awk '{print $3}')"
 
 # 3. Podman Machine
 MACHINE_NAME="${PODMAN_MACHINE_NAME:-signalk}"
+MACHINE_NAME_EXPLICIT=0
+if [[ -n "${PODMAN_MACHINE_NAME:-}" ]]; then
+    MACHINE_NAME_EXPLICIT=1
+fi
+
+# Podman machine on macOS allows only one active VM at a time. If the default
+# machine name is in use and another VM is already running, reuse that active
+# VM so installs do not fail on first run.
+ACTIVE_MACHINE="$(podman machine list --format '{{.Name}} {{.Running}}' | awk '$2=="true" { print $1; exit }' | tr -d '*[:space:]')"
+if [[ -n "$ACTIVE_MACHINE" && "$ACTIVE_MACHINE" != "$MACHINE_NAME" ]]; then
+    if (( RESET_MACHINE )); then
+        info "Stopping active Podman machine '${ACTIVE_MACHINE}' so '${MACHINE_NAME}' can be reset"
+        podman machine stop "$ACTIVE_MACHINE" >/dev/null 2>&1 || die "Could not stop active Podman machine '${ACTIVE_MACHINE}'."
+    elif (( MACHINE_NAME_EXPLICIT )); then
+        die "Podman machine '${ACTIVE_MACHINE}' is already running; stop it first (podman machine stop '${ACTIVE_MACHINE}') or re-run with PODMAN_MACHINE_NAME='${ACTIVE_MACHINE}'."
+    else
+        warn "Podman machine '${ACTIVE_MACHINE}' is already running; reusing it instead of '${MACHINE_NAME}'."
+        MACHINE_NAME="$ACTIVE_MACHINE"
+    fi
+fi
 
 # Size the VM's memory to fit the host. podman rejects a machine larger than
 # total system RAM, and the stack's preflight needs >= 2048 MB inside the VM.
