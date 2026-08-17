@@ -438,15 +438,36 @@ ExecStart=%h/.local/bin/signalk resolv-watch heal'
 # fine, the directory was not ours.
 _signalk_ensure_unit_dir() {
     local unit_dir="$1"
-    [[ -w "$unit_dir" ]] && return 0
-    if [[ -d "$unit_dir" && ! -w "$unit_dir" ]]; then
+    # Usable means all three: a directory, writable (create the temp file) and
+    # searchable (mv into it, stat what is there). A dir that is -w but not -x
+    # still fails the write, so testing -w alone would call it good and land
+    # back on a misleading mktemp error.
+    if [[ -d "$unit_dir" && -w "$unit_dir" && -x "$unit_dir" ]]; then
+        return 0
+    fi
+    if [[ -e "$unit_dir" || -L "$unit_dir" ]] && [[ ! -d "$unit_dir" ]]; then
+        # A file, or a symlink pointing nowhere. mkdir -p will not fix either,
+        # and mktemp would again report the wrong step.
+        echo "[ERR] ${unit_dir} exists but is not a directory." >&2
+        echo "      Move or remove it, then re-run." >&2
+        return 1
+    fi
+    if [[ -d "$unit_dir" ]]; then
         # Present but not ours. Reclaim it if we can do so without prompting;
         # a password prompt here would block a non-interactive install.
         local owner
         owner=$(stat -c '%U:%G' "$unit_dir" 2>/dev/null || echo 'unknown')
         if sudo -n true 2>/dev/null && sudo -n chown -R "$(id -un):$(id -gn)" "$unit_dir" 2>/dev/null; then
-            echo "[i] reclaimed ${unit_dir} from ${owner} (podman machine creates it as root)"
-            return 0
+            # Re-test rather than trusting the chown: it can succeed and still
+            # leave the directory unusable if the mode denies the owner.
+            if [[ -w "$unit_dir" && -x "$unit_dir" ]]; then
+                echo "[i] reclaimed ${unit_dir} from ${owner} (podman machine creates it as root)"
+                return 0
+            fi
+            echo "[ERR] ${unit_dir} is owned by $(id -un) now but still not writable" >&2
+            echo "      (mode $(stat -c '%a' "$unit_dir" 2>/dev/null || echo '?')). Fix with:" >&2
+            echo "        chmod u+rwx ${unit_dir}" >&2
+            return 1
         fi
         echo "[ERR] ${unit_dir} is owned by ${owner}, not $(id -un), and cannot be written." >&2
         echo "      Podman machine's provisioning creates it as root. Fix with:" >&2
@@ -455,6 +476,10 @@ _signalk_ensure_unit_dir() {
     fi
     if ! mkdir -p "$unit_dir" 2>/dev/null; then
         echo "[ERR] could not create ${unit_dir}." >&2
+        return 1
+    fi
+    if [[ ! -w "$unit_dir" || ! -x "$unit_dir" ]]; then
+        echo "[ERR] created ${unit_dir} but it is not writable." >&2
         return 1
     fi
 }
