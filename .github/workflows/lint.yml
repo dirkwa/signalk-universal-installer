@@ -46,6 +46,9 @@ jobs:
       - name: journald drop-in idempotency
         run: bash scripts/test/check-journald-idempotent.sh
 
+      - name: app.slice CPU priority drop-in
+        run: bash scripts/test/check-cpu-priority-dropin.sh
+
       - name: render server quadlet
         run: bash scripts/test/check-render-quadlet.sh
 

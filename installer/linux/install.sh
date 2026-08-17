@@ -26,6 +26,8 @@
 #       container restart so the operator always has these tools when
 #       something below fails. Also guarantees the source dir for the
 #       doctor Quadlet's `~/.local/bin` bind-mount exists.
+#  11a-bis. CPU priority: write app.slice.d/50-signalk-cpu-priority.conf
+#       (no sudo; after the CLI's watchers reclaimed ~/.config/systemd/user)
 #  11b. signalk-server drift apply (restart only if Quadlet drifted)
 #  12. Start doctor + updater services (warn-and-continue on failure)
 #  13. Wait for doctor + updater health
@@ -1591,6 +1593,50 @@ fi
 if ! "$HOME/.local/bin/signalk" netgate-watch; then
     warn "could not install the signalk-netgate-watch units; a container that"
     warn "starts before the host has a route may stay unreachable until restarted."
+fi
+
+# 11a-bis. CPU priority: rank the SK stack above the plugin containers.
+#
+# cgroup v2 cpu.weight compares siblings only. The Quadlet units (signalk-
+# server, updater, doctor) live in the user manager's app.slice; the
+# containers signalk-container starts through the podman socket (sk-questdb,
+# sk-grafana, chart-import jobs, ...) land in its user.slice. Both slices sit
+# at weight 100, so a chart import saturating every core takes half the CPU
+# from signalk-server. Raising app.slice to 300 gives the SK stack 3:1 under
+# contention and changes nothing on an idle host — it is a weight, not a cap.
+# The per-container tiers inside user.slice are signalk-container's job.
+#
+# A user-manager drop-in, no sudo. daemon-reload applies the new weight to the
+# running slice (verified live: app.slice/cpu.weight reads 300 within a couple
+# of seconds); removing the file later does NOT restore 100 until re-login,
+# which is why both uninstall paths also run `set-property --runtime`. Placed
+# after the watcher installs above on purpose: on Windows the podman machine
+# creates ~/.config/systemd/user as root, and `signalk resolv-watch` is what
+# reclaims it (#260) — an earlier mkdir here would fail on every fresh
+# Windows install.
+section "CPU priority"
+CPU_PRIORITY_DIR="$HOME/.config/systemd/user/app.slice.d"
+CPU_PRIORITY_CONF="$CPU_PRIORITY_DIR/50-signalk-cpu-priority.conf"
+CPU_PRIORITY_DESIRED='# Installed by signalk-universal-installer.
+# signalk-server and the engine consoles run in this slice; the containers
+# signalk-container manages run in user.slice next to it. Weight ranks the two
+# under CPU contention only (3:1) and never caps either.
+[Slice]
+CPUWeight=300'
+# Keyed on the presence of a CPUWeight= line, not the exact value, so an
+# operator who tuned the weight keeps it across re-runs (same rule as the
+# podman.service TasksMax drop-in above).
+if [[ -f "$CPU_PRIORITY_CONF" ]] && grep -Eq '^[[:space:]]*CPUWeight[[:space:]]*=' "$CPU_PRIORITY_CONF"; then
+    ok "app.slice CPUWeight already set ($CPU_PRIORITY_CONF: $(grep -E '^[[:space:]]*CPUWeight[[:space:]]*=' "$CPU_PRIORITY_CONF" | head -1))"
+elif mkdir -p "$CPU_PRIORITY_DIR" 2>/dev/null \
+    && printf '%s\n' "$CPU_PRIORITY_DESIRED" > "$CPU_PRIORITY_CONF"; then
+    if systemctl --user daemon-reload; then
+        ok "app.slice CPUWeight=300 applied (SK stack outranks plugin containers 3:1 under contention)"
+    else
+        warn "Wrote $CPU_PRIORITY_CONF but daemon-reload failed; CPUWeight=300 takes effect on the next login"
+    fi
+else
+    warn "Could not write $CPU_PRIORITY_CONF; SK stack shares CPU 1:1 with plugin containers under contention"
 fi
 
 # 11b. signalk-server drift apply
