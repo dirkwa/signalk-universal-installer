@@ -988,6 +988,31 @@ ok "linger enabled"
 # socket may not exist until the next login otherwise. Defensive nudge:
 systemctl --user daemon-reload || true
 
+# Reclaim ~/.config/systemd/user if something else created it as root.
+#
+# Podman machine's WSL provisioning does exactly that: it writes
+# podman-mnt-bindings.service and default.target.wants there while
+# provisioning the VM, leaving the directory root:root 0755 inside an
+# unprivileged home. Everything this installer later writes underneath it
+# then fails - the podman TasksMax drop-in a few lines below, and the
+# resolv-watch / netgate-watch units near the end - each with a different
+# and misleading message about the file it happened to be writing.
+#
+# Do it here, once, before the first write: this is the earliest point where
+# sudo is known to work (the linger step above just used it) and it is
+# ahead of every consumer.
+SK_USER_UNIT_DIR="$HOME/.config/systemd/user"
+if [[ -d "$SK_USER_UNIT_DIR" && ! -w "$SK_USER_UNIT_DIR" ]]; then
+    sk_owner=$(stat -c '%U:%G' "$SK_USER_UNIT_DIR" 2>/dev/null || echo 'unknown')
+    if $SUDO chown -R "$(id -un):$(id -gn)" "$SK_USER_UNIT_DIR" 2>/dev/null \
+        && [[ -w "$SK_USER_UNIT_DIR" && -x "$SK_USER_UNIT_DIR" ]]; then
+        ok "reclaimed $SK_USER_UNIT_DIR from ${sk_owner} (created by the VM provisioner)"
+    else
+        warn "$SK_USER_UNIT_DIR is owned by ${sk_owner}, not $(id -un); unit installs below will fail."
+        warn "Fix with: sudo chown -R $(id -un):$(id -gn) $SK_USER_UNIT_DIR"
+    fi
+fi
+
 # The rootless podman socket at $XDG_RUNTIME_DIR/podman/podman.sock is
 # bind-mounted into all three engine containers (updater, doctor, and
 # signalk-server itself — the signalk-container plugin reaches the host
