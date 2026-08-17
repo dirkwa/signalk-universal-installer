@@ -1719,6 +1719,17 @@ cmd_uninstall() {
     rm -f "$HOME/.config/systemd/user/podman.service.d/override.conf" 2>/dev/null || true
     rmdir "$HOME/.config/systemd/user/podman.service.d" 2>/dev/null || true
 
+    # The app.slice CPUWeight drop-in the installer wrote. Deleting the file
+    # alone leaves the running slice at 300 until re-login (systemd does not
+    # write the default back), so also reset the live value.
+    local cpu_priority_conf="$HOME/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf"
+    if [[ -f "$cpu_priority_conf" ]]; then
+        echo "Removing app.slice CPU priority drop-in..."
+        rm -f "$cpu_priority_conf"
+        rmdir "$(dirname "$cpu_priority_conf")" 2>/dev/null || true
+        systemctl --user set-property --runtime app.slice CPUWeight=100 2>/dev/null || true
+    fi
+
     systemctl --user daemon-reload || true
 
     # The "Preserved / To purge" guidance below lists paths INSIDE this host

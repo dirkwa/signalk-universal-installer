@@ -3,10 +3,13 @@
 # against a sandbox HOME with systemctl/podman stubbed:
 #   1. The step writes ~/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf
 #      as a [Slice] drop-in with CPUWeight=300 and runs daemon-reload once.
-#   2. A second run is idempotent: no rewrite, no second daemon-reload.
-#   3. uninstall.sh removes the drop-in and resets the live weight
-#      (`set-property --runtime app.slice CPUWeight=100`) — deleting the file
-#      alone leaves the running slice at 300 until re-login.
+#   2. A second run is idempotent: no rewrite, no second daemon-reload — and
+#      an operator-tuned CPUWeight= survives a re-run.
+#   3. Both uninstall paths — scripts/uninstall.sh and the CLI's
+#      `signalk uninstall` (cmd_uninstall in signalk.tmpl) — remove the
+#      drop-in and reset the live weight (`set-property --runtime app.slice
+#      CPUWeight=100`); deleting the file alone leaves the running slice at
+#      300 until re-login.
 # The kernel-side effect (cpu.weight reads 300 after daemon-reload) needs a
 # live user session and is verified manually.
 # Run from the repo root.
@@ -15,7 +18,8 @@ set -euo pipefail
 
 INSTALL_SH=${INSTALL_SH:-installer/linux/install.sh}
 UNINSTALL_SH=${UNINSTALL_SH:-scripts/uninstall.sh}
-for f in "$INSTALL_SH" "$UNINSTALL_SH"; do
+CLI_TMPL=${CLI_TMPL:-installer/linux/signalk.tmpl}
+for f in "$INSTALL_SH" "$UNINSTALL_SH" "$CLI_TMPL"; do
     if [[ ! -f "$f" ]]; then
         echo "[ERR] $f not found (run from repo root)" >&2
         exit 2
@@ -87,15 +91,31 @@ else
 fi
 if [[ "$out2" == *"already set"* ]]; then ok "second run reports already set"; else miss "second run output: $out2"; fi
 
-# 3. uninstall.sh removes the drop-in and resets the live weight.
-: > "$STUB_LOG"
-HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash "$UNINSTALL_SH" >/dev/null
-if [[ ! -e "$CONF" ]]; then ok "uninstall removes the drop-in"; else miss "uninstall left $CONF"; fi
-if grep -q -- 'set-property --runtime app.slice CPUWeight=100' "$STUB_LOG"; then
-    ok "uninstall resets the live app.slice weight"
+# 2b. An operator-tuned weight is kept.
+sed -i 's/^CPUWeight=300$/CPUWeight=500/' "$CONF"
+run_step >/dev/null
+if grep -qx 'CPUWeight=500' "$CONF"; then
+    ok "re-run keeps an operator-tuned CPUWeight=500"
 else
-    miss "uninstall did not reset the live weight, log: $(cat "$STUB_LOG")"
+    miss "re-run overwrote the operator's weight: $(grep '^CPUWeight=' "$CONF")"
 fi
+
+# 3. Both uninstall paths remove the drop-in and reset the live weight.
+check_uninstall() {
+    local label=$1; shift
+    : > "$STUB_LOG"
+    run_step >/dev/null
+    [[ -f "$CONF" ]] || { miss "$label: precondition — drop-in not written"; return; }
+    HOME="$tmp/home" PATH="$tmp/bin:$PATH" "$@" >/dev/null 2>&1 || true
+    if [[ ! -e "$CONF" ]]; then ok "$label removes the drop-in"; else miss "$label left $CONF"; fi
+    if grep -q -- 'set-property --runtime app.slice CPUWeight=100' "$STUB_LOG"; then
+        ok "$label resets the live app.slice weight"
+    else
+        miss "$label did not reset the live weight, log: $(cat "$STUB_LOG")"
+    fi
+}
+check_uninstall "scripts/uninstall.sh" bash "$UNINSTALL_SH"
+check_uninstall "signalk uninstall" bash "$CLI_TMPL" uninstall
 
 echo
 if (( fail )); then echo "[FAIL] CPU priority drop-in checks failed"; exit 1; fi
