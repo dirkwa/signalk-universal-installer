@@ -377,8 +377,9 @@ pick_signalk_http_port() {
     return 1
 }
 
+sync_host="host.containers.internal"
 resolved_http_port=""
-if resolved_http_port="$(pick_signalk_http_port host.containers.internal)"; then
+if resolved_http_port="$(pick_signalk_http_port "$sync_host")"; then
     sk_http_port="$resolved_http_port"
     tmp="${updater_quadlet}.tmp"
     awk -v p="$sk_http_port" '
@@ -416,8 +417,14 @@ fi
 
 resolved_http_port="$(pick_signalk_http_port "$fallback_ip" || true)"
 if [[ -z "$resolved_http_port" ]]; then
-    if ! probe_host_port "$fallback_ip" "$sk_http_port"; then
-        echo "WARN: derived fallback host IP ${fallback_ip}:${sk_http_port} is not reachable; skipping health URL fix" >&2
+    fallback_reachable=0
+    for candidate_port in "$sk_http_port" "3000" "80"; do
+        if probe_host_port "$fallback_ip" "$candidate_port"; then
+            fallback_reachable=1
+        fi
+    done
+    if (( fallback_reachable == 0 )); then
+        echo "WARN: derived fallback host IP ${fallback_ip} is not reachable on ports ${sk_http_port}, 3000, or 80; skipping health URL fix" >&2
     else
         echo "WARN: derived fallback host IP ${fallback_ip} is reachable, but no SignalK endpoint responded on ports ${sk_http_port}, 3000, or 80" >&2
     fi
@@ -426,24 +433,24 @@ fi
 sk_http_port="$resolved_http_port"
 
 tmp="${updater_quadlet}.tmp"
-awk -v ip="$fallback_ip" -v p="$sk_http_port" '
-    index($0, "Environment=SIGNALK_HEALTH_URL=") == 1 { $0 = "Environment=SIGNALK_HEALTH_URL=http://" ip ":" p "/signalk" }
-    index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" ip ":" p }
+awk -v host="$sync_host" -v p="$sk_http_port" '
+    index($0, "Environment=SIGNALK_HEALTH_URL=") == 1 { $0 = "Environment=SIGNALK_HEALTH_URL=http://" host ":" p "/signalk" }
+    index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" host ":" p }
     { print }
 ' "$updater_quadlet" > "$tmp"
 mv "$tmp" "$updater_quadlet"
 
 tmp="${doctor_quadlet}.tmp"
-awk -v ip="$fallback_ip" -v hp="$sk_http_port" -v sp="$sk_https_port" '
-    index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" ip ":" hp "/signalk" }
-    index($0, "Environment=SIGNALK_HTTPS_URL=") == 1 { $0 = "Environment=SIGNALK_HTTPS_URL=https://" ip ":" sp "/signalk" }
+awk -v host="$sync_host" -v hp="$sk_http_port" -v sp="$sk_https_port" '
+    index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://" host ":" hp "/signalk" }
+    index($0, "Environment=SIGNALK_HTTPS_URL=") == 1 { $0 = "Environment=SIGNALK_HTTPS_URL=https://" host ":" sp "/signalk" }
     { print }
 ' "$doctor_quadlet" > "$tmp"
 mv "$tmp" "$doctor_quadlet"
 
 systemctl --user daemon-reload
 systemctl --user restart signalk-updater-server.service signalk-doctor-server.service
-echo "Rewrote updater/doctor health URLs to fallback host IP ${fallback_ip}"
+echo "Synchronized updater/doctor health URLs to ${sync_host}:${sk_http_port} (probed via fallback ${fallback_ip})"
 HEALTH_URL_FIX_SCRIPT
 
 # 5. Forward the ports out of the machine
