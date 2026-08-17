@@ -88,6 +88,27 @@ if [[ "$unitdir_ok" -eq 1 ]]; then
     ok "both watchers create the unit dir through the ownership-aware helper"
 fi
 
+# install.sh must reclaim the directory ITSELF, before its own first write.
+# The CLI helper cannot cover that: the podman TasksMax drop-in is written
+# while install.sh is still running, long before ~/.local/bin/signalk exists.
+# A root-owned dir there produced "Could not write .../resource-limits.conf"
+# on a real Windows install - the same cause, a different misleading message.
+INSTALL_SH=${INSTALL_SH:-installer/linux/install.sh}
+if [[ ! -f "$INSTALL_SH" ]]; then
+    miss "$INSTALL_SH not found"
+elif ! grep -q 'SK_USER_UNIT_DIR' "$INSTALL_SH"; then
+    miss "install.sh never reclaims ~/.config/systemd/user; its own writes fail on a root-owned dir"
+else
+    # The reclaim has to come BEFORE the first consumer, or it fixes nothing.
+    reclaim_line=$(grep -n 'SK_USER_UNIT_DIR=' "$INSTALL_SH" | head -1 | cut -d: -f1)
+    limits_line=$(grep -n 'PODMAN_LIMITS_DIR=' "$INSTALL_SH" | head -1 | cut -d: -f1)
+    if [[ -n "$reclaim_line" && -n "$limits_line" && "$reclaim_line" -lt "$limits_line" ]]; then
+        ok "install.sh reclaims the unit dir before its first write to it"
+    else
+        miss "install.sh reclaims the unit dir too late (line ${reclaim_line:-?} vs ${limits_line:-?})"
+    fi
+fi
+
 unit_dir="$HOME/.config/systemd/user"
 path_unit="$unit_dir/signalk-resolv-watch.path"
 svc_unit="$unit_dir/signalk-resolv-watch.service"
