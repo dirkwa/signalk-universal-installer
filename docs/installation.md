@@ -62,6 +62,12 @@ By default the installer puts signalk-server on the standard web ports — **HTT
 
 Making a privileged port (< 1024) bind from a rootless, non-root container is **not** a Quadlet capability question. `Network=host` means the container shares the host's network namespace, and the `node` process is non-root — so `AddCapability=CAP_NET_BIND_SERVICE` lands in the bounding set but never becomes *effective* for the process, and a network sysctl can't be set from inside a host-netns container. The only lever that works is the **host's** `net.ipv4.ip_unprivileged_port_start`. When you accept standard ports, the installer lowers it to `80` via a persistent drop-in at `/etc/sysctl.d/80-signalk-unprivileged-ports.conf` (requires sudo). This is a **host-wide** change: any unprivileged process on the box may then bind ports 80–1023.
 
+On Windows the "host" is the Podman machine VM, and a fresh one boots already reporting `80` with nothing under `/etc/sysctl.d` holding it there. The installer writes the drop-in regardless, because that transient value does not survive `wsl --shutdown`: without the file the floor returns to `1024` on the next start and signalk-server crash-loops on `listen EACCES: permission denied 0.0.0.0:80` while its container still reports `Up` — a stack that looks healthy and serves nothing on `:80`. If you hit that on an install from before this was fixed, `signalk update` rewrites it, or set it by hand:
+
+```bash
+podman machine ssh signalk -- "printf 'net.ipv4.ip_unprivileged_port_start=80\n' | sudo tee /etc/sysctl.d/80-signalk-unprivileged-ports.conf && printf '80\n' | sudo tee /proc/sys/net/ipv4/ip_unprivileged_port_start"
+```
+
 Mechanics:
 
 - **HTTP** is set with `Environment=PORT=80` in the server Quadlet (signalk-server reads `PORT` ahead of `settings.json`).

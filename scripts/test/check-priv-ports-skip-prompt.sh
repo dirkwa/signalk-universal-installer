@@ -74,6 +74,29 @@ assert "explicit 0 + drop-in → opt-out wins" "$(decide 0 yes)" "prompt-or-set:
 # Explicit opt-in is honoured regardless of drop-in.
 assert "explicit 1 + no drop-in → PRIV_PORTS=1" "$(decide 1 no)" "prompt-or-set:1"
 
+# The sysctl write must be gated on the DROP-IN, not on the running value.
+# A podman machine boots reporting ip_unprivileged_port_start=80 with no file
+# under /etc/sysctl.d or /usr/lib/sysctl.d holding it there, so a check of the
+# runtime value alone reads "already configured", skips the write, and the next
+# `wsl --shutdown` resets the floor to 1024 - after which signalk-server
+# crash-loops on `listen EACCES: permission denied 0.0.0.0:80` while its
+# container still reports Up. Observed on a real Windows install.
+INSTALL_SH="${INSTALL_SH:-installer/linux/install.sh}"
+# shellcheck disable=SC2016  # the grep patterns below are literal shell source
+if [[ ! -f "$INSTALL_SH" ]]; then
+    echo "  [MISS] $INSTALL_SH not found"
+    fail=1
+elif grep -qE '^[[:space:]]*if \(\( current_floor <= 80 \)\); then' "$INSTALL_SH"; then
+    echo "  [MISS] sysctl write gated on the runtime value alone — a transient 80"
+    echo "         skips the drop-in and the floor resets on the next boot"
+    fail=1
+elif grep -qE '^[[:space:]]*if \[\[ -f "\$PRIV_SYSCTL_FILE" \]\] && \(\( current_floor <= 80 \)\); then' "$INSTALL_SH"; then
+    echo "  [OK]   sysctl write requires the drop-in, not just a runtime 80"
+else
+    echo "  [MISS] could not find the privileged-port persistence guard in $INSTALL_SH"
+    fail=1
+fi
+
 if (( fail )); then
     echo
     echo "[ERR] privileged-port prompt-skip logic is wrong — see entries above." >&2

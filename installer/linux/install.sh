@@ -716,8 +716,20 @@ if [[ "$PRIV_PORTS" = "1" ]]; then
     # PRIV_SYSCTL_FILE is set near the prompt above (used there to detect a
     # prior "yes" and skip re-prompting).
     current_floor=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)
-    if (( current_floor <= 80 )); then
-        ok "${PRIV_SYSCTL_KEY} already ${current_floor} (≤ 80)"
+    # Gate on the DROP-IN, not on the running value. A runtime 80 proves only
+    # that something lowered it in this boot, not that it will come back after
+    # a reboot - and on a podman machine something does exactly that: a fresh
+    # WSL VM reports 80 with no file anywhere under /etc/sysctl.d or
+    # /usr/lib/sysctl.d to hold it. The old `current_floor <= 80` check read
+    # that as "already configured", skipped the write, and the next
+    # `wsl --shutdown` reset the floor to 1024. signalk-server then crash-looped
+    # on `listen EACCES: permission denied 0.0.0.0:80` while the container
+    # itself stayed "Up" - the stack looked healthy and served nothing on :80.
+    #
+    # Writing the drop-in when the value is already 80 costs one idempotent
+    # file write; not writing it costs a dead server after the next restart.
+    if [[ -f "$PRIV_SYSCTL_FILE" ]] && (( current_floor <= 80 )); then
+        ok "${PRIV_SYSCTL_KEY} already ${current_floor} (≤ 80, persisted in ${PRIV_SYSCTL_FILE})"
     elif [[ "$SUDO" = "MISSING" ]]; then
         warn "Cannot lower ${PRIV_SYSCTL_KEY} without sudo; 80/443 will fail to bind."
         warn "Set it manually as root:  echo '${PRIV_SYSCTL_KEY}=80' > ${PRIV_SYSCTL_FILE} && echo 80 > /proc/sys/net/ipv4/ip_unprivileged_port_start"
