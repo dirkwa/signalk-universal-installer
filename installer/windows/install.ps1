@@ -1629,10 +1629,12 @@ host's LAN IP, not localhost):
   Updater Console  : http://${accessHost}:3003
   Doctor Console   : http://${accessHost}:3004
 
-The FIRST page load can take ~20 seconds and then feel instant afterwards.
-That is Windows trying IPv6 (::1) before falling back to IPv4, not the server
-being down - it is worst over 'localhost', which is why the LAN IP above is
-the address to use. If a browser looks stuck, give it half a minute once.
+Use the address above, not 'localhost'. Windows resolves 'localhost' to IPv6
+(::1) first and the stack listens on IPv4, so each new connection stalls ~21s
+on the IPv6 timeout before falling back - measured here as 21.1s over
+'localhost' against 0.01s over 127.0.0.1, same server, same moment. It does
+answer either way, so a browser that looks stuck is usually mid-timeout
+rather than pointed at a dead server.
 
 Manage it from a NEW terminal with the 'signalk' command, e.g.:
   signalk health
