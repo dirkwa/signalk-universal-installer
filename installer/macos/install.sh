@@ -472,7 +472,7 @@ info "The main SignalK server runs with Network=host inside the VM, so we also f
 _VM_SSH_PORT=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.Port}}' 2>/dev/null || true)
 _VM_SSH_USER=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.RemoteUsername}}' 2>/dev/null || true)
 _VM_SSH_KEY=$(podman machine inspect "$MACHINE_NAME" --format '{{.SSHConfig.IdentityPath}}' 2>/dev/null || true)
-_VM_SERVER_PORT=$(podman machine ssh "$MACHINE_NAME" "grep -E '^Environment=PORT=' ~/.config/containers/systemd/signalk-server.container 2>/dev/null | awk -F= '{print \$NF}' || echo 80" 2>/dev/null || true)
+_VM_SERVER_PORT=$(podman machine ssh "$MACHINE_NAME" "grep -E '^Environment=PORT=' ~/.config/containers/systemd/signalk-server.container 2>/dev/null | awk -F= '{print \$NF}' || echo 80" </dev/null 2>/dev/null || true)
 _VM_SERVER_PORT=${_VM_SERVER_PORT:-80}
 _LOCAL_UI_PORT=""
 _TUNNEL_READY=0
@@ -508,6 +508,7 @@ if [[ -n "$_VM_SSH_PORT" && -n "$_VM_SSH_USER" && -n "$_VM_SSH_KEY" ]]; then
     if [[ -n "$_LOCAL_UI_PORT" ]]; then
         if ! pgrep -f "ssh .*${_LOCAL_UI_PORT}:127.0.0.1:${_VM_SERVER_PORT}.*-p ${_VM_SSH_PORT}.*${_VM_SSH_USER}@127.0.0.1" >/dev/null 2>&1; then
             if ! ssh -f -N \
+                -n \
                 -L "${_LOCAL_UI_PORT}:127.0.0.1:${_VM_SERVER_PORT}" \
                 -i "$_VM_SSH_KEY" \
                 -p "$_VM_SSH_PORT" \
