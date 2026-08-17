@@ -1623,31 +1623,33 @@ Add-FirewallRules -Ports $SignalkPorts -UdpPorts $NmeaUdpPorts
 Section "Auto-start on reboot"
 Register-MachineAutostart -Machine $MachineName -CmdDir $skCmdDir
 
-# 6. Done. Point the operator at the host's LAN IP: it is the address other
-# devices use, and it avoids the IPv6 stall that makes `localhost` look dead
-# (Windows resolves localhost to ::1 first, the stack listens on IPv4, so every
-# new connection waits out the timeout before falling back - measured 21.1s
-# over localhost against 0.01s over 127.0.0.1). localhost DOES reach the stack;
-# it is just the slowest spelling of the same address.
+# 6. Done. Two different addresses, because the Windows host and the rest of
+# the LAN do not share a working one:
+#   - other devices use the host's LAN IP (verified: a phone loads it on :80);
+#   - the Windows box itself must use 127.0.0.1. Its own mirrored LAN address
+#     is refused at the TCP layer from the host, and `localhost` resolves to
+#     ::1 first while the stack listens on IPv4, stalling ~21s per connection
+#     (measured 21.1s vs 0.01s over 127.0.0.1).
 $lanIp = Get-HostLanIp
 $accessHost = if ($lanIp) { $lanIp } else { '<this-pc-ip>' }
 @"
 
 OK - SignalK is up inside Podman Machine '$MachineName'.
 
-Open from THIS PC or any device on the network (mirrored networking - the
-host's LAN IP is the fastest address from anywhere):
+From ANY OTHER DEVICE on the network (phone, tablet, laptop):
 
   SignalK admin UI : http://$accessHost        (or :3000 if you declined standard ports)
   Updater Console  : http://${accessHost}:3003
   Doctor Console   : http://${accessHost}:3004
 
-Use the address above, not 'localhost'. Windows resolves 'localhost' to IPv6
-(::1) first and the stack listens on IPv4, so each new connection stalls ~21s
-on the IPv6 timeout before falling back - measured here as 21.1s over
-'localhost' against 0.01s over 127.0.0.1, same server, same moment. It does
-answer either way, so a browser that looks stuck is usually mid-timeout
-rather than pointed at a dead server.
+From THIS PC use 127.0.0.1 instead - http://127.0.0.1, :3003, :3004.
+
+Under mirrored networking the machine shares this PC's LAN address, and the
+host cannot reach itself through it: the addresses above answer from every
+other device but are refused here. 'localhost' does answer, but Windows tries
+IPv6 (::1) first while the stack listens on IPv4, so each new connection
+stalls ~21s before falling back (measured 21.1s, against 0.01s over
+127.0.0.1). 127.0.0.1 has neither problem.
 
 Manage it from a NEW terminal with the 'signalk' command, e.g.:
   signalk health
