@@ -596,18 +596,45 @@ function Add-FirewallRules {
     }
 }
 
-# The Windows host's primary LAN IPv4 (what to point a browser at, since under
-# mirrored networking the VM shares this address). Skips loopback and APIPA
-# (link-local) only; picks the lowest-metric interface, which is the active
-# default route - that's the real LAN NIC. We deliberately do NOT exclude
-# 172.x: 172.16.0.0/12 is a valid private LAN range, and under mirrored mode the
-# WSL NAT interface (also 172.x) isn't present on the host anyway. Returns $null
-# if none found.
+# The Windows host's LAN IPv4 - the address OTHER devices use to reach the
+# stack, since under mirrored networking the VM shares it.
+#
+# Ask the routing table which source address Windows itself would use to reach
+# the internet. Sorting Get-NetIPAddress by InterfaceMetric does not work: on a
+# real box that property comes back EMPTY for every address (observed on
+# Windows 11 26200), so the sort is a no-op and the first row wins by accident.
+# On a host with two addresses on one adapter that printed 172.31.3.54 - a
+# second, unroutable address on the same NIC - while the reachable LAN address
+# 192.168.0.54 sorted last. The installer then told the operator to open an
+# address no device on the network can reach.
+#
+# Find-NetRoute answers the question directly and needs no metric heuristics.
+# Fall back to the old scan only if it is unavailable, and prefer an address
+# whose adapter carries the default route.
+#
+# We deliberately do NOT exclude 172.x by range: 172.16.0.0/12 is a valid
+# private LAN, and picking by route makes range guessing unnecessary.
 function Get-HostLanIp {
+    try {
+        # 8.8.8.8 is a routing probe, not a connection - nothing is sent.
+        $src = Find-NetRoute -RemoteIPAddress 8.8.8.8 -ErrorAction Stop |
+            Select-Object -First 1 -ExpandProperty IPAddress
+        if ($src -and $src -notlike '127.*' -and $src -notlike '169.254.*') { return $src }
+    } catch { }
+    try {
+        # Fallback: the adapters carrying a default route, best route first.
+        $ifIdx = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
+            Sort-Object RouteMetric | Select-Object -ExpandProperty ifIndex -Unique
+        foreach ($i in $ifIdx) {
+            $ip = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $i -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+                Select-Object -First 1 -ExpandProperty IPAddress
+            if ($ip) { return $ip }
+        }
+    } catch { }
     try {
         $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
             Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
-            Sort-Object -Property @{Expression={$_.InterfaceMetric}} |
             Select-Object -First 1 -ExpandProperty IPAddress
         return $ip
     } catch { return $null }
