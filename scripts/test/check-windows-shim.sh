@@ -277,6 +277,26 @@ else
     fi
 fi
 
+# --- 2g. the LAN IP must come from the routing table -------------------------
+# Get-HostLanIp printed 172.31.3.54 on a real install - a second, unroutable
+# address on the same adapter - while the reachable LAN address sorted last, so
+# the installer advertised an address no device could open. The cause was
+# sorting Get-NetIPAddress by InterfaceMetric, which comes back EMPTY on a real
+# box (Windows 11 26200), making the sort a no-op. Ask the route table instead.
+if grep -q 'Find-NetRoute' "$PS1" && grep -q "Get-NetRoute -DestinationPrefix '0.0.0.0/0'" "$PS1"; then
+    echo "  [OK]   the LAN IP is resolved from the routing table"
+else
+    echo "[MISS] Get-HostLanIp does not consult the routing table; an unroutable"
+    echo "       address on the same adapter can win and be advertised to users"
+    fail=1
+fi
+# shellcheck disable=SC2016  # literal PowerShell source text
+if grep -qE 'Sort-Object -Property @\{Expression=\{\$_\.InterfaceMetric\}\}' "$PS1"; then
+    echo "[MISS] still sorting by InterfaceMetric - empty on real hosts, so the"
+    echo "       sort does nothing and the first address wins by accident"
+    fail=1
+fi
+
 # --- 3. the one deliberate interpolation is still deliberate ----------------
 # $Channel and $MachineName are MEANT to interpolate at generation time (they
 # bake the install-time choice into the shim). Assert they are still spelled
