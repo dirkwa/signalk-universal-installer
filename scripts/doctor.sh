@@ -135,6 +135,33 @@ root_storage() {
 }
 root_storage
 
+# app.slice (signalk-server + engine consoles) vs user.slice (containers
+# signalk-container manages) — the installer sets app.slice to CPUWeight=300
+# so a chart import cannot take half the CPU from signalk-server. Reads the
+# live cgroup value, not the drop-in, because a drop-in only takes effect
+# after daemon-reload and removal only after re-login.
+echo
+echo "=== CPU priority ==="
+cpu_priority() {
+    local slice weight conf
+    slice="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/app.slice"
+    conf="${HOME}/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf"
+    weight=$(cat "$slice/cpu.weight" 2>/dev/null || true)
+    if [[ -z "$weight" ]]; then
+        echo "  [WARN] app.slice cpu.weight unreadable — cgroup v2 cpu controller not"
+        echo "         delegated to the user slice; CPU priorities have no effect"
+    elif [[ "$weight" -gt 100 ]]; then
+        echo "  [OK]   app.slice cpu.weight=$weight (SK stack outranks plugin containers under contention)"
+    elif [[ -f "$conf" ]]; then
+        echo "  [WARN] app.slice cpu.weight=$weight although $conf exists"
+        echo "         Apply:  systemctl --user daemon-reload"
+    else
+        echo "  [WARN] app.slice cpu.weight=$weight — SK stack shares CPU 1:1 with plugin"
+        echo "         containers under contention; re-run the installer to set the drop-in"
+    fi
+}
+cpu_priority
+
 echo
 echo "For deeper diagnostics:"
 echo "  curl -fsS $DOCTOR_URL/api/probes | jq ."
