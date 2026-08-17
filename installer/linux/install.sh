@@ -728,7 +728,12 @@ if [[ "$PRIV_PORTS" = "1" ]]; then
     #
     # Writing the drop-in when the value is already 80 costs one idempotent
     # file write; not writing it costs a dead server after the next restart.
-    if [[ -f "$PRIV_SYSCTL_FILE" ]] && (( current_floor <= 80 )); then
+    # Check the drop-in's CONTENT, not merely that a file is there: an empty or
+    # hand-edited file satisfies -f while persisting nothing, which reproduces
+    # exactly the failure this guard exists to prevent. Match the assignment
+    # sysctl itself would honour - optional spaces, no leading comment.
+    if grep -qE "^[[:space:]]*${PRIV_SYSCTL_KEY//./\\.}[[:space:]]*=[[:space:]]*(80|[0-9]|[1-7][0-9])[[:space:]]*$" \
+        "$PRIV_SYSCTL_FILE" 2>/dev/null && (( current_floor <= 80 )); then
         ok "${PRIV_SYSCTL_KEY} already ${current_floor} (≤ 80, persisted in ${PRIV_SYSCTL_FILE})"
     elif [[ "$SUDO" = "MISSING" ]]; then
         warn "Cannot lower ${PRIV_SYSCTL_KEY} without sudo; 80/443 will fail to bind."
