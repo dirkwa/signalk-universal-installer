@@ -55,6 +55,15 @@ jobs:
       - name: hardware.json operator-toggle merge
         run: bash scripts/test/check-hardware-merge.sh
 
+      - name: HALPI2 board detection ladder
+        run: bash scripts/test/check-halpi2-detect.sh
+
+      - name: HALPI2 apply (config.txt block, packages, network files)
+        run: bash scripts/test/check-halpi2-config.sh
+
+      - name: HALPI2 Signal K connections
+        run: bash scripts/test/check-halpi2-connections.sh
+
       - name: timesync restart gating
         run: bash scripts/test/check-timesync-restart.sh
 

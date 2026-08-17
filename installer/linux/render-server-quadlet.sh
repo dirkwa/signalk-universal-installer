@@ -35,6 +35,14 @@ AUDIO_DIR="${AUDIO_DIR:-/dev/snd}"
 # so the render test can seed present/absent device nodes deterministically
 # without touching the host's /dev.
 SERIAL_DIR="${SERIAL_DIR:-/dev/serial/by-id}"
+# Host directory of the halpid socket (HALPI2 power/watchdog daemon,
+# docs/halpi2.md). Mounted for the `signalk-halpi` plugin only when the
+# board is a HALPI2 and the socket exists at render time; overridable for
+# the render tests, same as AUDIO_DIR.
+HALPID_RUN_DIR="${HALPID_RUN_DIR:-/run/halpid}"
+# Prefix that marks an `onboardSerial` AddDevice= line for the existence
+# guard (fixed UARTs are /dev/ttyAMA*, /dev/ttyS*); overridable for tests.
+TTY_PREFIX="${TTY_PREFIX:-/dev/tty}"
 
 if [[ -z "$TEMPLATE" ]]; then
     # Default: look next to this script (../../quadlets/...)
@@ -64,7 +72,9 @@ fi
 # that one input source is just absent) rather than bricking.
 #
 # Scope is deliberately SERIAL ONLY — matched by the /dev/serial/by-id/
-# prefix. CAN's AddDevice=/dev/<iface> is left untouched: socketcan is a
+# prefix, plus the fixed on-SoC UARTs the `onboardSerial` class emits as
+# AddDevice=/dev/tty* (HALPI2 RS-485 on /dev/ttyAMA4). CAN's
+# AddDevice=/dev/<iface> is left untouched: socketcan is a
 # network device, not a /dev node, so an existence test on /dev/<iface>
 # would strip every legitimate CAN line. (signalk-server runs Network=host,
 # so the CAN interface is reachable regardless; guarding it correctly is a
@@ -74,7 +84,7 @@ guard_adddevice() {
     local line dev
     while IFS= read -r line; do
         case "$line" in
-            "AddDevice=${SERIAL_DIR}/"*)
+            "AddDevice=${SERIAL_DIR}/"*|"AddDevice=${TTY_PREFIX}"*)
                 # Strip the "AddDevice=" prefix, then any ":perms" suffix
                 # (e.g. AddDevice=/dev/foo:rwm) to get the host path to stat.
                 dev=${line#AddDevice=}
@@ -120,6 +130,7 @@ hardware_block() {
           [
             ((.serial // [])[] | select(.enabled == true)
                 | ("AddDevice=" + .byId + ":" + .byId), ("AddDevice=" + .byId)),
+            ((.onboardSerial // [])[] | select(.enabled == true) | "AddDevice=" + .device),
             ((.can // [])[] | select(.enabled == true) | "AddDevice=/dev/" + .interface),
             ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=signalk-dbus-socket:/run/dbus:rw"),
             ((.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem")
@@ -169,6 +180,20 @@ hardware_block() {
     # container only queries; it never writes the host's avahi socket.
     if [ -S /run/avahi-daemon/socket ]; then
         echo "Volume=/run/avahi-daemon/socket:/run/avahi-daemon/socket:ro"
+    fi
+
+    # halpid socket (HALPI2 only). Lets the `signalk-halpi` plugin poll
+    # /run/halpid/halpid.sock from inside the container; the socket is
+    # root:halpid 0660 and the container reaches it through the host user's
+    # `halpid` membership (GroupAdd=keep-groups), so this is a plain
+    # directory bind. ro: connect() on a socket does not need a writable
+    # mount (same as the usual docker.sock:ro pattern), and the container
+    # must not be able to create files in /run/halpid. Existence-guarded on
+    # the socket like avahi above.
+    if command -v jq >/dev/null 2>&1 \
+        && [ "$(jq -r '.board.model // empty' "$HW_FILE")" = "halpi2" ] \
+        && [ -S "${HALPID_RUN_DIR}/halpid.sock" ]; then
+        echo "Volume=${HALPID_RUN_DIR}:/run/halpid:ro"
     fi
 }
 

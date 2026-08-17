@@ -7,6 +7,7 @@
 #   signalk recover [...]  delegate to ~/.local/bin/signalk-recovery
 #   signalk socketcan [..] Pi CAN-HAT detection + setup recipe
 #   signalk bluetooth [..] BLE / D-Bus passthrough (status | enable | disable)
+#   signalk halpi2 [....]  Hat Labs HALPI2 carrier board (status | detect | apply | connections)
 #   signalk timesync [...] host clock + timezone from GPS (status | run)
 #   signalk update [--no-render]        (SIGNALK_CHANNEL=master to track master)
 #                          refresh installer scripts + Quadlet templates via the
@@ -142,8 +143,9 @@ usage() {
     if [[ "${SIGNALK_WINDOWS_SHIM:-0}" == "1" ]]; then
         # Hide exactly what the Windows shim REJECTS, so help and behaviour
         # agree: socketcan (no CAN/SPI in the VM), bluetooth (no bluez there,
-        # and WSL2 cannot reach the Windows radio), timesync (it steps the HOST
-        # clock, and on Windows that is Windows' own clock).
+        # and WSL2 cannot reach the Windows radio), halpi2 (a Raspberry Pi CM5
+        # carrier board — the VM has no I2C bus, no config.txt, no apt), timesync
+        # (it steps the HOST clock, and on Windows that is Windows' own clock).
         #
         # render-server, resolv-watch and netgate-watch were hidden here too,
         # on the grounds that there is no host signalk-server Quadlet inside
@@ -164,7 +166,7 @@ usage() {
         # strip). A subcommand HEADER is "  signalk <name>"; CONTINUATION
         # lines are indented deeper and do not start a new "signalk" entry.
         printf '%s\n' "$help" | awk '
-            /^[[:space:]]*signalk (socketcan|bluetooth|timesync)( |$)/ { drop = 1; next }
+            /^[[:space:]]*signalk (socketcan|bluetooth|halpi2|timesync)( |$)/ { drop = 1; next }
             /^[[:space:]]*signalk / { drop = 0; print; next }
             drop { next }
             { print }
@@ -319,6 +321,22 @@ cmd_bluetooth() {
         exit 1
     fi
     exec "$HOME/.local/bin/signalk-bluetooth" "$@"
+}
+
+cmd_halpi2() {
+    # Thin delegate into the sibling helper installed by
+    # install-halpi2-script.sh — same pattern as cmd_socketcan. Falls back
+    # to the doctor-staged payload copy so a box refreshed via `signalk
+    # update` before the CLI copy existed can still run it.
+    local helper="$HOME/.local/bin/signalk-halpi2"
+    [[ -x "$helper" ]] || helper="${DOCTOR_DATA}/installer-payload/signalk-halpi2.tmpl"
+    if [[ ! -x "$helper" ]]; then
+        echo "[ERR] ~/.local/bin/signalk-halpi2 is missing." >&2
+        echo "  Run 'signalk update' to refresh installer artifacts, or re-run" >&2
+        echo "  the bash bootstrap one-liner." >&2
+        exit 1
+    fi
+    exec "$helper" "$@"
 }
 
 cmd_timesync() {
@@ -2941,6 +2959,7 @@ case "${1:-help}" in
     recover)    shift; cmd_recover "$@" ;;
     socketcan)  shift; cmd_socketcan "$@" ;;
     bluetooth)  shift; cmd_bluetooth "$@" ;;
+    halpi2)     shift; cmd_halpi2 "$@" ;;
     timesync)   shift; cmd_timesync "$@" ;;
     update)     shift; cmd_update "$@" ;;
     hardware)         shift; cmd_hardware "$@" ;;

@@ -219,7 +219,7 @@ if [[ ! -f "$CLI" ]]; then
     echo "[MISS] $CLI not found - could not check help/shim agreement"
     fail=1
 else
-    hidden=$(grep -oE 'signalk \(socketcan\|[a-z|-]+\)' "$CLI" \
+    hidden=$(grep -oE 'signalk \(socketcan\|[a-z0-9|-]+\)' "$CLI" \
         | head -1 | sed 's/^signalk (//; s/)$//' | tr '|' ' ')
     if [[ -z "$hidden" ]]; then
         echo "[MISS] could not read the Windows help filter from $CLI"
@@ -267,7 +267,7 @@ else
                 echo "[MISS] the shim refuses '$c' but Windows help still lists it"
                 agree=0
             fi
-        done < <(grep -oE "^  '[a-z-]+' \{" "$PS1" | sed "s/^  '//; s/' {$//")
+        done < <(grep -oE "^  '[a-z0-9-]+' \{" "$PS1" | sed "s/^  '//; s/' {$//")
 
         if [[ "$agree" -eq 1 ]]; then
             echo "  [OK]   Windows help and the shim's refusals name the same commands"

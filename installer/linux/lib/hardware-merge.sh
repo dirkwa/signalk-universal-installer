@@ -16,6 +16,11 @@
 # carry the prior value verbatim when present, else keep the fresh default.
 # (bluetooth/gpio tolerate `//` only because their fresh default is already
 # false, so `false // false` is harmless there.)
+#
+# onboardSerial (HALPI2 RS-485, docs/halpi2.md) is opt-out like audio and
+# is re-emitted by every detection, so only the per-device `enabled` is
+# carried, matched by `device`. `board` is a hardware fact, not a toggle:
+# the fresh detection always wins and nothing is carried.
 
 # hardware_merge <old.json> <fresh.json> — prints merged JSON to stdout.
 # Requires jq; callers guard on `command -v jq` before invoking.
@@ -30,6 +35,13 @@ hardware_merge() {
                             else .audio.enabled end)
         | if $old.socketcanCandidate != null
           then .socketcanCandidate = $old.socketcanCandidate
+          else . end
+        | if has("onboardSerial")
+          then .onboardSerial |= map(
+                 . as $dev
+                 | ([($old.onboardSerial // [])[] | select(.device == $dev.device)] | first) as $prev
+                 | if $prev == null or ($prev | has("enabled") | not)
+                   then $dev else $dev + {enabled: $prev.enabled} end)
           else . end
     ' "$1" "$2"
 }

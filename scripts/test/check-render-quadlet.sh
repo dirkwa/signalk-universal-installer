@@ -285,6 +285,82 @@ else
     fi
 fi
 
+# 7. HALPI2 classes (docs/halpi2.md). `onboardSerial` renders a single
+#    AddDevice=<device> line, existence-guarded like USB serial (TTY_PREFIX
+#    points the guard at the fixture tree); the halpid socket directory is
+#    mounted only when board.model is halpi2 AND the socket exists at render
+#    time (HALPID_RUN_DIR points the probe at the fixture). A fixture without
+#    `board` must render exactly as before.
+mkdir -p "$tmp/tty" "$tmp/halpid"
+: >"$tmp/tty/ttyAMA4"
+# A unix socket node for the existence guard. Bash cannot create one; use
+# python3, else perl (both ship on ubuntu-latest and Debian). No socket →
+# the volume-present assertion below fails rather than skipping.
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$tmp/halpid/halpid.sock" || true
+elif command -v perl >/dev/null 2>&1; then
+    perl -MSocket -e 'socket(S, PF_UNIX, SOCK_STREAM, 0) and bind(S, sockaddr_un($ARGV[0])) or die' "$tmp/halpid/halpid.sock" || true
+fi
+jq --arg dev "$tmp/tty/ttyAMA4" --arg gone "$tmp/tty/ttyAMA9" '
+    .board = {model:"halpi2", candidate:false, detectedVia:"i2c"}
+    | .onboardSerial = [ {device:$dev, label:"HALPI2 RS-485", enabled:true},
+                         {device:$gone, label:"absent", enabled:true},
+                         {device:$dev, label:"disabled", enabled:false} ]
+' "$tmp/hardware.json" >"$tmp/hardware-halpi2.json"
+err_halpi2="$tmp/stderr-halpi2.log"
+out_halpi2=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/halpid" bash "$RENDER" "$tmp/hardware-halpi2.json" "$TEMPLATE" 2>"$err_halpi2") || {
+    echo "  [MISS] render (halpi2) exited non-zero"
+    fail=1
+}
+if [[ -s "$err_halpi2" ]]; then
+    echo "  [MISS] render (halpi2) wrote to stderr:"
+    sed 's/^/         /' "$err_halpi2"
+    fail=1
+fi
+if [[ "$(grep -cxF "AddDevice=$tmp/tty/ttyAMA4" <<<"$out_halpi2")" == 1 ]]; then
+    echo "  [OK]   enabled onboardSerial emits one AddDevice line"
+else
+    echo "  [MISS] enabled onboardSerial AddDevice missing or duplicated"
+    fail=1
+fi
+if grep -q "ttyAMA9" <<<"$out_halpi2"; then
+    echo "  [MISS] absent onboardSerial node was not guarded out"
+    fail=1
+else
+    echo "  [OK]   absent onboardSerial node is dropped by the existence guard"
+fi
+if [[ -S "$tmp/halpid/halpid.sock" ]]; then
+    if grep -qxF "Volume=$tmp/halpid:/run/halpid:ro" <<<"$out_halpi2"; then
+        echo "  [OK]   halpi2 board + live halpid socket mounts /run/halpid"
+    else
+        echo "  [MISS] halpid volume missing with board=halpi2 and a live socket"
+        fail=1
+    fi
+else
+    echo "  [MISS] could not create the halpid socket fixture (python3/perl missing or bind failed)"
+    fail=1
+fi
+out_halpi2_nosock=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-halpi2.json" "$TEMPLATE" 2>/dev/null) || {
+    echo "  [MISS] render (halpi2, socket missing) exited non-zero"
+    fail=1
+}
+if grep -q ':/run/halpid:' <<<"$out_halpi2_nosock"; then
+    echo "  [MISS] halpid volume rendered although the socket is missing"
+    fail=1
+else
+    echo "  [OK]   missing halpid socket suppresses the volume"
+fi
+out_noboard=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/halpid" bash "$RENDER" "$tmp/hardware.json" "$TEMPLATE" 2>/dev/null) || {
+    echo "  [MISS] render (no board) exited non-zero"
+    fail=1
+}
+if grep -vE '^[[:space:]]*#' <<<"$out_noboard" | grep -q 'halpid\|ttyAMA'; then
+    echo "  [MISS] fixture without board rendered HALPI2 lines"
+    fail=1
+else
+    echo "  [OK]   fixture without board renders no HALPI2 lines"
+fi
+
 if (( fail )); then
     echo
     echo "[ERR] render-server-quadlet hardware block is broken — see entries above." >&2

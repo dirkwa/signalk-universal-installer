@@ -80,6 +80,51 @@ JSON
 merge "$tmp/old-noaudio.json" "$tmp/fresh.json" >"$tmp/merged.json"
 check "audio default preserved when old file lacks audio key" '.audio.enabled' "true"
 
+# Case 3: HALPI2 classes. `onboardSerial` is opt-out and re-emitted by every
+# detection, so only the per-device `enabled` (matched by `device`) is
+# carried; `board` is a hardware fact — the fresh detection always wins.
+cat >"$tmp/fresh-halpi2.json" <<'JSON'
+{
+  "serial": [],
+  "can": [],
+  "bluetooth": { "dbusAvailable": false, "enabled": false },
+  "audio": { "present": false, "enabled": false },
+  "gpio": { "platform": "rpi-other", "enabled": false },
+  "board": { "model": "halpi2", "candidate": false, "detectedVia": "i2c",
+             "hardwareVersion": "2.0.0", "firmwareVersion": "3.3.1" },
+  "onboardSerial": [ { "device": "/dev/ttyAMA4", "label": "HALPI2 RS-485", "enabled": true } ]
+}
+JSON
+cat >"$tmp/old-halpi2.json" <<'JSON'
+{
+  "bluetooth": { "dbusAvailable": false, "enabled": false },
+  "audio": { "present": false, "enabled": false },
+  "gpio": { "platform": "rpi-other", "enabled": false },
+  "board": { "model": "halpi2", "candidate": true, "detectedVia": "model-string",
+             "hardwareVersion": null, "firmwareVersion": null },
+  "onboardSerial": [ { "device": "/dev/ttyAMA4", "label": "HALPI2 RS-485", "enabled": false } ]
+}
+JSON
+merge "$tmp/old-halpi2.json" "$tmp/fresh-halpi2.json" >"$tmp/merged.json"
+check "operator-disabled onboardSerial survives re-detect" '.onboardSerial[0].enabled' "false"
+check "onboardSerial label comes from the fresh detection" '.onboardSerial[0].label' "HALPI2 RS-485"
+check "board is taken from the fresh detection, not carried" '.board.detectedVia' "i2c"
+check "board versions come from the fresh detection" '.board.firmwareVersion' "3.3.1"
+
+# Case 4: first detection with onboardSerial (old file predates it) keeps the
+# fresh default; an old file WITH onboardSerial against a fresh detection
+# without it (board no longer confirmed) does not resurrect the class.
+merge "$tmp/old-noaudio.json" "$tmp/fresh-halpi2.json" >"$tmp/merged.json"
+check "onboardSerial default kept when old file lacks it" '.onboardSerial[0].enabled' "true"
+cat >"$tmp/old-halpi2-noflag.json" <<'JSON'
+{ "onboardSerial": [ { "device": "/dev/ttyAMA4", "label": "HALPI2 RS-485" } ] }
+JSON
+merge "$tmp/old-halpi2-noflag.json" "$tmp/fresh-halpi2.json" >"$tmp/merged.json"
+check "prior onboardSerial entry without enabled keeps the fresh default" '.onboardSerial[0].enabled' "true"
+merge "$tmp/old-halpi2.json" "$tmp/fresh.json" >"$tmp/merged.json"
+check "onboardSerial not resurrected when the fresh detection lacks it" 'has("onboardSerial")' "false"
+check "board not resurrected when the fresh detection lacks it" 'has("board")' "false"
+
 if (( fail )); then
     echo
     echo "[ERR] hardware.json merge contract broken — see entries above." >&2
