@@ -1623,21 +1623,31 @@ Add-FirewallRules -Ports $SignalkPorts -UdpPorts $NmeaUdpPorts
 Section "Auto-start on reboot"
 Register-MachineAutostart -Machine $MachineName -CmdDir $skCmdDir
 
-# 6. Done. Under mirrored networking the stack lives at the host's LAN IP, NOT
-# localhost (mirrored replaces the NAT localhost-forward), so point the operator
-# there - that's also the address other devices use.
+# 6. Done. Point the operator at the host's LAN IP: it is the address other
+# devices use, and it avoids the IPv6 stall that makes `localhost` look dead
+# (Windows resolves localhost to ::1 first, the stack listens on IPv4, so every
+# new connection waits out the timeout before falling back - measured 21.1s
+# over localhost against 0.01s over 127.0.0.1). localhost DOES reach the stack;
+# it is just the slowest spelling of the same address.
 $lanIp = Get-HostLanIp
 $accessHost = if ($lanIp) { $lanIp } else { '<this-pc-ip>' }
 @"
 
 OK - SignalK is up inside Podman Machine '$MachineName'.
 
-Open from THIS PC or any device on the network (mirrored networking - use the
-host's LAN IP, not localhost):
+Open from THIS PC or any device on the network (mirrored networking - the
+host's LAN IP is the fastest address from anywhere):
 
   SignalK admin UI : http://$accessHost        (or :3000 if you declined standard ports)
   Updater Console  : http://${accessHost}:3003
   Doctor Console   : http://${accessHost}:3004
+
+Use the address above, not 'localhost'. Windows resolves 'localhost' to IPv6
+(::1) first and the stack listens on IPv4, so each new connection stalls ~21s
+on the IPv6 timeout before falling back - measured here as 21.1s over
+'localhost' against 0.01s over 127.0.0.1, same server, same moment. It does
+answer either way, so a browser that looks stuck is usually mid-timeout
+rather than pointed at a dead server.
 
 Manage it from a NEW terminal with the 'signalk' command, e.g.:
   signalk health
