@@ -91,10 +91,10 @@ else
 fi
 if [[ "$out2" == *"already set"* ]]; then ok "second run reports already set"; else miss "second run output: $out2"; fi
 
-# 2b. An operator-tuned weight is kept.
-sed -i 's/^CPUWeight=300$/CPUWeight=500/' "$CONF"
+# 2b. An operator-tuned weight is kept (systemd ignores whitespace around '=').
+sed -i 's/^CPUWeight=300$/CPUWeight = 500/' "$CONF"
 run_step >/dev/null
-if grep -qx 'CPUWeight=500' "$CONF"; then
+if grep -qx 'CPUWeight = 500' "$CONF"; then
     ok "re-run keeps an operator-tuned CPUWeight=500"
 else
     miss "re-run overwrote the operator's weight: $(grep '^CPUWeight=' "$CONF")"

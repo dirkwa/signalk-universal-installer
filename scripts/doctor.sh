@@ -147,7 +147,7 @@ cpu_priority() {
     slice="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/app.slice"
     conf="${HOME}/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf"
     weight=$(cat "$slice/cpu.weight" 2>/dev/null || true)
-    configured=$(sed -n 's/^CPUWeight=\([0-9][0-9]*\).*/\1/p' "$conf" 2>/dev/null | head -1 || true)
+    configured=$(sed -n 's/^[[:space:]]*CPUWeight[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$conf" 2>/dev/null | head -1 || true)
     if [[ -z "$weight" ]]; then
         echo "  [WARN] app.slice cpu.weight unreadable — cgroup v2 cpu controller not"
         echo "         delegated to the user slice; CPU priorities have no effect"

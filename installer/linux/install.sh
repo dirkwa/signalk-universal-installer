@@ -1579,8 +1579,8 @@ CPUWeight=300'
 # Keyed on the presence of a CPUWeight= line, not the exact value, so an
 # operator who tuned the weight keeps it across re-runs (same rule as the
 # podman.service TasksMax drop-in above).
-if [[ -f "$CPU_PRIORITY_CONF" ]] && grep -q '^CPUWeight=' "$CPU_PRIORITY_CONF"; then
-    ok "app.slice CPUWeight already set ($CPU_PRIORITY_CONF: $(grep '^CPUWeight=' "$CPU_PRIORITY_CONF" | head -1))"
+if [[ -f "$CPU_PRIORITY_CONF" ]] && grep -Eq '^[[:space:]]*CPUWeight[[:space:]]*=' "$CPU_PRIORITY_CONF"; then
+    ok "app.slice CPUWeight already set ($CPU_PRIORITY_CONF: $(grep -E '^[[:space:]]*CPUWeight[[:space:]]*=' "$CPU_PRIORITY_CONF" | head -1))"
 elif mkdir -p "$CPU_PRIORITY_DIR" 2>/dev/null \
     && printf '%s\n' "$CPU_PRIORITY_DESIRED" > "$CPU_PRIORITY_CONF"; then
     if systemctl --user daemon-reload; then
