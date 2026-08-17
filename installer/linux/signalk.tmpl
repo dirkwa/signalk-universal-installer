@@ -426,6 +426,39 @@ ConditionPathExists=%h/.local/bin/signalk
 Type=oneshot
 ExecStart=%h/.local/bin/signalk resolv-watch heal'
 
+# Make ~/.config/systemd/user writable by the user who owns it, and say why
+# when it is not. Podman machine's WSL provisioning creates this directory as
+# ROOT before the installer ever runs (it drops podman-mnt-bindings.service
+# and default.target.wants there), leaving mode 755 root:root inside an
+# unprivileged home. Every write below then fails.
+#
+# The failure used to surface as "mktemp failed", because `mkdir -p` returned
+# non-zero and nothing checked it, so execution fell through to the mktemp on
+# a directory that could not be written. That named the wrong step: mktemp was
+# fine, the directory was not ours.
+_signalk_ensure_unit_dir() {
+    local unit_dir="$1"
+    [[ -w "$unit_dir" ]] && return 0
+    if [[ -d "$unit_dir" && ! -w "$unit_dir" ]]; then
+        # Present but not ours. Reclaim it if we can do so without prompting;
+        # a password prompt here would block a non-interactive install.
+        local owner
+        owner=$(stat -c '%U:%G' "$unit_dir" 2>/dev/null || echo 'unknown')
+        if sudo -n true 2>/dev/null && sudo -n chown -R "$(id -un):$(id -gn)" "$unit_dir" 2>/dev/null; then
+            echo "[i] reclaimed ${unit_dir} from ${owner} (podman machine creates it as root)"
+            return 0
+        fi
+        echo "[ERR] ${unit_dir} is owned by ${owner}, not $(id -un), and cannot be written." >&2
+        echo "      Podman machine's provisioning creates it as root. Fix with:" >&2
+        echo "        sudo chown -R $(id -un):$(id -gn) ${unit_dir}" >&2
+        return 1
+    fi
+    if ! mkdir -p "$unit_dir" 2>/dev/null; then
+        echo "[ERR] could not create ${unit_dir}." >&2
+        return 1
+    fi
+}
+
 _signalk_ensure_resolv_watch() {
     local unit_dir="${HOME}/.config/systemd/user"
     local path_file="${unit_dir}/signalk-resolv-watch.path"
@@ -438,7 +471,7 @@ _signalk_ensure_resolv_watch() {
         return 0
     fi
 
-    mkdir -p "$unit_dir"
+    _signalk_ensure_unit_dir "$unit_dir" || return 1
     # Atomic per-file (temp + mv), 0644 — same shape as the Quadlet writes.
     local f content tmp
     for f in "$path_file" "$svc_file"; do
@@ -554,7 +587,7 @@ _signalk_ensure_netgate_watch() {
         return 0
     fi
 
-    mkdir -p "$unit_dir"
+    _signalk_ensure_unit_dir "$unit_dir" || return 1
     # Atomic per-file (temp + mv), 0644 — same shape as the Quadlet writes.
     local f content tmp
     for f in "$timer_file" "$svc_file"; do

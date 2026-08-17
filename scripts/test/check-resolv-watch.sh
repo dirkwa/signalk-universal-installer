@@ -53,6 +53,18 @@ EOF
 chmod +x "$tmp/bin/systemctl"
 export PATH="$tmp/bin:$PATH"
 
+# The unit dir must be created through _signalk_ensure_unit_dir, not a bare
+# `mkdir -p`. Podman machine's WSL provisioning creates ~/.config/systemd/user
+# as ROOT before the installer runs, so a bare mkdir returns non-zero, nothing
+# checks it, and the failure surfaces two lines later as "mktemp failed" -
+# naming the wrong step and hiding the ownership problem.
+# shellcheck disable=SC2016  # grep pattern is literal shell source text
+if grep -qE '^[[:space:]]*mkdir -p "\$unit_dir"[[:space:]]*$' "$CLI_TMPL"; then
+    miss "unit dir created with a bare mkdir -p; a root-owned dir reports 'mktemp failed'"
+else
+    ok "unit dir creation goes through the ownership-aware helper"
+fi
+
 unit_dir="$HOME/.config/systemd/user"
 path_unit="$unit_dir/signalk-resolv-watch.path"
 svc_unit="$unit_dir/signalk-resolv-watch.service"
