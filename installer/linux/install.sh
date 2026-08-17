@@ -1001,15 +1001,20 @@ systemctl --user daemon-reload || true
 # Do it here, once, before the first write: this is the earliest point where
 # sudo is known to work (the linger step above just used it) and it is
 # ahead of every consumer.
+# Usable means writable AND searchable: a directory can be -w but not -x, and
+# the write still fails. Same test the CLI's _signalk_ensure_unit_dir applies,
+# so the two agree about what "already fine" means.
 SK_USER_UNIT_DIR="$HOME/.config/systemd/user"
-if [[ -d "$SK_USER_UNIT_DIR" && ! -w "$SK_USER_UNIT_DIR" ]]; then
+if [[ -d "$SK_USER_UNIT_DIR" ]] && { [[ ! -w "$SK_USER_UNIT_DIR" ]] || [[ ! -x "$SK_USER_UNIT_DIR" ]]; }; then
     sk_owner=$(stat -c '%U:%G' "$SK_USER_UNIT_DIR" 2>/dev/null || echo 'unknown')
     if $SUDO chown -R "$(id -un):$(id -gn)" "$SK_USER_UNIT_DIR" 2>/dev/null \
         && [[ -w "$SK_USER_UNIT_DIR" && -x "$SK_USER_UNIT_DIR" ]]; then
         ok "reclaimed $SK_USER_UNIT_DIR from ${sk_owner} (created by the VM provisioner)"
     else
-        warn "$SK_USER_UNIT_DIR is owned by ${sk_owner}, not $(id -un); unit installs below will fail."
-        warn "Fix with: sudo chown -R $(id -un):$(id -gn) $SK_USER_UNIT_DIR"
+        # chown fixes ownership, never the mode: a dir we already own with the
+        # execute bit cleared lands here too, and needs chmod rather than chown.
+        warn "$SK_USER_UNIT_DIR (owner ${sk_owner}, mode $(stat -c '%a' "$SK_USER_UNIT_DIR" 2>/dev/null || echo '?')) is not usable by $(id -un); unit installs below will fail."
+        warn "Fix with: sudo chown -R $(id -un):$(id -gn) $SK_USER_UNIT_DIR && chmod u+rwx $SK_USER_UNIT_DIR"
     fi
 fi
 
