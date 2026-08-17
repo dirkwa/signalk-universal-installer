@@ -1583,8 +1583,11 @@ if [[ -f "$CPU_PRIORITY_CONF" ]] && grep -q '^CPUWeight=' "$CPU_PRIORITY_CONF"; 
     ok "app.slice CPUWeight already set ($CPU_PRIORITY_CONF: $(grep '^CPUWeight=' "$CPU_PRIORITY_CONF" | head -1))"
 elif mkdir -p "$CPU_PRIORITY_DIR" 2>/dev/null \
     && printf '%s\n' "$CPU_PRIORITY_DESIRED" > "$CPU_PRIORITY_CONF"; then
-    systemctl --user daemon-reload || true
-    ok "app.slice CPUWeight=300 applied (SK stack outranks plugin containers 3:1 under contention)"
+    if systemctl --user daemon-reload; then
+        ok "app.slice CPUWeight=300 applied (SK stack outranks plugin containers 3:1 under contention)"
+    else
+        warn "Wrote $CPU_PRIORITY_CONF but daemon-reload failed; CPUWeight=300 takes effect on the next login"
+    fi
 else
     warn "Could not write $CPU_PRIORITY_CONF; SK stack shares CPU 1:1 with plugin containers under contention"
 fi
