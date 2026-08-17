@@ -360,8 +360,45 @@ s.on("error", () => { console.log("error"); });
 ' "$host" "$port" 2>/dev/null | grep -q '^ok$'
 }
 
-if probe_signalk_http host.containers.internal "$sk_http_port"; then
-    echo "Engine containers can reach host.containers.internal:${sk_http_port}"
+pick_signalk_http_port() {
+    local host="$1"
+    if probe_signalk_http "$host" "$sk_http_port"; then
+        echo "$sk_http_port"
+        return 0
+    fi
+    if [[ "$sk_http_port" != "3000" ]] && probe_signalk_http "$host" "3000"; then
+        echo "3000"
+        return 0
+    fi
+    if [[ "$sk_http_port" != "80" ]] && probe_signalk_http "$host" "80"; then
+        echo "80"
+        return 0
+    fi
+    return 1
+}
+
+resolved_http_port=""
+if resolved_http_port="$(pick_signalk_http_port host.containers.internal)"; then
+    sk_http_port="$resolved_http_port"
+    tmp="${updater_quadlet}.tmp"
+    awk -v p="$sk_http_port" '
+        index($0, "Environment=SIGNALK_HEALTH_URL=") == 1 { $0 = "Environment=SIGNALK_HEALTH_URL=http://host.containers.internal:" p "/signalk" }
+        index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://host.containers.internal:" p }
+        { print }
+    ' "$updater_quadlet" > "$tmp"
+    mv "$tmp" "$updater_quadlet"
+
+    tmp="${doctor_quadlet}.tmp"
+    awk -v hp="$sk_http_port" -v sp="$sk_https_port" '
+        index($0, "Environment=SIGNALK_URL=") == 1 { $0 = "Environment=SIGNALK_URL=http://host.containers.internal:" hp "/signalk" }
+        index($0, "Environment=SIGNALK_HTTPS_URL=") == 1 { $0 = "Environment=SIGNALK_HTTPS_URL=https://host.containers.internal:" sp "/signalk" }
+        { print }
+    ' "$doctor_quadlet" > "$tmp"
+    mv "$tmp" "$doctor_quadlet"
+
+    systemctl --user daemon-reload
+    systemctl --user restart signalk-updater-server.service signalk-doctor-server.service
+    echo "Synchronized updater/doctor health URLs to host.containers.internal:${sk_http_port}"
     exit 0
 fi
 
@@ -377,15 +414,16 @@ if [[ -z "$fallback_ip" ]]; then
     exit 0
 fi
 
-if ! probe_host_port "$fallback_ip" "$sk_http_port"; then
-    echo "WARN: derived fallback host IP ${fallback_ip}:${sk_http_port} is not reachable; skipping health URL fix" >&2
+resolved_http_port="$(pick_signalk_http_port "$fallback_ip" || true)"
+if [[ -z "$resolved_http_port" ]]; then
+    if ! probe_host_port "$fallback_ip" "$sk_http_port"; then
+        echo "WARN: derived fallback host IP ${fallback_ip}:${sk_http_port} is not reachable; skipping health URL fix" >&2
+    else
+        echo "WARN: derived fallback host IP ${fallback_ip} is reachable, but no SignalK endpoint responded on ports ${sk_http_port}, 3000, or 80" >&2
+    fi
     exit 0
 fi
-
-if ! probe_signalk_http "$fallback_ip" "$sk_http_port"; then
-    echo "WARN: derived fallback host IP ${fallback_ip}:${sk_http_port} does not serve SignalK /signalk; skipping health URL fix" >&2
-    exit 0
-fi
+sk_http_port="$resolved_http_port"
 
 tmp="${updater_quadlet}.tmp"
 awk -v ip="$fallback_ip" -v p="$sk_http_port" '
