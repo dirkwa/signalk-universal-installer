@@ -1513,8 +1513,34 @@ snapshot_existing signalk-server.container
 snapshot_existing signalk-updater-server.container
 snapshot_existing signalk-doctor-server.container
 
+# The mDNS name signalk-server advertises (EXTERNALHOST). Only set under the
+# Windows shim: there the podman machine inherits the WINDOWS host's name, so
+# the announcement collides with the Windows mDNS responder already claiming
+# that name, and LAN clients resolve the host's other adapters instead of the
+# server. Verified on a real network: the box was absent from `avahi-browse`
+# on another machine until this was set, then appeared as signalk.local at
+# the LAN IP.
+#
+# On Linux/macOS the host owns its own name, nothing collides, and an
+# override would only mask the operator's chosen hostname - so this renders
+# empty and signalk-server falls back to os.hostname() exactly as before.
+#
+# SIGNALK_MDNS_HOST overrides the name; two SignalK boxes on one network
+# would otherwise both answer for signalk.local.
+SK_EXTERNAL_HOST=""
+if [[ "${SIGNALK_WINDOWS_SHIM:-0}" == "1" ]]; then
+    SK_EXTERNAL_HOST="${SIGNALK_MDNS_HOST:-signalk}"
+    # Strip a trailing .local and anything outside the mDNS label charset; an
+    # empty or malformed result falls back rather than advertising garbage.
+    SK_EXTERNAL_HOST=$(printf '%s' "$SK_EXTERNAL_HOST" \
+        | sed -e 's/\.local$//' -e 's/[^A-Za-z0-9-]/-/g' -e 's/^-*//' -e 's/-*$//')
+    [[ -z "$SK_EXTERNAL_HOST" ]] && SK_EXTERNAL_HOST="signalk"
+    info "mDNS name: ${SK_EXTERNAL_HOST}.local (Windows: avoids the host-name collision)"
+fi
+
 SERVER_QUADLET=$("$HERE/render-server-quadlet.sh" "$UPDATER_DATA/hardware.json" "$HERE/../../quadlets/signalk-server.container.template" \
-    | sed -e "s/__SK_HTTP_PORT__/${SK_HTTP_PORT}/g")
+    | sed -e "s/__SK_HTTP_PORT__/${SK_HTTP_PORT}/g" \
+          -e "s/__SK_EXTERNAL_HOST__/${SK_EXTERNAL_HOST}/g")
 atomic_write "$QUADLET_DIR/signalk-server.container" "$SERVER_QUADLET"
 
 # Substitute both the publish host (set earlier from SIGNALK_LOCALHOST_ONLY)

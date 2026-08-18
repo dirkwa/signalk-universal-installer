@@ -87,6 +87,17 @@ SK_VERSION="__SK_VERSION__"
 # `resetadmin` failed with "Port number was not a decimal number"). Reading
 # the port live keeps the script self-correcting and tracks a later port
 # change for free. Same lookup as scripts/doctor.sh::sk_http_port.
+# The mDNS name the live Quadlet advertises (EXTERNALHOST). Carried forward on
+# re-render for the same reason as the port: install.sh decides it once, and a
+# re-render must not silently drop it. Empty on Linux/macOS by design - see the
+# EXTERNALHOST comment in the server Quadlet template.
+sk_external_host() {
+    local q="${HOME}/.config/containers/systemd/signalk-server.container"
+    local h
+    h=$(sed -n 's/^Environment=EXTERNALHOST=\(.*\)$/\1/p' "$q" 2>/dev/null | head -1 || true)
+    printf '%s' "$h"
+}
+
 sk_http_port() {
     local q="${HOME}/.config/containers/systemd/signalk-server.container"
     local p
@@ -1051,8 +1062,11 @@ cmd_render_server() {
     # Render to a string, applying the same port substitution install.sh does.
     local port rendered
     port=$(sk_http_port)
+    local ext_host
+    ext_host=$(sk_external_host)
     if ! rendered=$(bash "$renderer" "$hw_file" "$template" \
-        | sed -e "s/__SK_HTTP_PORT__/${port}/g"); then
+        | sed -e "s/__SK_HTTP_PORT__/${port}/g" \
+              -e "s/__SK_EXTERNAL_HOST__/${ext_host}/g"); then
         echo "[ERR] render-server-quadlet.sh failed (see error above)." >&2
         return 1
     fi
