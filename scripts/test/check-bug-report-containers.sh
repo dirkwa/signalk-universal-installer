@@ -44,6 +44,15 @@ if ! grep -q 'signalk_all_containers()' "$workdir/signalk-defs.sh"; then
     exit 2
 fi
 
+# The awk above is keyed on the dispatcher's exact opening line. If that line
+# is ever reworded the awk silently matches nothing, the whole CLI is sourced,
+# and the dispatcher runs during the test — so assert the strip actually
+# happened rather than trusting it.
+if grep -q '^case "\${1:-help}" in$' "$workdir/signalk-defs.sh"; then
+    echo "[ERR] dispatcher still present after strip — the awk pattern is stale" >&2
+    exit 2
+fi
+
 # shellcheck disable=SC1090
 source "$workdir/signalk-defs.sh"
 

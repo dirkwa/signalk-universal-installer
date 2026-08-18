@@ -2237,7 +2237,14 @@ cmd_bug_report() {
                     created_found=$((created_found + 1))
                 fi
             done
-            [[ "$created_found" -eq 0 ]] && echo "  (none)"
+            # `if`, not `[[ … ]] && echo`: the && form leaves the group's
+            # exit status non-zero whenever a created container WAS found,
+            # and under `set -e` that aborts the whole bug-report the
+            # moment this block is the last command in its enclosing
+            # scope. Reporting a finding must never fail the run.
+            if [[ "$created_found" -eq 0 ]]; then
+                echo "  (none)"
+            fi
         fi
     } >"$bundle/container-plugin-state.txt" 2>&1
 
@@ -2273,12 +2280,17 @@ cmd_bug_report() {
         # single-line regex leaks every continuation line — so match the
         # directive, print only its name, then swallow lines until one does
         # not end in a backslash. Keeping the directive name is enough for
-        # triage (which vars a unit sets) and cannot leak a value. Secret=
-        # carries only a secret NAME, not its value, so it stays intact.
+        # triage (which vars a unit sets) and cannot leak a value.
+        #
+        # PodmanArgs= and Exec= get the same treatment: both routinely carry
+        # credentials inline (`--password`, a CLI token argument), and both
+        # accept the same continuations. EnvironmentFile= is left intact —
+        # it names a PATH, not a value, and knowing which file a unit reads
+        # is useful in triage. Secret= likewise carries only a secret NAME.
         awk '
             skip { if ($0 !~ /\\[[:space:]]*$/) skip = 0; next }
-            /^[[:space:]]*Environment=/ {
-                match($0, /^[[:space:]]*Environment/)
+            /^[[:space:]]*(Environment|PodmanArgs|Exec)=/ {
+                match($0, /^[[:space:]]*[A-Za-z]+/)
                 printf "%s=<redacted>\n", substr($0, RSTART, RLENGTH)
                 if ($0 ~ /\\[[:space:]]*$/) skip = 1
                 next
@@ -2371,8 +2383,17 @@ cmd_bug_report() {
             # existing cleanup removes it with the rest of the scratch dir.
             model_tmp="$outdir/model.json"
             model_start=$(date +%s.%N 2>/dev/null || echo 0)
-            curl -fsS -m 20 -H "Authorization: Bearer $SK_TOKEN" \
-                -o "$model_tmp" "$api_base/" 2>/dev/null || true
+            # -w '%{http_code}' without -f: capture the status instead of
+            # letting curl swallow it. A 401/403 (expired or wrong token)
+            # otherwise reports identically to a timeout, and the "server is
+            # saturated" note below would be actively misleading.
+            # Assign the fallback OUTSIDE the substitution (issue #229): on a
+            # connection failure curl PRINTS its own "000" and ALSO exits
+            # non-zero, so `$(curl … || echo 000)` appends to give "000000",
+            # which matches no status test below.
+            model_code=$(curl -sS -m 20 -H "Authorization: Bearer $SK_TOKEN" \
+                -o "$model_tmp" -w '%{http_code}' "$api_base/" 2>/dev/null) \
+                || model_code="000"
             model_end=$(date +%s.%N 2>/dev/null || echo 0)
             if [[ -s "$model_tmp" ]]; then
                 echo "bytes:           $(wc -c <"$model_tmp")"
@@ -2384,9 +2405,12 @@ cmd_bug_report() {
                 echo "vessel contexts: $(jq -r '(.vessels // {}) | length' <"$model_tmp" 2>/dev/null || echo '?')"
                 echo "self paths:      $(jq -r '[(.vessels // {})[.self // "" | sub("^vessels\\."; "")] // {} | paths(scalars)] | length' <"$model_tmp" 2>/dev/null || echo '?')"
                 echo "other top-level: $(jq -r '[keys[] | select(. != "vessels" and . != "self" and . != "version")] | join(", ")' <"$model_tmp" 2>/dev/null || echo '?')"
+            elif [[ "$model_code" != "000" && "$model_code" != "200" ]]; then
+                echo "(model fetch rejected: HTTP $model_code — not a load problem."
+                echo " 401/403 means the admin token is expired or wrong.)"
             else
-                echo "(model fetch failed or timed out — a timeout here is itself"
-                echo " a strong signal the server is saturated)"
+                echo "(model fetch failed or timed out with no HTTP status — a"
+                echo " timeout here is itself a strong signal the server is saturated)"
             fi
             echo
             echo "=== settings that drive Data Browser cost ==="
@@ -2414,9 +2438,16 @@ cmd_bug_report() {
             # frames for 5s is enough to separate an idle stream (<50/s) from a
             # flood (>500/s) — the distinction that matters.
             if command -v websocat >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-                # Strip the scheme from SIGNALK_URL and rebuild it as ws://.
+                # Map the scheme: https:// must become wss://, or the
+                # handshake is refused on an SSL-plugin install (which is
+                # the common case on a boat with a real certificate) and
+                # the sample silently reports zero.
                 ws_host="${SIGNALK_URL%/signalk}"
-                ws_url="ws://${ws_host#*://}/signalk/v1/stream?subscribe=all"
+                case "$SIGNALK_URL" in
+                    https://*) ws_scheme=wss ;;
+                    *)         ws_scheme=ws  ;;
+                esac
+                ws_url="${ws_scheme}://${ws_host#*://}/signalk/v1/stream?subscribe=all"
                 # `timeout 5` bounds the SAMPLE (not the 10s log budget), and
                 # exits 124 when it fires — which is the expected, successful
                 # outcome here, since a healthy stream never ends on its own.
@@ -2429,15 +2460,31 @@ cmd_bug_report() {
                 #     swallows the URL and websocat exits "No URL specified"
                 #     — which silently reads as "0 frames", i.e. a healthy
                 #     idle server, exactly the wrong conclusion.
-                ws_frames=$(timeout 5 websocat -n -B 1048576 \
+                # Capture websocat's own status, not wc's, so a refused
+                # handshake is not reported as "0 frames" — which reads as a
+                # healthy idle server and is the exact wrong conclusion. Only
+                # 124 (timeout fired) means the sample ran to completion;
+                # anything else is a connection failure. PIPESTATUS is read
+                # immediately, before any other command clobbers it.
+                # `ws_rc=0; cmd || ws_rc=$?` — NOT a bare `cmd` followed by
+                # `ws_rc=$?`. Under `set -e` the bare form aborts the whole
+                # bug-report on the non-zero exit before the assignment ever
+                # runs, and 124 (the expected outcome here) is non-zero.
+                ws_out="$outdir/ws-sample.txt"
+                ws_rc=0
+                timeout 5 websocat -n -B 1048576 \
                     -H "Authorization: Bearer $SK_TOKEN" \
-                    -- "$ws_url" 2>/dev/null \
-                    | wc -l 2>/dev/null || true)
-                ws_frames=${ws_frames:-0}
-                echo "frames in 5s:  $ws_frames"
-                echo "approx per s:  $(( ws_frames / 5 ))"
-                echo "(>500/s means the delta stream, not the browser, is the bottleneck;"
-                echo " a healthy cruising install is typically well under 100/s)"
+                    -- "$ws_url" >"$ws_out" 2>/dev/null || ws_rc=$?
+                ws_frames=$(wc -l <"$ws_out" 2>/dev/null || echo 0)
+                if [[ "$ws_rc" -eq 124 || "$ws_frames" -gt 0 ]]; then
+                    echo "frames in 5s:  $ws_frames"
+                    echo "approx per s:  $(( ws_frames / 5 ))"
+                    echo "(>500/s means the delta stream, not the browser, is the bottleneck;"
+                    echo " a healthy cruising install is typically well under 100/s)"
+                else
+                    echo "(websocket sample failed: websocat exit $ws_rc, url $ws_url —"
+                    echo " NOT an idle server. Check the token and the scheme/port.)"
+                fi
             else
                 echo "(websocat not on PATH — delta rate not sampled)"
                 echo "To measure by hand while the UI is slow (note the '--',"
