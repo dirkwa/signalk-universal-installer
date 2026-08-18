@@ -2594,7 +2594,11 @@ cmd_bug_report() {
                 # host, skip the sample (uninstall websocat or unset the
                 # token) and measure by hand from a trusted shell instead.
                 ws_rc=0
-                timeout 5 websocat -n -k -B 1048576 \
+                # `-k 5`, matching every other bounded call here: websocat
+                # talking to a wedged server need not die on SIGTERM, and
+                # without the escalation `timeout` would wait for it — the
+                # same trap documented in check-podman-timeout-guards.sh.
+                timeout -k 5 5 websocat -n -k -B 1048576 \
                     -H "Authorization: Bearer $SK_TOKEN" \
                     -- "$ws_url" >"$ws_out" 2>/dev/null || ws_rc=$?
                 # `wc -l` counts newlines, so a final frame cut off by the
@@ -2602,7 +2606,13 @@ cmd_bug_report() {
                 # undercount of at most 1 in a sample of ~1300. Not worth
                 # correcting; noted so the number is not read as exact.
                 ws_frames=$(wc -l <"$ws_out" 2>/dev/null || echo 0)
-                if [[ "$ws_rc" -eq 124 || "$ws_frames" -gt 0 ]]; then
+                # 124 = timeout(1) gave up; 137 = 128+SIGKILL, i.e. the -k
+                # escalation landed. Both mean "the 5s sample ran to its
+                # cutoff", which is the SUCCESS case here — a healthy stream
+                # never ends on its own. Only 137 was missing before, so a
+                # sample that needed the escalation was reported as a failed
+                # connection. Same 124/137 pair scripts/doctor.sh uses.
+                if [[ "$ws_rc" -eq 124 || "$ws_rc" -eq 137 || "$ws_frames" -gt 0 ]]; then
                     echo "frames in 5s:  $ws_frames"
                     echo "approx per s:  $(( ws_frames / 5 ))"
                     echo "(>500/s means the delta stream, not the browser, is the bottleneck;"
