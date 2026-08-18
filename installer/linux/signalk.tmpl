@@ -2249,10 +2249,38 @@ cmd_bug_report() {
     for u in "${UNITS[@]}"; do
         [[ -f "$QUADLET_DIR/${u}.container" ]] || continue
         awk '
+            # Allowlist ONE variable per Environment= line, and only when
+            # the line carries exactly that one assignment. systemd accepts
+            # `Environment=PORT=80 MY_SECRET=hunter2`, so matching a leading
+            # allowlisted key and printing the LINE would pass the trailing
+            # secret through untouched. A line with more than one pair is
+            # redacted wholesale rather than parsed — the engine units the
+            # installer writes always use one pair per line, so this costs
+            # nothing real and cannot be tricked by quoting.
+            function nfields(v,   n, tmp) { n = split(v, tmp, /[[:space:]]+/); return n }
             skip { if ($0 !~ /\\[[:space:]]*$/) skip = 0; next }
             /^[[:space:]]*Environment[[:space:]]*=[[:space:]]*(PORT|LOG_LEVEL|NODE_ENV|DATA_DIR|LOCK_DIR|DOCTOR_DATA|QUADLET_DIR|SIGNALK_NODE_CONF_DIR|SIGNALK_URL|SIGNALK_HTTPS_URL|SIGNALK_HEALTH_URL|DOCTOR_HEALTH_URL|DBUS_SESSION_BUS_ADDRESS)=/ {
+                val = $0
+                sub(/^[[:space:]]*Environment[[:space:]]*=[[:space:]]*/, "", val)
+                # Multi-pair or continued: cannot be trusted, redact it.
+                if (nfields(val) > 1 || $0 ~ /\\[[:space:]]*$/) {
+                    match($0, /^[[:space:]]*[A-Za-z]+/)
+                    printf "%s=<redacted>\n", substr($0, RSTART, RLENGTH)
+                    if ($0 ~ /\\[[:space:]]*$/) skip = 1
+                    next
+                }
+                # Strip userinfo, query and fragment from a preserved URL,
+                # the same sanitization the inspect dumps apply: a
+                # hand-edited unit can put credentials in either.
+                if (val ~ /^[A-Za-z_]+=https?:\/\//) {
+                    eq = index(val, "=")
+                    k = substr(val, 1, eq - 1); u = substr(val, eq + 1)
+                    sub(/[?#].*$/, "", u)
+                    sub(/:\/\/[^\/]*@/, "://", u)
+                    printf "Environment=%s=%s\n", k, u
+                    next
+                }
                 print
-                if ($0 ~ /\\[[:space:]]*$/) skip = 1
                 next
             }
             /^[[:space:]]*(Environment|PodmanArgs|Exec|HealthCmd|HealthStartupCmd)[[:space:]]*=/ {
