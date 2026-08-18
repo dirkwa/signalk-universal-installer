@@ -1881,9 +1881,19 @@ cmd_bug_report() {
     # parallel per-container capture and the rootless-journal fallback below use
     # the same bound; empty when `timeout` is absent (run direct). timeout is
     # coreutils, already relied on at install.sh's `timeout 900 podman run`.
+    #
+    # `-k` is not optional here. A podman wedged on the c/storage lock spins
+    # in kernel space and IGNORES SIGTERM, which is all plain `timeout`
+    # sends — it then WAITS for the child, so an unguarded `timeout N`
+    # bounds nothing. Measured in scripts/test/check-podman-timeout-guards.sh
+    # against a SIGTERM-ignoring stub: `timeout 3` returned after 121s;
+    # `timeout -k 2 3` returned after 5s. scripts/doctor.sh and
+    # signalk-recovery.tmpl already use the -k form for the same reason.
     local LOGS_TIMEOUT=10
+    local LOGS_KILL_AFTER=5
     local timeout_cmd=""
-    command -v timeout >/dev/null 2>&1 && timeout_cmd="timeout $LOGS_TIMEOUT"
+    command -v timeout >/dev/null 2>&1 \
+        && timeout_cmd="timeout -k $LOGS_KILL_AFTER $LOGS_TIMEOUT"
     mkdir -p "$bundle"
 
     echo "[i] Collecting diagnostics into $bundle"
@@ -2073,7 +2083,8 @@ cmd_bug_report() {
                 # Bounded logs — 500 lines is enough for a recent failure
                 # signature without ballooning the bundle for chatty containers
                 # (Grafana, QuestDB). $timeout_cmd is unquoted on purpose: it is
-                # either empty (timeout absent → run direct) or two words.
+                # either empty (timeout absent → run direct) or the words
+                # `timeout -k N M`.
                 logs_rc=0
                 # shellcheck disable=SC2086
                 $timeout_cmd "$CTR_CMD" logs --tail 500 "$ctr" \
@@ -2168,7 +2179,7 @@ cmd_bug_report() {
                     # either. Capture the rc rather than `|| true` so a real
                     # timeout (124) is marked incomplete here too — without it a
                     # timed-out fallback would read as a complete --tail 200.
-                    # $timeout_cmd is empty or two words, hence unquoted.
+                    # $timeout_cmd is empty or `timeout -k N M`, hence unquoted.
                     fallback_rc=0
                     # shellcheck disable=SC2086
                     $timeout_cmd "$CTR_CMD" logs --tail 200 "$u" 2>&1 || fallback_rc=$?
@@ -2222,7 +2233,7 @@ cmd_bug_report() {
         # second pass would double the runtime calls for data already in
         # hand, and on a wedged runtime each call is a stall. $timeout_cmd
         # is the same bound the log capture uses; unquoted on purpose (it
-        # is empty, or the two words `timeout N`).
+        # is empty, or the words `timeout -k N M`).
         ctr_states=""
         if [[ -n "$CTR_CMD" ]]; then
             for ctr in "${SIGNALK_CTRS[@]}"; do
@@ -2292,14 +2303,16 @@ cmd_bug_report() {
         # not end in a backslash. Keeping the directive name is enough for
         # triage (which vars a unit sets) and cannot leak a value.
         #
-        # PodmanArgs= and Exec= get the same treatment: both routinely carry
-        # credentials inline (`--password`, a CLI token argument), and both
-        # accept the same continuations. EnvironmentFile= is left intact —
+        # PodmanArgs=, Exec=, HealthCmd= and HealthStartupCmd= get the same
+        # treatment: all four routinely carry credentials inline (a
+        # `--password` flag, a CLI token argument, a healthcheck probing an
+        # authenticated endpoint with `curl -u user:pass`), and all accept
+        # the same continuations. EnvironmentFile= is left intact —
         # it names a PATH, not a value, and knowing which file a unit reads
         # is useful in triage. Secret= likewise carries only a secret NAME.
         awk '
             skip { if ($0 !~ /\\[[:space:]]*$/) skip = 0; next }
-            /^[[:space:]]*(Environment|PodmanArgs|Exec)=/ {
+            /^[[:space:]]*(Environment|PodmanArgs|Exec|HealthCmd|HealthStartupCmd)=/ {
                 match($0, /^[[:space:]]*[A-Za-z]+/)
                 printf "%s=<redacted>\n", substr($0, RSTART, RLENGTH)
                 if ($0 ~ /\\[[:space:]]*$/) skip = 1
@@ -2411,7 +2424,12 @@ cmd_bug_report() {
                 -o "$model_tmp" -w '%{http_code}' "$api_base/" 2>/dev/null) \
                 || model_code="000"
             model_end=$(date +%s.%N 2>/dev/null || echo 0)
-            if [[ -s "$model_tmp" ]]; then
+            # Gate on the STATUS, not on the file being non-empty. Without
+            # -f, curl writes an error body to -o, so a 401 leaves a short
+            # "bad auth token" in $model_tmp and `[[ -s … ]]` is true — the
+            # rejection branch below would be unreachable and the bundle
+            # would report "bytes: 14" as if it were the model.
+            if [[ "$model_code" == "200" && -s "$model_tmp" ]]; then
                 echo "bytes:           $(wc -c <"$model_tmp")"
                 # LC_ALL=C: awk honors the locale's decimal separator, so on a
                 # de_DE host this printed "0,02" — which reads as a thousands
@@ -2528,7 +2546,7 @@ cmd_bug_report() {
     # under the shared $timeout_cmd bound of ${LOGS_TIMEOUT}s.
     if [[ -n "$CTR_CMD" ]] \
         && "$CTR_CMD" ps --format '{{.Names}}' 2>/dev/null | grep -qx 'signalk-updater-server'; then
-        # SC2086: $timeout_cmd is empty or two words, unquoted on purpose.
+        # SC2086: $timeout_cmd is empty or `timeout -k N M`, unquoted on purpose.
         # SC2016: the ${...} inside the single-quoted -e script are JS
         # template literals evaluated by node, not shell expansions.
         # shellcheck disable=SC2086,SC2016
@@ -3056,7 +3074,7 @@ cmd_bug_report() {
             # status is the exec/timeout failing and is reported as
             # inconclusive rather than MISSING.
             addon_rc=0
-            # SC2086: $timeout_cmd is empty or two words, unquoted on purpose.
+            # SC2086: $timeout_cmd is empty or `timeout -k N M`, unquoted on purpose.
             # shellcheck disable=SC2086
             $timeout_cmd "$CTR_CMD" exec signalk-server test -f \
                 /home/node/signalk/node_modules/@canboat/canboatjs/build/Release/canSocket.node \

@@ -160,7 +160,12 @@ ALL_CONTAINERS='' assert_set "no containers → empty result" ""
 #    added later would silently reacquire the original blind spot. Comments
 #    are stripped first — the helper and several call sites document the old
 #    form by quoting it, and matching those would make this unfalsifiable.
-offenders=$(grep -vE '^[[:space:]]*#' "$TMPL"     | grep -nE "filter[ =]+'?name=signalk-" || true)
+# Blank comment lines rather than deleting them, so grep -n reports line
+# numbers that match $TMPL itself — with grep -v the stream is renumbered
+# and every reported location would be wrong. The character class covers
+# the unquoted, single- and double-quoted spellings of the filter.
+offenders=$(sed 's/^[[:space:]]*#.*$//' "$TMPL" \
+    | grep -nE "filter[ =]+[\"']?name=signalk-" || true)
 if [[ -z "$offenders" ]]; then
     echo "  [OK]   no call site hand-rolls the signalk- only filter"
 else
