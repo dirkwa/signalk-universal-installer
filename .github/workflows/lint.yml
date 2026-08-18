@@ -6,9 +6,23 @@ on:
   pull_request:
     branches: ['**']
 
+# One run per ref. Pushing a branch that has an open PR previously fired two
+# identical runs (push + pull_request) on the same commit, doubling the work
+# and the flake surface — on 2026-08-18 the pair split, the pull_request run
+# passing in 23s while the push run wedged for 42 minutes on an apt mirror.
+# `cancel-in-progress` also supersedes an in-flight run when new commits land,
+# so a branch under active rebase does not keep stale jobs alive.
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   shellcheck:
     runs-on: ubuntu-latest
+    # The whole suite finishes in ~1-2 minutes. 15 gives generous headroom
+    # while ensuring a wedged step fails in minutes instead of occupying a
+    # runner until the 6-hour default expires.
+    timeout-minutes: 15
     steps:
       # Full history + tags: check-pages-version.sh resolves version tags and
       # creates throwaway worktrees at specific commits, neither of which works
@@ -17,8 +31,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # ubuntu-latest ships shellcheck preinstalled (0.9.0 as of 2026-08),
+      # so the previous unconditional `apt-get update && apt-get install`
+      # reached out to every configured mirror only to report "shellcheck is
+      # already the newest version". That pointless network round-trip is
+      # exactly what hung for 42 minutes on 2026-08-18. Use what is on the
+      # image; only fall back to apt when it is genuinely missing, and bound
+      # both the step and the apt calls so a stalled mirror fails fast
+      # instead of hanging the job.
       - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if command -v shellcheck >/dev/null 2>&1; then
+            echo "shellcheck present: $(shellcheck --version | awk '/^version:/{print $2}')"
+            exit 0
+          fi
+          echo "shellcheck not on the image — installing"
+          sudo timeout -k 30 120 apt-get update
+          sudo timeout -k 30 180 apt-get install -y --no-install-recommends shellcheck
+          shellcheck --version
 
       - name: bash -n syntax check
         run: |
