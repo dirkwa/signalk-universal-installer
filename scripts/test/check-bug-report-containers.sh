@@ -48,12 +48,13 @@ fi
 # is ever reworded the awk silently matches nothing, the whole CLI is sourced,
 # and the dispatcher runs during the test — so assert the strip actually
 # happened rather than trusting it.
+# shellcheck disable=SC2016  # literal dispatcher line, no expansion wanted
 if grep -q '^case "\${1:-help}" in$' "$workdir/signalk-defs.sh"; then
     echo "[ERR] dispatcher still present after strip — the awk pattern is stale" >&2
     exit 2
 fi
 
-# shellcheck disable=SC1090
+# shellcheck disable=SC1090,SC1091  # path is built at runtime under $workdir
 source "$workdir/signalk-defs.sh"
 
 if ! declare -F signalk_all_containers >/dev/null; then
