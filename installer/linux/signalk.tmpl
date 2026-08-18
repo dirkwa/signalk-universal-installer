@@ -47,10 +47,13 @@
 #                          has no TTY to prompt on inside the VM).
 #   signalk bug-report [--to <dir>]
 #                          bundle logs + state into <dir>/signalk-bug-report-*.tar.gz
-#                          (default: /tmp). Set SIGNALK_BUGREPORT_NO_WS=1 to
-#                          skip the websocket delta sample, which briefly puts
-#                          the admin token in argv (readable by other local
-#                          users); useful on a shared host.
+#                          (default: /tmp). Set SIGNALK_BUGREPORT_WS_SAMPLE=1
+#                          to add a 5s websocket delta-rate sample — off by
+#                          default because websocat cannot read the auth
+#                          header from a file, so the admin token would sit
+#                          in argv (readable by other local users) while it
+#                          runs. Worth enabling to diagnose a slow Data
+#                          Browser on a single-operator box.
 #   signalk stop           stop signalk-server (the data plane) without
 #                          uninstalling; the updater + doctor consoles stay up.
 #                          Preserves all data/config/plugins and stays down
@@ -236,12 +239,16 @@ signalk_all_containers() {
     # unguarded call only when coreutils timeout is absent.
     local tmo=""
     command -v timeout >/dev/null 2>&1 && tmo="timeout -k 5 10"
-    local p
-    for p in "${prefixes[@]}"; do
-        # shellcheck disable=SC2086
-        $tmo "$ctr_cmd" ps -a --filter "name=$p" --format '{{.Names}}' 2>/dev/null \
-            | grep -E "^${p}" || true
-    done | sort -u
+    # ONE listing, not one per prefix. `--filter name=` is a substring
+    # match, so it narrows nothing the anchored grep below does not already
+    # decide — but on a wedged runtime each extra call is another full
+    # timeout budget, so the per-prefix loop multiplied the worst case by
+    # the number of prefixes (measured: 30s for two, vs 15s here).
+    local pat
+    pat=$(printf '%s|' "${prefixes[@]}")
+    # shellcheck disable=SC2086
+    $tmo "$ctr_cmd" ps -a --format '{{.Names}}' 2>/dev/null \
+        | grep -E "^(${pat%|})" | sort -u || true
 }
 
 # Probe a URL up to 3 times (5s each, ~2s apart) and report the last
@@ -1970,10 +1977,15 @@ cmd_bug_report() {
     # Container runtime.
     {
         echo "=== podman --version ==="
-        podman --version 2>&1 || true
+        # Every podman call in this bundle is bounded: a runtime wedged on
+        # the c/storage lock blocks FOREVER, and an unguarded call here
+        # hangs the whole collection at the moment it is most needed.
+        # shellcheck disable=SC2086
+        $timeout_cmd podman --version 2>&1 || true
         echo
         echo "=== podman info ==="
-        podman info 2>&1 || true
+        # shellcheck disable=SC2086
+        $timeout_cmd podman info 2>&1 || true
         echo
         echo "=== podman ps -a (all install containers) ==="
         # CreatedAt and Command round out the summary: CreatedAt dates the
@@ -1996,7 +2008,8 @@ cmd_bug_report() {
                 # here: an Image field like `ghcr.io/dirkwa/sk-questdb` would
                 # drag an unrelated container's row into the bundle. awk keyed
                 # on $1 also needs no metacharacter escaping.
-                podman ps -a \
+                # shellcheck disable=SC2086
+                $timeout_cmd podman ps -a \
                     --format '{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}\t{{.Command}}' 2>/dev/null \
                     | awk -F'\t' 'NR==FNR{n[$0];next} ($1 in n)' \
                         <(printf '%s\n' "$ctr_names") - || true
@@ -2004,7 +2017,8 @@ cmd_bug_report() {
         } 2>&1 || true
         echo
         echo "=== podman images (signalk + dirkwa) ==="
-        podman images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Created}}' \
+        # shellcheck disable=SC2086
+        $timeout_cmd podman images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Created}}' \
             2>&1 | grep -E 'signalk|dirkwa' || true
         echo
         # Image-store size, not just the signalk/dirkwa rows. A rootless store
@@ -2087,7 +2101,8 @@ cmd_bug_report() {
                     case "$ctr" in
                         signalk-updater-server|signalk-doctor-server) allow_urls=true ;;
                     esac
-                    "$CTR_CMD" inspect "$ctr" 2>/dev/null \
+                    # shellcheck disable=SC2086
+                    $timeout_cmd "$CTR_CMD" inspect "$ctr" 2>/dev/null \
                         | jq --argjson allow "$allow_urls" 'map(.Config.Env |= (
                                 if . == null then null
                                 else map(
@@ -2513,16 +2528,23 @@ cmd_bug_report() {
             # whatever is present and say so plainly when nothing is. Counting
             # frames for 5s is enough to separate an idle stream (<50/s) from a
             # flood (>500/s) — the distinction that matters.
-            # SIGNALK_BUGREPORT_NO_WS=1 skips the sample outright. websocat
-            # has no config-file option for headers (curl's -K equivalent),
-            # so the token is unavoidably in argv for the 5 seconds it runs
-            # and readable via /proc/<pid>/cmdline by any local user. That is
-            # a fair trade on a single-operator boat box, which is the normal
-            # case; on a shared host this gives the operator an actual lever
-            # rather than only a warning in a comment.
-            if [[ "${SIGNALK_BUGREPORT_NO_WS:-0}" == "1" ]]; then
-                echo "(skipped: SIGNALK_BUGREPORT_NO_WS=1 — the sample would put"
-                echo " the admin token in argv, readable via /proc/<pid>/cmdline)"
+            # OPT-IN, not opt-out. websocat has no config-file option for
+            # headers (curl's -K equivalent) and the server requires auth on
+            # this stream, so any way of sampling it puts the admin token in
+            # argv, readable via /proc/<pid>/cmdline by every local user for
+            # the ~5s it runs. Checked: an unauthenticated stream yields 1
+            # frame (the hello) and a `?token=` query param lands in argv
+            # just the same — the exposure cannot be engineered away, only
+            # chosen. So the default does not sample, and the operator opts
+            # in per run once they know the trade. The skip message names the
+            # variable, so a bundle that lacks the number says how to get it.
+            if [[ "${SIGNALK_BUGREPORT_WS_SAMPLE:-0}" != "1" ]]; then
+                echo "(not sampled — needs SIGNALK_BUGREPORT_WS_SAMPLE=1)"
+                echo "The sample is opt-in because websocat cannot take the auth"
+                echo "header from a file, so the admin token would sit in argv"
+                echo "(readable via /proc/<pid>/cmdline) for the ~5s it runs."
+                echo "On a single-operator box that is usually a fair trade:"
+                echo "  SIGNALK_BUGREPORT_WS_SAMPLE=1 signalk bug-report"
             elif command -v websocat >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
                 # Map the scheme: https:// must become wss://, or the
                 # handshake is refused on an SSL-plugin install (which is
@@ -2834,14 +2856,23 @@ cmd_bug_report() {
         # in runtime.txt. Skip silently if the runtime is docker.
         if [[ "$CTR_CMD" == "podman" ]]; then
             echo "=== podman system info --format json ==="
-            podman system info --format json 2>&1 || true
+            # shellcheck disable=SC2086
+            $timeout_cmd podman system info --format json 2>&1 || true
             echo
             # Per-image sizes + reclaimable bytes. This is the decisive view for
             # the "Copying blob … hangs" report: a store carrying hundreds of
             # orphaned layers across reinstalls shows up here as a large
             # reclaimable figure, where runtime.txt's filtered list cannot.
             echo "=== podman system df -v ==="
-            podman system df -v 2>&1 || true
+            # A longer bound than $timeout_cmd's 10s: `system df -v` walks
+            # every layer and legitimately takes seconds (3.5s on a modest
+            # store here), so 10s would truncate a slow-but-healthy answer.
+            # Still bounded — the point is to survive a wedge, not to wait.
+            if command -v timeout >/dev/null 2>&1; then
+                timeout -k 5 45 podman system df -v 2>&1 || true
+            else
+                podman system df -v 2>&1 || true
+            fi
             echo
             # Raw on-disk store size, independent of podman's accounting (catches
             # leftover/partial layer dirs an interrupted pull left behind).

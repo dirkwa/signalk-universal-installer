@@ -188,17 +188,25 @@ DOCTOR_SH=${DOCTOR_SH:-scripts/doctor.sh}
 offenders=""
 for src in "$TMPL" "$DOCTOR_SH"; do
     [[ -f "$src" ]] || continue
+    # Prefix EVERY matching line with the filename, not just the first:
+    # "$src:$hits" only labels the head of a multi-hit block and leaves the
+    # rest looking like they came from nowhere.
     hits=$(sed 's/^[[:space:]]*#.*$//' "$src" \
-        | grep -nE "filter[ =]+[\"']?name=signalk-" || true)
-    [[ -n "$hits" ]] && offenders+="$src:$hits"$'\n'
+        | grep -nE "filter[ =]+[\"']?name=signalk-" \
+        | sed "s|^|$src:|" || true)
+    [[ -n "$hits" ]] && offenders+="$hits"$'\n'
 done
 offenders=${offenders%$'\n'}
 if [[ -z "$offenders" ]]; then
     echo "  [OK]   no call site hand-rolls the signalk- only filter"
 else
     echo "  [MISS] a call site still filters on 'name=signalk-' directly:"
-    printf '         %s
-' "$offenders"
+    # Indent each line individually — a single printf with a multiline
+    # argument indents only the first. A read loop rather than word
+    # splitting, since the matched source lines contain spaces.
+    while IFS= read -r offender_line; do
+        printf '         %s\n' "$offender_line"
+    done <<<"$offenders"
     echo "         use signalk_all_containers() instead — it covers sk-* too"
     fail=1
 fi
