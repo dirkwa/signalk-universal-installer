@@ -47,7 +47,10 @@
 #                          has no TTY to prompt on inside the VM).
 #   signalk bug-report [--to <dir>]
 #                          bundle logs + state into <dir>/signalk-bug-report-*.tar.gz
-#                          (default: /tmp)
+#                          (default: /tmp). Set SIGNALK_BUGREPORT_NO_WS=1 to
+#                          skip the websocket delta sample, which briefly puts
+#                          the admin token in argv (readable by other local
+#                          users); useful on a shared host.
 #   signalk stop           stop signalk-server (the data plane) without
 #                          uninstalling; the updater + doctor consoles stay up.
 #                          Preserves all data/config/plugins and stays down
@@ -222,9 +225,21 @@ signalk_all_containers() {
     if [[ -n "$ns" && "$ns" =~ ^[a-z0-9]+$ && ${#ns} -le 32 && "$ns" != "sk" ]]; then
         prefixes+=("${ns}-")
     fi
+    # Bounded, and bounded with -k. A podman wedged on the c/storage lock
+    # spins in kernel space and IGNORES SIGTERM, so a plain `timeout N`
+    # waits for the child and bounds nothing (measured in
+    # scripts/test/check-podman-timeout-guards.sh: `timeout 3` returned
+    # after 121s, `timeout -k 2 3` after 5s). This helper is called from
+    # `signalk health` and from bug-report's runtime detection — both run
+    # before bug-report's $timeout_cmd exists — so it carries its own
+    # guard rather than depending on the caller's. Falls through to an
+    # unguarded call only when coreutils timeout is absent.
+    local tmo=""
+    command -v timeout >/dev/null 2>&1 && tmo="timeout -k 5 10"
     local p
     for p in "${prefixes[@]}"; do
-        "$ctr_cmd" ps -a --filter "name=$p" --format '{{.Names}}' 2>/dev/null \
+        # shellcheck disable=SC2086
+        $tmo "$ctr_cmd" ps -a --filter "name=$p" --format '{{.Names}}' 2>/dev/null \
             | grep -E "^${p}" || true
     done | sort -u
 }
@@ -334,7 +349,13 @@ cmd_health() {
     {
         health_ctrs=$(signalk_all_containers podman)
         if [[ -n "$health_ctrs" ]]; then
-            podman ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null \
+            # Same -k bound as the helper: this is the second podman call in
+            # `signalk health` and an unguarded one re-opens the hang the
+            # helper's guard just closed.
+            health_tmo=""
+            command -v timeout >/dev/null 2>&1 && health_tmo="timeout -k 5 10"
+            # shellcheck disable=SC2086
+            $health_tmo podman ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null \
                 | awk -F'\t' 'NR==FNR{n[$0];next} ($1 in n){printf "%s  %s  %s\n", $1, $2, $3}' \
                     <(printf '%s\n' "$health_ctrs") - || true
         fi
@@ -2492,7 +2513,17 @@ cmd_bug_report() {
             # whatever is present and say so plainly when nothing is. Counting
             # frames for 5s is enough to separate an idle stream (<50/s) from a
             # flood (>500/s) — the distinction that matters.
-            if command -v websocat >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+            # SIGNALK_BUGREPORT_NO_WS=1 skips the sample outright. websocat
+            # has no config-file option for headers (curl's -K equivalent),
+            # so the token is unavoidably in argv for the 5 seconds it runs
+            # and readable via /proc/<pid>/cmdline by any local user. That is
+            # a fair trade on a single-operator boat box, which is the normal
+            # case; on a shared host this gives the operator an actual lever
+            # rather than only a warning in a comment.
+            if [[ "${SIGNALK_BUGREPORT_NO_WS:-0}" == "1" ]]; then
+                echo "(skipped: SIGNALK_BUGREPORT_NO_WS=1 — the sample would put"
+                echo " the admin token in argv, readable via /proc/<pid>/cmdline)"
+            elif command -v websocat >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
                 # Map the scheme: https:// must become wss://, or the
                 # handshake is refused on an SSL-plugin install (which is
                 # the common case on a boat with a real certificate) and

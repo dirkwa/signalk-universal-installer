@@ -96,24 +96,33 @@ export PATH="$workdir:$PATH"
 
 fail=0
 
+# Returns non-zero on mismatch (see the comment at the failure path), so
+# every bare call site appends `|| true`: under `set -e` an unguarded
+# failing call would abort the script and hide the remaining assertions,
+# turning one real regression into a single-line report.
 assert_set() {
     local label=$1 expected=$2 got
     got=$(signalk_all_containers fakectr | paste -sd' ' -)
     if [[ "$got" == "$expected" ]]; then
         echo "  [OK]   $label"
-    else
-        echo "  [MISS] $label"
-        echo "         expected: [$expected]"
-        echo "         got:      [$got]"
-        fail=1
+        return 0
     fi
+    echo "  [MISS] $label"
+    echo "         expected: [$expected]"
+    echo "         got:      [$got]"
+    fail=1
+    # Return non-zero as well as setting fail. Case 6 calls this inside a
+    # subshell (to contain its ALL_CONTAINERS override), and a subshell's
+    # `fail=1` cannot reach the parent — without this the caller's
+    # `|| fail=1` never fires and a real failure there is silently lost.
+    return 1
 }
 
 # 1. The regression itself: default namespace must capture the engine
 #    containers AND every sk-* the plugin manages. Output is sort -u'd.
 unset SIGNALK_CONTAINER_NAMESPACE
 assert_set "default namespace captures engine + all sk-* plugin containers" \
-"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite"
+"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite" || true
 
 # 2. A container merely CONTAINING the token is not swept in. `--filter
 #    name=` is a substring match, so `my-signalk-backup` matches the raw
@@ -133,20 +142,20 @@ done
 #    run both stacks; the bundle should show each).
 export SIGNALK_CONTAINER_NAMESPACE=devpod
 assert_set "devpod namespace adds devpod-* alongside sk-*" \
-"devpod-questdb signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite"
+"devpod-questdb signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite" || true
 
 # 4. An invalid namespace (typo, broken expansion) must not build a bogus
 #    pattern — fall back to the defaults, same as the plugin does.
 export SIGNALK_CONTAINER_NAMESPACE='bad ns!'
 assert_set "invalid namespace falls back to defaults" \
-"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite"
+"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite" || true
 
 # 5. Explicit `sk` namespace resolves to exactly the default set. Asserted
 #    as an exact set, NOT with `uniq -d`: the helper ends in `sort -u`, so a
 #    duplicate check passes for every possible input and proves nothing.
 export SIGNALK_CONTAINER_NAMESPACE=sk
 assert_set "namespace 'sk' matches the default set" \
-"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite"
+"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite" || true
 
 # 5b. An over-long namespace is invalid (the plugin caps it at 32 chars) and
 #     must fall back to the defaults. ALL_CONTAINERS carries a container
@@ -156,7 +165,7 @@ assert_set "namespace 'sk' matches the default set" \
 long_ns=$(printf 'a%.0s' {1..40})
 export SIGNALK_CONTAINER_NAMESPACE="$long_ns"
 assert_set "over-long namespace falls back to defaults" \
-"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite"
+"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite" || true
 
 # 6. No containers at all → empty output, no error under set -e. Run in a
 #    subshell so the ALL_CONTAINERS override cannot leak into later tests.
@@ -192,6 +201,36 @@ else
 ' "$offenders"
     echo "         use signalk_all_containers() instead — it covers sk-* too"
     fail=1
+fi
+
+# 8. A wedged runtime must not hang discovery. podman blocks FOREVER on a
+#    held c/storage lock, and because it ignores SIGTERM a plain `timeout`
+#    waits for it — so the guard must use -k. The stub below ignores SIGTERM
+#    for exactly that reason; do NOT simplify it to a bare `sleep`, which
+#    dies on SIGTERM and would make this pass with no guard at all (the same
+#    trap documented in check-podman-timeout-guards.sh).
+if command -v timeout >/dev/null 2>&1; then
+    mkdir -p "$workdir/wedged"
+    cat >"$workdir/wedged/podman" <<'STUB'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 300
+STUB
+    chmod +x "$workdir/wedged/podman"
+    start=$(date +%s)
+    ( PATH="$workdir/wedged:$PATH"; signalk_all_containers podman ) >/dev/null 2>&1 || true
+    elapsed=$(( $(date +%s) - start ))
+    # Two prefixes at `timeout -k 5 10` each: ~30s worst case with the
+    # escalation landing. Anything near the stub's 300s means no bound.
+    if (( elapsed <= 60 )); then
+        echo "  [OK]   wedged runtime bounded (${elapsed}s, stub sleeps 300s)"
+    else
+        echo "  [MISS] wedged runtime NOT bounded: took ${elapsed}s"
+        echo "         signalk_all_containers needs 'timeout -k' on its ps calls"
+        fail=1
+    fi
+else
+    echo "  [SKIP] coreutils timeout absent — cannot test the wedged-runtime bound"
 fi
 
 if (( fail )); then
