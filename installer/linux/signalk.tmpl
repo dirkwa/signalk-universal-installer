@@ -2265,15 +2265,26 @@ cmd_bug_report() {
         [[ -f "$f" ]] || continue
         # Skip the engine units already copied verbatim above.
         [[ -f "$bundle/quadlets/${ctr}.container" ]] && continue
-        # Redact the whole value list rather than per key=value: systemd
-        # accepts several forms on one line — `Environment=A=1 B=2` and
-        # `Environment="A=1" "B=2"` — and a per-pair regex leaks the second
-        # and later pairs of the quoted form. Keeping only the directive
-        # name is enough for triage (which vars a unit sets) and cannot
-        # leak a value. Secret= carries only a secret NAME, not its value,
-        # so it is left intact.
-        sed -E 's/^([[:space:]]*Environment)=.*/\1=<redacted>/' \
-            "$f" >"$bundle/quadlets/${ctr}.container" 2>/dev/null || true
+        # Redact the whole value list rather than per key=value, and drop
+        # any backslash-continued lines that belong to it. systemd accepts
+        # all of `Environment=A=1 B=2`, `Environment="A=1" "B=2"`, and a
+        # directive continued across physical lines with a trailing `\`.
+        # A per-pair regex leaks the later pairs of the quoted form, and a
+        # single-line regex leaks every continuation line — so match the
+        # directive, print only its name, then swallow lines until one does
+        # not end in a backslash. Keeping the directive name is enough for
+        # triage (which vars a unit sets) and cannot leak a value. Secret=
+        # carries only a secret NAME, not its value, so it stays intact.
+        awk '
+            skip { if ($0 !~ /\\[[:space:]]*$/) skip = 0; next }
+            /^[[:space:]]*Environment=/ {
+                match($0, /^[[:space:]]*Environment/)
+                printf "%s=<redacted>\n", substr($0, RSTART, RLENGTH)
+                if ($0 ~ /\\[[:space:]]*$/) skip = 1
+                next
+            }
+            { print }
+        ' "$f" >"$bundle/quadlets/${ctr}.container" 2>/dev/null || true
     done
 
     # Doctor snapshots index (file listing only — snapshot contents
@@ -2348,20 +2359,31 @@ cmd_bug_report() {
             echo "=== full model size ==="
             # -m 20: on a saturated server this endpoint is itself slow, which
             # is diagnostic. Time it so a slow answer is visible as a number.
+            #
+            # Streamed to a temp file, never held in a shell variable. The
+            # full model scales with vessel count: ~220 KB for a handful of
+            # vessels, but an install parked in a busy AIS harbour reaches
+            # tens of MB. Holding that in a variable and re-piping it to
+            # wc/jq four times means several copies resident at once, on a
+            # Pi that is already the memory-constrained case this bundle
+            # exists to diagnose. The file lives under $outdir (mktemp -d),
+            # OUTSIDE $bundle, so it is never tarred; the function's
+            # existing cleanup removes it with the rest of the scratch dir.
+            model_tmp="$outdir/model.json"
             model_start=$(date +%s.%N 2>/dev/null || echo 0)
-            model=$(curl -fsS -m 20 -H "Authorization: Bearer $SK_TOKEN" \
-                "$api_base/" 2>/dev/null || true)
+            curl -fsS -m 20 -H "Authorization: Bearer $SK_TOKEN" \
+                -o "$model_tmp" "$api_base/" 2>/dev/null || true
             model_end=$(date +%s.%N 2>/dev/null || echo 0)
-            if [[ -n "$model" ]]; then
-                echo "bytes:           $(printf '%s' "$model" | wc -c)"
+            if [[ -s "$model_tmp" ]]; then
+                echo "bytes:           $(wc -c <"$model_tmp")"
                 # LC_ALL=C: awk honors the locale's decimal separator, so on a
                 # de_DE host this printed "0,02" — which reads as a thousands
                 # separator to anyone triaging, and breaks any downstream
                 # numeric compare. Force the C locale for the format only.
                 echo "fetch seconds:   $(LC_ALL=C awk -v a="$model_start" -v b="$model_end" 'BEGIN{printf "%.2f", b-a}' 2>/dev/null || echo '?')"
-                echo "vessel contexts: $(printf '%s' "$model" | jq -r '(.vessels // {}) | length' 2>/dev/null || echo '?')"
-                echo "self paths:      $(printf '%s' "$model" | jq -r '[(.vessels // {})[.self // "" | sub("^vessels\\."; "")] // {} | paths(scalars)] | length' 2>/dev/null || echo '?')"
-                echo "other top-level: $(printf '%s' "$model" | jq -r '[keys[] | select(. != "vessels" and . != "self" and . != "version")] | join(", ")' 2>/dev/null || echo '?')"
+                echo "vessel contexts: $(jq -r '(.vessels // {}) | length' <"$model_tmp" 2>/dev/null || echo '?')"
+                echo "self paths:      $(jq -r '[(.vessels // {})[.self // "" | sub("^vessels\\."; "")] // {} | paths(scalars)] | length' <"$model_tmp" 2>/dev/null || echo '?')"
+                echo "other top-level: $(jq -r '[keys[] | select(. != "vessels" and . != "self" and . != "version")] | join(", ")' <"$model_tmp" 2>/dev/null || echo '?')"
             else
                 echo "(model fetch failed or timed out — a timeout here is itself"
                 echo " a strong signal the server is saturated)"
