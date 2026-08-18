@@ -2210,15 +2210,18 @@ cmd_bug_report() {
         # `unhealthy` is a passing start with a failing healthcheck. These
         # three read identically as "missing" to an operator looking at the
         # web UI, and are distinguished only here.
-        if [[ -n "$CTR_CMD" ]] && command -v jq >/dev/null 2>&1; then
+        # No jq gate: this loop uses the runtime's own --format (Go
+        # templates), so it works on a host without jq — which is exactly
+        # the minimal host where the rest of the bundle is thinnest.
+        if [[ -n "$CTR_CMD" ]]; then
             for ctr in "${SIGNALK_CTRS[@]}"; do
                 [[ -n "$ctr" ]] || continue
                 "$CTR_CMD" inspect "$ctr" --format \
-                    '{{.Name}}	state={{.State.Status}}	exit={{.State.ExitCode}}	started={{.State.StartedAt}}	restarts={{.RestartCount}}' \
+                    '{{.Name}}	state={{.State.Status}}	exit={{.State.ExitCode}}	started={{.State.StartedAt}}	restarts={{.RestartCount}}	health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
                     2>/dev/null || echo "$ctr	(inspect failed)"
             done
         else
-            echo "(no container runtime or jq — skipped)"
+            echo "(no container runtime on PATH — skipped)"
         fi
         echo
         echo "=== containers defined but never started ==="
@@ -2238,18 +2241,39 @@ cmd_bug_report() {
         fi
     } >"$bundle/container-plugin-state.txt" 2>&1
 
-    # Quadlets for plugin-managed containers. The engine loop above copies
-    # only "${UNITS[@]}" (the four installer-owned units). Containers the
-    # plugin manages via Quadlet are equally likely to be the thing that
-    # broke — a hand-edited or drift-recreated `sk-*.container` is a common
-    # cause of "it won't come back after a restart".
-    for f in "$QUADLET_DIR"/*.container; do
+    # Quadlets for any OTHER container in this install that is Quadlet-run.
+    # The engine loop above copies only "${UNITS[@]}"; a Quadlet-deployed
+    # sibling (the HALPI2/HaLOS layouts deploy some this way) is equally
+    # likely to be the thing that broke — a hand-edited or drift-recreated
+    # unit is a common cause of "it won't come back after a restart".
+    #
+    # Scoped to $SIGNALK_CTRS, NOT every *.container in the directory: this
+    # is the user's own Quadlet dir and may hold units for containers that
+    # have nothing to do with Signal K. Copying those would put unrelated
+    # config — and any credentials in them — into a bundle destined for a
+    # public issue tracker.
+    #
+    # Environment= values are redacted (keys preserved) for the same reason
+    # the inspect dumps above redact them: a Quadlet for a database or
+    # broker routinely carries its password inline. The engine units copied
+    # above keep their values — they are installer-owned and their
+    # SIGNALK_*URL probe targets are exactly what makes a broken
+    # container-to-host path diagnosable.
+    for ctr in "${SIGNALK_CTRS[@]}"; do
+        [[ -n "$ctr" ]] || continue
+        f="$QUADLET_DIR/${ctr}.container"
         [[ -f "$f" ]] || continue
-        base=$(basename "$f")
-        # Skip the engine units already copied above.
-        if [[ ! -f "$bundle/quadlets/$base" ]]; then
-            cp "$f" "$bundle/quadlets/$base" 2>/dev/null || true
-        fi
+        # Skip the engine units already copied verbatim above.
+        [[ -f "$bundle/quadlets/${ctr}.container" ]] && continue
+        # Redact the whole value list rather than per key=value: systemd
+        # accepts several forms on one line — `Environment=A=1 B=2` and
+        # `Environment="A=1" "B=2"` — and a per-pair regex leaks the second
+        # and later pairs of the quoted form. Keeping only the directive
+        # name is enough for triage (which vars a unit sets) and cannot
+        # leak a value. Secret= carries only a secret NAME, not its value,
+        # so it is left intact.
+        sed -E 's/^([[:space:]]*Environment)=.*/\1=<redacted>/' \
+            "$f" >"$bundle/quadlets/${ctr}.container" 2>/dev/null || true
     done
 
     # Doctor snapshots index (file listing only — snapshot contents
