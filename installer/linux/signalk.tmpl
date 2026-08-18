@@ -2030,11 +2030,14 @@ cmd_bug_report() {
         # visible in first-pass triage; `podman system df` (with reclaimable
         # bytes) lives in storage-and-cgroup.txt for the full breakdown.
         echo "=== image-store totals ==="
-        echo "all images (incl. <none>): $(podman images -aq 2>/dev/null | wc -l)"
-        echo "dangling <none> layers:    $(podman images -f dangling=true -q 2>/dev/null | wc -l)"
+        # shellcheck disable=SC2086
+        echo "all images (incl. <none>): $($timeout_cmd podman images -aq 2>/dev/null | wc -l)"
+        # shellcheck disable=SC2086
+        echo "dangling <none> layers:    $($timeout_cmd podman images -f dangling=true -q 2>/dev/null | wc -l)"
         echo
         echo "=== docker --version (if shim) ==="
-        docker --version 2>&1 || true
+        # shellcheck disable=SC2086
+        $timeout_cmd docker --version 2>&1 || true
     } >"$bundle/runtime.txt" 2>&1
 
     # Per-container inspect + logs for every signalk-* container.
@@ -2594,6 +2597,10 @@ cmd_bug_report() {
                 timeout 5 websocat -n -k -B 1048576 \
                     -H "Authorization: Bearer $SK_TOKEN" \
                     -- "$ws_url" >"$ws_out" 2>/dev/null || ws_rc=$?
+                # `wc -l` counts newlines, so a final frame cut off by the
+                # 5s timeout without its terminator is not counted — an
+                # undercount of at most 1 in a sample of ~1300. Not worth
+                # correcting; noted so the number is not read as exact.
                 ws_frames=$(wc -l <"$ws_out" 2>/dev/null || echo 0)
                 if [[ "$ws_rc" -eq 124 || "$ws_frames" -gt 0 ]]; then
                     echo "frames in 5s:  $ws_frames"
@@ -2605,7 +2612,11 @@ cmd_bug_report() {
                     echo " NOT an idle server. Check the token and the scheme/port.)"
                 fi
             else
-                echo "(websocat not on PATH — delta rate not sampled)"
+                # Names both prerequisites: the guard above tests websocat
+                # AND timeout, so blaming websocat alone misdirects on a
+                # host that has it but lacks coreutils timeout.
+                echo "(delta rate not sampled — needs both websocat and"
+                echo " coreutils timeout on PATH)"
                 echo "To measure by hand while the UI is slow (note the '--',"
                 echo "without which -H swallows the URL and you get 0 frames):"
                 echo "  websocat -n -H 'Authorization: Bearer <token>' \\"
@@ -2880,7 +2891,8 @@ cmd_bug_report() {
             du -sh "${XDG_DATA_HOME:-$HOME/.local/share}/containers/storage" 2>&1 || true
         elif [[ "$CTR_CMD" == "docker" ]]; then
             echo "=== docker info --format '{{json .}}' ==="
-            docker info --format '{{json .}}' 2>&1 || true
+            # shellcheck disable=SC2086
+            $timeout_cmd docker info --format '{{json .}}' 2>&1 || true
         fi
     } >"$bundle/storage-and-cgroup.txt" 2>&1
 
@@ -3108,7 +3120,8 @@ cmd_bug_report() {
         # locations.
         aardvark_bin=""
         if command -v podman >/dev/null 2>&1; then
-            aardvark_bin="$(podman info --format '{{.Host.NetworkBackendInfo.DNS.Path}}' 2>/dev/null || true)"
+            # shellcheck disable=SC2086
+            aardvark_bin="$($timeout_cmd podman info --format '{{.Host.NetworkBackendInfo.DNS.Path}}' 2>/dev/null || true)"
         fi
         if [[ -z "$aardvark_bin" || ! -x "$aardvark_bin" ]]; then
             aardvark_bin=""

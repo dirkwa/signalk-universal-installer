@@ -61,8 +61,11 @@ if ! declare -F signalk_all_containers >/dev/null; then
     exit 2
 fi
 
-# Stub runtime: emulates `<cli> ps -a --filter name=<x> --format {{.Names}}`
-# with podman's real semantics — --filter name= is a SUBSTRING match.
+# Stub runtime: emulates `<cli> ps -a --format {{.Names}}`. The helper now
+# issues ONE unfiltered listing and does all narrowing with an anchored
+# grep, so the stub prints the whole fixture set and the assertions below
+# are testing that grep — which is the part that has to reject
+# `my-signalk-backup` and friends.
 ALL_CONTAINERS='signalk-server
 signalk-updater-server
 signalk-doctor-server
@@ -81,14 +84,18 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-probe'
 
 cat >"$workdir/fakectr" <<'STUB'
 #!/usr/bin/env bash
-# Emulate `ps -a --filter name=<needle> --format ...` (substring match).
-needle=""
+# Emulate `ps -a --format {{.Names}}`: list everything, filter nothing.
+# A `--filter name=` still being passed would be a regression (it costs an
+# extra runtime call per prefix and narrows nothing), so fail loudly on it.
 for arg in "$@"; do
     case "$arg" in
-        name=*) needle="${arg#name=}" ;;
+        --filter)
+            echo "STUB ERROR: helper passed --filter; it should list once" >&2
+            exit 3
+            ;;
     esac
 done
-printf '%s\n' "$ALL_CONTAINERS" | grep -F "$needle" || true
+printf '%s\n' "$ALL_CONTAINERS"
 STUB
 chmod +x "$workdir/fakectr"
 export ALL_CONTAINERS
@@ -228,8 +235,8 @@ STUB
     start=$(date +%s)
     ( PATH="$workdir/wedged:$PATH"; signalk_all_containers podman ) >/dev/null 2>&1 || true
     elapsed=$(( $(date +%s) - start ))
-    # Two prefixes at `timeout -k 5 10` each: ~30s worst case with the
-    # escalation landing. Anything near the stub's 300s means no bound.
+    # One listing at `timeout -k 5 10`: ~15s worst case with the escalation
+    # landing. Anything near the stub's 300s means no bound at all.
     if (( elapsed <= 60 )); then
         echo "  [OK]   wedged runtime bounded (${elapsed}s, stub sleeps 300s)"
     else
