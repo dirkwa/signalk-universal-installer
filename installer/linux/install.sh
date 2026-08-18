@@ -872,24 +872,74 @@ fi
 # range — and then the very first `podman pull` below fails with
 # "lookup user ...: no subuid ranges found". preflight only warns about this; we
 # actually fix it here. Idempotent: only added when missing.
+# `podman system migrate` makes podman re-read the ranges. Its side effects
+# are what make it dangerous on a re-run over a live install: it stops every
+# container and kills the rootless pause process (the catatonit whose user
+# namespace every container joins). A socket-activated `podman system service`
+# that was already running survives the migrate in its OLD user namespace, and
+# every container created over the socket from then until that service is
+# restarted lands in that old namespace — signalk-container's ensureRunning
+# recreates sk-signalk-grafana / -backup-server / -tailscale-server seconds
+# after signalk-server comes back, well inside that window. When step 15a
+# then restarts the service into the new pause namespace, it can no longer
+# signal those containers: `podman stop` returns "operation not permitted",
+# `podman rm` fails with "could not be stopped" (observed 2026-08-18 on a
+# re-run; the only way out is killing the container process from inside its
+# own namespace).
+#
+# Two guards: migrate only when a range was actually added — on a re-run the
+# ranges exist and the migrate is a no-op with side effects — and, when it
+# does run, stop the API service on both sides of it. The stop before removes
+# the service that predates the migrate; the stop after catches a service
+# that a socket connection respawned WHILE the migrate ran, because that one
+# joined the old pause process, which is only killed at the very end of the
+# migrate. Once the migrate has returned, any respawn creates or joins the
+# new pause namespace like every later `podman run` does.
+#
+# Stop podman.service, never podman.socket, and never mask the service: the
+# socket inode is bind-mounted into the running engine containers, and a
+# connection arriving at the socket while its service is masked puts
+# podman.socket into `failed (Result: resources)` — verified on podman 5.4.2
+# / systemd 257 — so it has to be restarted, which swaps the inode and
+# strands every container holding the old one. Also used by the
+# fuse-overlayfs switch below.
+podman_migrate() {
+    stop_podman_service
+    podman system migrate >/dev/null 2>&1 || true
+    stop_podman_service
+}
+stop_podman_service() {
+    if systemctl --user is-active --quiet podman.service 2>/dev/null; then
+        systemctl --user stop podman.service >/dev/null 2>&1 \
+            || warn "Could not stop podman.service around migrate; containers started over the socket before step 15a may land in a stale user namespace"
+    fi
+}
+
+subid_ranges_added=0
 if ! grep -q "^${USER}:" /etc/subuid 2>/dev/null; then
     info "Adding subuid range for $USER (rootless podman; requires sudo)"
-    $SUDO usermod --add-subuids 100000-165535 "$USER" || warn "could not add subuid range for $USER"
+    if $SUDO usermod --add-subuids 100000-165535 "$USER"; then
+        subid_ranges_added=1
+    else
+        warn "could not add subuid range for $USER"
+    fi
 fi
 if ! grep -q "^${USER}:" /etc/subgid 2>/dev/null; then
     info "Adding subgid range for $USER (rootless podman; requires sudo)"
-    $SUDO usermod --add-subgids 100000-165535 "$USER" || warn "could not add subgid range for $USER"
+    if $SUDO usermod --add-subgids 100000-165535 "$USER"; then
+        subid_ranges_added=1
+    else
+        warn "could not add subgid range for $USER"
+    fi
 fi
-# Re-read the (possibly new) ranges so the first pull doesn't trip over a stale
-# user-namespace mapping.
-podman system migrate >/dev/null 2>&1 || true
+if (( subid_ranges_added )); then
+    podman_migrate
+fi
 
-# NOTE: the rootless podman API service is realigned with the containers' pause
-# namespace LATE — after the final container start (search "Realigning podman
-# API service" below), NOT here. Doing it here is too early: starting the
-# keep-id containers further down recreates the pause process AFTER this point,
-# so an early realign is immediately undone and the socket service is left in a
-# sibling namespace it cannot enter. See that block's comment for the mechanism.
+# NOTE: the rootless podman API service is additionally realigned with the
+# containers' pause namespace LATE — after the final container start (search
+# "Realigning podman API service" below). podman_migrate above covers the
+# migrate window; the late restart covers a service that predates this run.
 
 # jq smooths a few optional steps (sslport / vessel-identity / security seeding,
 # admin-user lookup, the last-good snapshot) and `signalk bug-report`'s JSON
@@ -944,7 +994,7 @@ if [[ "$STORAGE_FS" == "zfs" ]]; then
             warn "If you hit slow image pulls or 'gid_map: Invalid argument' on first start,"
             warn "edit it to set [storage].driver=\"overlay\" and"
             warn "[storage.options.overlay].mount_program=\"/usr/bin/fuse-overlayfs\","
-            warn "then run: podman system reset --force && podman system migrate"
+            warn "then run: systemctl --user stop podman.service && podman system reset --force && systemctl --user stop podman.service && podman system migrate && systemctl --user stop podman.service"
         fi
     else
         # `podman system reset` is destructive if images/containers
@@ -953,7 +1003,7 @@ if [[ "$STORAGE_FS" == "zfs" ]]; then
         if [[ -n "$(podman images -q 2>/dev/null)" ]] || [[ -n "$(podman ps -aq 2>/dev/null)" ]]; then
             warn "Found existing podman images/containers — skipping driver switch to avoid data loss."
             warn "If first start is slow or fails on ZFS, manually run:"
-            warn "  podman system reset --force && podman system migrate"
+            warn "  systemctl --user stop podman.service && podman system reset --force && systemctl --user stop podman.service && podman system migrate && systemctl --user stop podman.service"
             warn "after writing $STORAGE_CONF (see docs/recovery.md)."
         else
             cat >"$STORAGE_CONF" <<'EOF'
@@ -970,7 +1020,7 @@ EOF
             chmod 0644 "$STORAGE_CONF"
             # storage layout is empty: a reset is a no-op but migrate
             # picks up the new mount_program for any future pulls.
-            podman system migrate >/dev/null 2>&1 || true
+            podman_migrate
             ok "fuse-overlayfs configured in $STORAGE_CONF"
         fi
     fi
@@ -2061,6 +2111,11 @@ fi
 # until a socket consumer hits it — observed as the doctor's drift scan
 # reporting a baffling "Permission denied" reading package.json out of
 # signalk-server, while a shell `podman exec` on the same file worked.
+#
+# The mirror-image failure — containers created over the socket AFTER the pause
+# process was replaced but BEFORE this restart — is closed at the source by
+# podman_migrate (section "Podman"), which stops the service directly behind
+# the only `podman system migrate` calls in this script.
 #
 # Restart ONLY podman.service (never podman.socket): cycling the service makes
 # it rejoin the now-final pause namespace, while the socket inode stays put so
