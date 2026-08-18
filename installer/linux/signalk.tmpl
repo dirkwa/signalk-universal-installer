@@ -2604,9 +2604,17 @@ cmd_bug_report() {
                 # would report double the true rate — on a diagnostic whose
                 # whole purpose is to say whether the rate is high.
                 ws_t0=$(date +%s)
-                timeout -k 5 5 websocat -n -k -B 1048576 \
-                    -H "Authorization: Bearer $SK_TOKEN" \
-                    -- "$ws_url" >"$ws_out" 2>/dev/null || ws_rc=$?
+                # Run in a subshell with job-control notices off: when the -k
+                # escalation SIGKILLs the child, bash otherwise prints its own
+                # "Killed  timeout -k 5 5 websocat … Bearer <token>" line to
+                # stderr — which lands in the bundle AND carries the admin
+                # token in the echoed command. `set +m` plus the redirect
+                # keeps that notice out of the report entirely.
+                ( set +m
+                  timeout -k 5 5 websocat -n -k -B 1048576 \
+                      -H "Authorization: Bearer $SK_TOKEN" \
+                      -- "$ws_url" >"$ws_out" 2>/dev/null
+                ) 2>/dev/null || ws_rc=$?
                 ws_secs=$(( $(date +%s) - ws_t0 ))
                 # `if`, not `[[ … ]] && …`: the && form leaves a non-zero
                 # status when the test is false, which under `set -e` aborts
@@ -2627,14 +2635,23 @@ cmd_bug_report() {
                 # for its own reasons after emitting a few frames is a failed
                 # sample, and treating it as good would publish a rate
                 # computed from a truncated window.
-                if [[ "$ws_rc" -eq 124 || "$ws_rc" -eq 137 ]]; then
+                # ...AND the deadline was actually reached. 137 is
+                # 128+SIGKILL, which a child can also produce by being killed
+                # early for reasons of its own — verified: a process SIGKILLed
+                # at 1s under `timeout -k 5 5` also exits 137. Without the
+                # elapsed check that reads as a completed sample and the rate
+                # gets computed from a 1s window. `-ge 5` is the configured
+                # cutoff; the escalation only ever pushes it later.
+                if [[ ( "$ws_rc" -eq 124 || "$ws_rc" -eq 137 ) && "$ws_secs" -ge 5 ]]; then
                     echo "frames in ${ws_secs}s: $ws_frames"
                     echo "approx per s:  $(( ws_frames / ws_secs ))"
                     echo "(>500/s means the delta stream, not the browser, is the bottleneck;"
                     echo " a healthy cruising install is typically well under 100/s)"
                 else
-                    echo "(websocket sample failed: websocat exit $ws_rc, url $ws_url —"
-                    echo " NOT an idle server. Check the token and the scheme/port.)"
+                    echo "(websocket sample failed: websocat exit $ws_rc after"
+                    echo " ${ws_secs}s, url $ws_url — NOT an idle server. An exit"
+                    echo " before the 5s cutoff means the connection dropped;"
+                    echo " check the token and the scheme/port.)"
                 fi
             else
                 # Names both prerequisites: the guard above tests websocat
