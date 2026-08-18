@@ -1,19 +1,29 @@
 name: lint
 
 on:
+  # `push` only on master, `pull_request` for everything else. Previously both
+  # were '**', so a branch with an open PR fired TWO identical runs per push —
+  # double the minutes, and double the exposure to a flaky step. Concurrency
+  # cannot merge them: the push run's github.ref is refs/heads/<branch> while
+  # the pull_request run's is refs/pull/<n>/merge, so they never share a group
+  # (verified on PR #269 — two runs, both completed). Restricting the trigger
+  # removes the duplicate at the source instead.
+  #
+  # Coverage is unchanged in practice: proposed work is linted via its PR, and
+  # master is linted on every push (including merge commits, which no PR run
+  # covers). A branch pushed with no PR open is not linted until a PR exists,
+  # which is when the result is actually read.
   push:
-    branches: ['**']
+    branches: [master]
   pull_request:
     branches: ['**']
 
-# One run per ref. Pushing a branch that has an open PR previously fired two
-# identical runs (push + pull_request) on the same commit, doubling the work
-# and the flake surface — on 2026-08-18 the pair split, the pull_request run
-# passing in 23s while the push run wedged for 42 minutes on an apt mirror.
-# `cancel-in-progress` also supersedes an in-flight run when new commits land,
-# so a branch under active rebase does not keep stale jobs alive.
+# Supersede an in-flight run when newer commits land on the same PR or on
+# master, so a branch under active rebase does not keep stale jobs alive.
+# This is orthogonal to the trigger change above: that removes the push/PR
+# duplicate for ONE commit, this collapses a rapid SERIES of commits.
 concurrency:
-  group: lint-${{ github.workflow }}-${{ github.ref }}
+  group: lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

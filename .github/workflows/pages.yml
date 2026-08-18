@@ -23,9 +23,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Bound the job so a wedged step fails in minutes rather than
-    # holding a runner until the 6-hour default expires.
-    timeout-minutes: 20
+    # Bound the job so a wedged step fails in minutes rather than holding a
+    # runner until the 6-hour default expires. Real builds run 24-48s, so 15
+    # is ~20x headroom.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
