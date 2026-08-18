@@ -2233,12 +2233,37 @@ cmd_bug_report() {
         fi
     done
 
-    # Quadlet sources (config, not secrets).
+    # Quadlet sources for the engine units.
+    #
+    # These are installer-generated and today carry no secrets — only
+    # PORT, LOG_LEVEL, *_DIR paths and the SIGNALK_*URL / DOCTOR_HEALTH_URL
+    # probe targets. But they are ordinary files in the operator's own
+    # Quadlet dir and DO get hand-edited (adding an API key for a plugin,
+    # a broker password, a cloud token), so copying them verbatim bets the
+    # operator never did that. Redact by allowlist instead: the
+    # installer-owned diagnostic variables keep their values, because a
+    # broken container-to-host probe path is unreadable without them, and
+    # every other Environment= is reduced to its key. Same directive set
+    # and continuation handling as the non-engine copy below.
     mkdir -p "$bundle/quadlets"
     for u in "${UNITS[@]}"; do
-        if [[ -f "$QUADLET_DIR/${u}.container" ]]; then
-            cp "$QUADLET_DIR/${u}.container" "$bundle/quadlets/${u}.container"
-        fi
+        [[ -f "$QUADLET_DIR/${u}.container" ]] || continue
+        awk '
+            skip { if ($0 !~ /\\[[:space:]]*$/) skip = 0; next }
+            /^[[:space:]]*Environment[[:space:]]*=[[:space:]]*(PORT|LOG_LEVEL|NODE_ENV|DATA_DIR|LOCK_DIR|DOCTOR_DATA|QUADLET_DIR|SIGNALK_NODE_CONF_DIR|SIGNALK_URL|SIGNALK_HTTPS_URL|SIGNALK_HEALTH_URL|DOCTOR_HEALTH_URL|DBUS_SESSION_BUS_ADDRESS)=/ {
+                print
+                if ($0 ~ /\\[[:space:]]*$/) skip = 1
+                next
+            }
+            /^[[:space:]]*(Environment|PodmanArgs|Exec|HealthCmd|HealthStartupCmd)[[:space:]]*=/ {
+                match($0, /^[[:space:]]*[A-Za-z]+/)
+                printf "%s=<redacted>\n", substr($0, RSTART, RLENGTH)
+                if ($0 ~ /\\[[:space:]]*$/) skip = 1
+                next
+            }
+            { print }
+        ' "$QUADLET_DIR/${u}.container" \
+            >"$bundle/quadlets/${u}.container" 2>/dev/null || true
     done
 
     # signalk-container plugin state.
@@ -3262,7 +3287,8 @@ cmd_bug_report() {
     echo "Contents are limited to host metadata, container state, recent journals,"
     echo "doctor probes + snapshot index, updater state (image tags/digests/versions),"
     echo "per-container inspect + log tail for every install container (engine"
-    echo "signalk-* AND plugin-managed sk-*), Signal K server load profile, raw hardware"
+    echo "signalk-* AND plugin-managed <namespace>-*, 'sk-' by default), Signal K"
+    echo "server load profile, raw hardware"
     echo "bus enumeration (lsusb / serial / CAN / Pi config.txt overlays), and a host"
     echo "headroom snapshot (df + ss + dmesg warn/err tail). Auth tokens are reported"
     echo "as presence-only (mode + 'present') and their values are NEVER included."
