@@ -180,6 +180,52 @@ cmd_version() {
     echo "signalk $SK_VERSION"
 }
 
+# Names of every container belonging to this install, on the given runtime.
+#
+# Two disjoint families share one host, and a diagnostic that sees only the
+# first is blind to most of the stack:
+#
+#   signalk-*  engine containers the installer itself deploys via Quadlet
+#              (signalk-server, signalk-updater-server, signalk-doctor-server,
+#              signalk-dbus-proxy).
+#   <ns>-*     containers the signalk-container PLUGIN manages, namespaced by
+#              SIGNALK_CONTAINER_NAMESPACE (default `sk`, devcontainers use
+#              `devpod`). QuestDB, Grafana, Ollama, Whisper, Piper and every
+#              user-added container live here as `sk-<name>`.
+#
+# The 2026-08-18 field report is the motivating case: `signalk bug-report` was
+# filtered to `name=signalk-` alone, so a bundle sent to diagnose "my
+# containers vanished from the web UI" captured 7 of the 12 containers and
+# omitted every single one the user was actually asking about (sk-ollama,
+# sk-whisper, sk-piper, sk-openwakeword, sk-wyoming-satellite). The two stuck
+# in `created` had to be reconstructed from an unrelated `podman ps` dump.
+#
+# `--filter name=` is a SUBSTRING match, not a prefix match, so a single
+# filter cannot express "starts with". Two passes plus a sort -u is both
+# correct and cheap. Names are anchored with a `^` grep so an unrelated
+# container merely CONTAINING the token (a user's `my-signalk-backup`) is not
+# swept into the bundle.
+#
+# The namespace is read from the environment when set so a devcontainer
+# bundle captures `devpod-*`; `sk-` is always included as well, since the
+# common case is a default-namespace install and including it costs nothing.
+signalk_all_containers() {
+    local ctr_cmd=$1
+    local ns="${SIGNALK_CONTAINER_NAMESPACE:-}"
+    local -a prefixes=("signalk-" "sk-")
+    # Only honor a syntactically valid namespace (same rule the plugin
+    # applies): lowercase alphanumerics. A typo'd value falls back to the
+    # defaults above rather than building a bogus grep pattern.
+    if [[ -n "$ns" && "$ns" =~ ^[a-z0-9]+$ && "$ns" != "sk" ]]; then
+        prefixes+=("${ns}-")
+    fi
+    local p
+    for p in "${prefixes[@]}"; do
+        "$ctr_cmd" ps -a --filter "name=$p" --format '{{.Names}}' 2>/dev/null \
+            | grep -E "^${p}" || true
+    done | sort -u
+}
+
 # Probe a URL up to 3 times (5s each, ~2s apart) and report the last
 # response time on stdout. Echoes "ok <seconds>" on a 2xx/3xx, or "fail".
 # Retrying matters on a busy/SD-card host where a healthy engine can take a
@@ -278,8 +324,18 @@ cmd_health() {
 
     echo
     echo "=== Container snapshot ==="
-    podman ps -a --filter 'name=signalk-' \
-        --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>/dev/null || true
+    # Engine `signalk-*` AND plugin-managed `<ns>-*` (default `sk-`). A bare
+    # `--filter name=signalk-` hides QuestDB, Ollama, Whisper and every
+    # user-added container — i.e. most of what an operator wants to see when
+    # they run `signalk health` after "my containers disappeared".
+    {
+        health_ctrs=$(signalk_all_containers podman)
+        if [[ -n "$health_ctrs" ]]; then
+            podman ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null \
+                | awk -F'\t' 'NR==FNR{n[$0];next} ($1 in n){printf "%s  %s  %s\n", $1, $2, $3}' \
+                    <(printf '%s\n' "$health_ctrs") - || true
+        fi
+    } 2>/dev/null || true
 
     echo
     echo "For deeper diagnostics:"
@@ -1844,10 +1900,10 @@ cmd_bug_report() {
     local CTR_CMD=""
     local podman_ctrs="" docker_ctrs=""
     if command -v podman >/dev/null 2>&1; then
-        podman_ctrs=$(podman ps -a --filter 'name=signalk-' --format '{{.Names}}' 2>/dev/null || true)
+        podman_ctrs=$(signalk_all_containers podman)
     fi
     if command -v docker >/dev/null 2>&1; then
-        docker_ctrs=$(docker ps -a --filter 'name=signalk-' --format '{{.Names}}' 2>/dev/null || true)
+        docker_ctrs=$(signalk_all_containers docker)
     fi
     if [[ -n "$podman_ctrs" ]]; then
         CTR_CMD=podman
@@ -1885,7 +1941,7 @@ cmd_bug_report() {
         echo "=== podman info ==="
         podman info 2>&1 || true
         echo
-        echo "=== podman ps -a (signalk-) ==="
+        echo "=== podman ps -a (all install containers) ==="
         # CreatedAt and Command round out the summary: CreatedAt dates the
         # container so "did my image switch actually recreate it?" is
         # answerable at a glance, and Command shows the effective
@@ -1894,8 +1950,24 @@ cmd_bug_report() {
         # but surfacing them here saves opening per-container JSON for the
         # first triage pass. Command goes last — it is the longest, most
         # variable field, so it sits at the tail of the tab-delimited row.
-        podman ps -a --filter 'name=signalk-' \
-            --format '{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}\t{{.Command}}' 2>&1 || true
+        # Filtered by the shared discovery helper rather than a bare
+        # `--filter name=signalk-`, so plugin-managed `sk-*` containers
+        # (QuestDB, Ollama, Whisper, …) appear here too. `--filter name=`
+        # is a substring match and cannot express "starts with", so the
+        # rows are selected by exact name against the discovered list.
+        {
+            ctr_names=$(signalk_all_containers podman)
+            if [[ -n "$ctr_names" ]]; then
+                # Match the NAME COLUMN exactly. A substring grep is wrong
+                # here: an Image field like `ghcr.io/dirkwa/sk-questdb` would
+                # drag an unrelated container's row into the bundle. awk keyed
+                # on $1 also needs no metacharacter escaping.
+                podman ps -a \
+                    --format '{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}\t{{.Command}}' 2>/dev/null \
+                    | awk -F'\t' 'NR==FNR{n[$0];next} ($1 in n)' \
+                        <(printf '%s\n' "$ctr_names") - || true
+            fi
+        } 2>&1 || true
         echo
         echo "=== podman images (signalk + dirkwa) ==="
         podman images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Created}}' \
@@ -1937,11 +2009,10 @@ cmd_bug_report() {
         echo "(no container runtime on PATH — podman and docker both absent)" \
             >"$bundle/containers/INDEX.txt"
     else
-        mapfile -t SIGNALK_CTRS < <(
-            "$CTR_CMD" ps -a --filter 'name=signalk-' --format '{{.Names}}' 2>/dev/null || true
-        )
+        mapfile -t SIGNALK_CTRS < <(signalk_all_containers "$CTR_CMD")
         {
-            echo "=== captured ${#SIGNALK_CTRS[@]} signalk-* container(s) via $CTR_CMD ==="
+            echo "=== captured ${#SIGNALK_CTRS[@]} container(s) via $CTR_CMD ==="
+            echo "(engine 'signalk-*' + plugin-managed '<namespace>-*', default 'sk-')"
             printf '  %s\n' "${SIGNALK_CTRS[@]}"
         } >"$bundle/containers/INDEX.txt"
         # Capture each container concurrently and under the shared $timeout_cmd
@@ -2112,6 +2183,75 @@ cmd_bug_report() {
         fi
     done
 
+    # signalk-container plugin state.
+    #
+    # The engine captures above answer "is the stack up". They do NOT answer
+    # the most commonly reported container-manager symptom — "my containers
+    # disappeared from the web UI" — because that is a question about the
+    # PLUGIN's view: which containers it believes it manages, what state each
+    # is in, and whether any are stuck short of `running`.
+    #
+    # The 2026-08-18 field report showed two containers parked in `created`
+    # (never started) while the operator reported them missing from the UI.
+    # Nothing in the bundle said so; it had to be inferred from an unrelated
+    # `podman ps` dump. Surface it directly.
+    #
+    # Config bodies are NOT dumped: signalk-container's config carries
+    # registry credentials for private images. Only the container list and
+    # per-container state, which is what triage needs.
+    {
+        echo "=== container namespace ==="
+        echo "SIGNALK_CONTAINER_NAMESPACE=${SIGNALK_CONTAINER_NAMESPACE:-(unset — default 'sk')}"
+        echo
+        echo "=== state of every install container ==="
+        # State plus the exit code and health verdict. A container in
+        # `created` has been defined but never started (the UI shows it with
+        # no runtime data); `exited` with a non-zero code is a crash loop;
+        # `unhealthy` is a passing start with a failing healthcheck. These
+        # three read identically as "missing" to an operator looking at the
+        # web UI, and are distinguished only here.
+        if [[ -n "$CTR_CMD" ]] && command -v jq >/dev/null 2>&1; then
+            for ctr in "${SIGNALK_CTRS[@]}"; do
+                [[ -n "$ctr" ]] || continue
+                "$CTR_CMD" inspect "$ctr" --format \
+                    '{{.Name}}	state={{.State.Status}}	exit={{.State.ExitCode}}	started={{.State.StartedAt}}	restarts={{.RestartCount}}' \
+                    2>/dev/null || echo "$ctr	(inspect failed)"
+            done
+        else
+            echo "(no container runtime or jq — skipped)"
+        fi
+        echo
+        echo "=== containers defined but never started ==="
+        # Called out separately because this is the actionable subset: a
+        # `created` container needs a start, not a debug session.
+        if [[ -n "$CTR_CMD" ]]; then
+            created_found=0
+            for ctr in "${SIGNALK_CTRS[@]}"; do
+                [[ -n "$ctr" ]] || continue
+                st=$("$CTR_CMD" inspect "$ctr" --format '{{.State.Status}}' 2>/dev/null || echo "")
+                if [[ "$st" == "created" ]]; then
+                    echo "  $ctr"
+                    created_found=$((created_found + 1))
+                fi
+            done
+            [[ "$created_found" -eq 0 ]] && echo "  (none)"
+        fi
+    } >"$bundle/container-plugin-state.txt" 2>&1
+
+    # Quadlets for plugin-managed containers. The engine loop above copies
+    # only "${UNITS[@]}" (the four installer-owned units). Containers the
+    # plugin manages via Quadlet are equally likely to be the thing that
+    # broke — a hand-edited or drift-recreated `sk-*.container` is a common
+    # cause of "it won't come back after a restart".
+    for f in "$QUADLET_DIR"/*.container; do
+        [[ -f "$f" ]] || continue
+        base=$(basename "$f")
+        # Skip the engine units already copied above.
+        if [[ ! -f "$bundle/quadlets/$base" ]]; then
+            cp "$f" "$bundle/quadlets/$base" 2>/dev/null || true
+        fi
+    done
+
     # Doctor snapshots index (file listing only — snapshot contents
     # could be large and contain the same Quadlets we already copied).
     {
@@ -2148,6 +2288,119 @@ cmd_bug_report() {
             echo
         done
     } >"$bundle/console-health.txt" 2>&1
+
+    # Signal K server load profile.
+    #
+    # Motivated by the second half of the 2026-08-18 field report: "the Data
+    # Browser is slow again". Nothing in the bundle could speak to it. The
+    # access log only records HTTP requests, and the Data Browser's cost is
+    # driven by the WEBSOCKET delta stream plus the size of the full model —
+    # neither of which appeared anywhere.
+    #
+    # Three cheap, decisive measurements:
+    #   1. Full-model size and context count. The Data Browser renders the
+    #      whole model; a vessel count inflated by AIS traffic is the single
+    #      most common cause of it crawling, and `pruneContextsMinutes` is
+    #      the fix. Size is measured in bytes rather than dumped — the model
+    #      contains position history and is both large and sensitive.
+    #   2. Delta throughput, sampled over 5s on the websocket. This is the
+    #      number that distinguishes "slow UI" from "server saturated".
+    #   3. The count of self-paths, which bounds how much the browser must
+    #      diff on every frame.
+    #
+    # Every step needs the admin token the installer already provisioned for
+    # the doctor; without it the server answers 401 and the block degrades to
+    # a one-line note rather than failing.
+    {
+        SK_TOKEN=$(cat "$HOME/.signalk-doctor/signalk-token" 2>/dev/null || true)
+        # SIGNALK_URL ends in /signalk; the REST base hangs off it.
+        api_base="${SIGNALK_URL%/signalk}/signalk/v1/api"
+        if [[ -z "$SK_TOKEN" ]]; then
+            echo "(no admin token at ~/.signalk-doctor/signalk-token — model/delta"
+            echo " probes need one; skipped. Everything below would have required auth.)"
+        elif ! command -v jq >/dev/null 2>&1; then
+            echo "(jq not installed — model/delta probes skipped)"
+        else
+            echo "=== full model size ==="
+            # -m 20: on a saturated server this endpoint is itself slow, which
+            # is diagnostic. Time it so a slow answer is visible as a number.
+            model_start=$(date +%s.%N 2>/dev/null || echo 0)
+            model=$(curl -fsS -m 20 -H "Authorization: Bearer $SK_TOKEN" \
+                "$api_base/" 2>/dev/null || true)
+            model_end=$(date +%s.%N 2>/dev/null || echo 0)
+            if [[ -n "$model" ]]; then
+                echo "bytes:           $(printf '%s' "$model" | wc -c)"
+                # LC_ALL=C: awk honors the locale's decimal separator, so on a
+                # de_DE host this printed "0,02" — which reads as a thousands
+                # separator to anyone triaging, and breaks any downstream
+                # numeric compare. Force the C locale for the format only.
+                echo "fetch seconds:   $(LC_ALL=C awk -v a="$model_start" -v b="$model_end" 'BEGIN{printf "%.2f", b-a}' 2>/dev/null || echo '?')"
+                echo "vessel contexts: $(printf '%s' "$model" | jq -r '(.vessels // {}) | length' 2>/dev/null || echo '?')"
+                echo "self paths:      $(printf '%s' "$model" | jq -r '[(.vessels // {})[.self // "" | sub("^vessels\\."; "")] // {} | paths(scalars)] | length' 2>/dev/null || echo '?')"
+                echo "other top-level: $(printf '%s' "$model" | jq -r '[keys[] | select(. != "vessels" and . != "self" and . != "version")] | join(", ")' 2>/dev/null || echo '?')"
+            else
+                echo "(model fetch failed or timed out — a timeout here is itself"
+                echo " a strong signal the server is saturated)"
+            fi
+            echo
+            echo "=== settings that drive Data Browser cost ==="
+            # Read back from the RUNNING server's settings file. These three
+            # are the usual suspects and are cheap to state explicitly so a
+            # triager does not have to cross-reference signalk-settings.json.
+            # $SIGNALK_DIR is assigned further down in this function (the
+            # plugin-metadata block); reference the path directly so this
+            # block does not depend on capture order.
+            sk_settings="$HOME/.signalk/settings.json"
+            if [[ -f "$sk_settings" ]]; then
+                jq -r '
+                    "pruneContextsMinutes: \(.pruneContextsMinutes // "(unset)")",
+                    "enforceDataTimeouts:  \(.enforceDataTimeouts // "(unset)")",
+                    "wsCompression:        \(.wsCompression // "(unset)")",
+                    "accessLogging:        \(.accessLogging // "(unset)")"
+                ' "$sk_settings" 2>/dev/null || echo "(settings parse failed)"
+            else
+                echo "(no $sk_settings)"
+            fi
+            echo
+            echo "=== delta throughput (5s sample on the websocket) ==="
+            # websocat/wscat are not installed on a stock host, so sample with
+            # whatever is present and say so plainly when nothing is. Counting
+            # frames for 5s is enough to separate an idle stream (<50/s) from a
+            # flood (>500/s) — the distinction that matters.
+            if command -v websocat >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+                # Strip the scheme from SIGNALK_URL and rebuild it as ws://.
+                ws_host="${SIGNALK_URL%/signalk}"
+                ws_url="ws://${ws_host#*://}/signalk/v1/stream?subscribe=all"
+                # `timeout 5` bounds the SAMPLE (not the 10s log budget), and
+                # exits 124 when it fires — which is the expected, successful
+                # outcome here, since a healthy stream never ends on its own.
+                # Hence `|| true`: a 124 is a completed sample, not an error.
+                # Flag notes, both learned the hard way against a live server:
+                #   `-n` (--no-close) only; NOT `-n1`, which clap parses as
+                #     `-1`/--one-message and stops after a single frame.
+                #   `--` before the URL is REQUIRED: `-H` is variadic
+                #     (`--header <h>...`), so without the separator it
+                #     swallows the URL and websocat exits "No URL specified"
+                #     — which silently reads as "0 frames", i.e. a healthy
+                #     idle server, exactly the wrong conclusion.
+                ws_frames=$(timeout 5 websocat -n -B 1048576 \
+                    -H "Authorization: Bearer $SK_TOKEN" \
+                    -- "$ws_url" 2>/dev/null \
+                    | wc -l 2>/dev/null || true)
+                ws_frames=${ws_frames:-0}
+                echo "frames in 5s:  $ws_frames"
+                echo "approx per s:  $(( ws_frames / 5 ))"
+                echo "(>500/s means the delta stream, not the browser, is the bottleneck;"
+                echo " a healthy cruising install is typically well under 100/s)"
+            else
+                echo "(websocat not on PATH — delta rate not sampled)"
+                echo "To measure by hand while the UI is slow (note the '--',"
+                echo "without which -H swallows the URL and you get 0 frames):"
+                echo "  websocat -n -H 'Authorization: Bearer <token>' \\"
+                echo "    -- 'ws://127.0.0.1/signalk/v1/stream?subscribe=all' | pv -l >/dev/null"
+            fi
+        fi
+    } >"$bundle/server-load.txt" 2>&1
 
     # In-container reachability — probe the health URLs from INSIDE the
     # updater container. The updater reaches its siblings through pasta's
@@ -2718,7 +2971,8 @@ cmd_bug_report() {
     echo
     echo "Contents are limited to host metadata, container state, recent journals,"
     echo "doctor probes + snapshot index, updater state (image tags/digests/versions),"
-    echo "per-container inspect + log tail for every signalk-* container, raw hardware"
+    echo "per-container inspect + log tail for every install container (engine"
+    echo "signalk-* AND plugin-managed sk-*), Signal K server load profile, raw hardware"
     echo "bus enumeration (lsusb / serial / CAN / Pi config.txt overlays), and a host"
     echo "headroom snapshot (df + ss + dmesg warn/err tail). Auth tokens are reported"
     echo "as presence-only (mode + 'present') and their values are NEVER included."

@@ -43,6 +43,9 @@ jobs:
       - name: installer fetch-list manifest
         run: bash scripts/test/check-installer-manifest.sh
 
+      - name: bug-report container discovery
+        run: bash scripts/test/check-bug-report-containers.sh
+
       - name: journald drop-in idempotency
         run: bash scripts/test/check-journald-idempotent.sh
 
