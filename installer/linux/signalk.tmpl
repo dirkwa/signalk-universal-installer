@@ -2526,7 +2526,7 @@ cmd_bug_report() {
                 echo "(no $sk_settings)"
             fi
             echo
-            echo "=== delta throughput (5s sample on the websocket) ==="
+            echo "=== delta throughput (timed sample on the websocket) ==="
             # websocat/wscat are not installed on a stock host, so sample with
             # whatever is present and say so plainly when nothing is. Counting
             # frames for 5s is enough to separate an idle stream (<50/s) from a
@@ -2598,23 +2598,38 @@ cmd_bug_report() {
                 # talking to a wedged server need not die on SIGTERM, and
                 # without the escalation `timeout` would wait for it — the
                 # same trap documented in check-podman-timeout-guards.sh.
+                #
+                # Time the call rather than assuming 5s: when the escalation
+                # fires the window is ~10s, and dividing by a hardcoded 5
+                # would report double the true rate — on a diagnostic whose
+                # whole purpose is to say whether the rate is high.
+                ws_t0=$(date +%s)
                 timeout -k 5 5 websocat -n -k -B 1048576 \
                     -H "Authorization: Bearer $SK_TOKEN" \
                     -- "$ws_url" >"$ws_out" 2>/dev/null || ws_rc=$?
-                # `wc -l` counts newlines, so a final frame cut off by the
-                # 5s timeout without its terminator is not counted — an
+                ws_secs=$(( $(date +%s) - ws_t0 ))
+                # `if`, not `[[ … ]] && …`: the && form leaves a non-zero
+                # status when the test is false, which under `set -e` aborts
+                # the run if this block ever becomes the last command in its
+                # scope. Also guards the divide below against a zero window.
+                if [[ "$ws_secs" -lt 1 ]]; then
+                    ws_secs=1
+                fi
+                # `wc -l` counts newlines, so a final frame cut off at the
+                # timeout without its terminator is not counted — an
                 # undercount of at most 1 in a sample of ~1300. Not worth
                 # correcting; noted so the number is not read as exact.
                 ws_frames=$(wc -l <"$ws_out" 2>/dev/null || echo 0)
-                # 124 = timeout(1) gave up; 137 = 128+SIGKILL, i.e. the -k
-                # escalation landed. Both mean "the 5s sample ran to its
-                # cutoff", which is the SUCCESS case here — a healthy stream
-                # never ends on its own. Only 137 was missing before, so a
-                # sample that needed the escalation was reported as a failed
-                # connection. Same 124/137 pair scripts/doctor.sh uses.
-                if [[ "$ws_rc" -eq 124 || "$ws_rc" -eq 137 || "$ws_frames" -gt 0 ]]; then
-                    echo "frames in 5s:  $ws_frames"
-                    echo "approx per s:  $(( ws_frames / 5 ))"
+                # 124 = timeout(1) hit its cutoff; 137 = 128+SIGKILL from the
+                # -k escalation. Both mean the sample ran to its bound, which
+                # IS the success case — a healthy stream never ends by itself.
+                # No `ws_frames > 0` fallback: a websocat that exits non-zero
+                # for its own reasons after emitting a few frames is a failed
+                # sample, and treating it as good would publish a rate
+                # computed from a truncated window.
+                if [[ "$ws_rc" -eq 124 || "$ws_rc" -eq 137 ]]; then
+                    echo "frames in ${ws_secs}s: $ws_frames"
+                    echo "approx per s:  $(( ws_frames / ws_secs ))"
                     echo "(>500/s means the delta stream, not the browser, is the bottleneck;"
                     echo " a healthy cruising install is typically well under 100/s)"
                 else
