@@ -2005,6 +2005,11 @@ cmd_bug_report() {
     # are not secret and idmap settings (UidMap/GidMap) are the data we
     # are after.
     mkdir -p "$bundle/containers"
+    # Declared before the runtime guard so every later consumer (the
+    # container-state report, the Quadlet copy) can reference it under
+    # `set -u` even when no runtime was found. Bash tolerates an unset
+    # array in "${a[@]}" but NOT in "${#a[@]}", which aborts the run.
+    local -a SIGNALK_CTRS=()
     if [[ -z "$CTR_CMD" ]]; then
         echo "(no container runtime on PATH — podman and docker both absent)" \
             >"$bundle/containers/INDEX.txt"
@@ -2213,12 +2218,21 @@ cmd_bug_report() {
         # No jq gate: this loop uses the runtime's own --format (Go
         # templates), so it works on a host without jq — which is exactly
         # the minimal host where the rest of the bundle is thinnest.
+        # ONE inspect per container, reused for both sections below. A
+        # second pass would double the runtime calls for data already in
+        # hand, and on a wedged runtime each call is a stall. $timeout_cmd
+        # is the same bound the log capture uses; unquoted on purpose (it
+        # is empty, or the two words `timeout N`).
+        ctr_states=""
         if [[ -n "$CTR_CMD" ]]; then
             for ctr in "${SIGNALK_CTRS[@]}"; do
                 [[ -n "$ctr" ]] || continue
-                "$CTR_CMD" inspect "$ctr" --format \
+                # shellcheck disable=SC2086
+                line=$($timeout_cmd "$CTR_CMD" inspect "$ctr" --format \
                     '{{.Name}}	state={{.State.Status}}	exit={{.State.ExitCode}}	started={{.State.StartedAt}}	restarts={{.RestartCount}}	health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
-                    2>/dev/null || echo "$ctr	(inspect failed)"
+                    2>/dev/null) || line="$ctr	(inspect failed)"
+                printf '%s\n' "$line"
+                ctr_states+="$ctr	$line"$'\n'
             done
         else
             echo "(no container runtime on PATH — skipped)"
@@ -2226,23 +2240,19 @@ cmd_bug_report() {
         echo
         echo "=== containers defined but never started ==="
         # Called out separately because this is the actionable subset: a
-        # `created` container needs a start, not a debug session.
+        # `created` container needs a start, not a debug session. Derived
+        # from the states captured above rather than re-inspecting.
         if [[ -n "$CTR_CMD" ]]; then
-            created_found=0
-            for ctr in "${SIGNALK_CTRS[@]}"; do
-                [[ -n "$ctr" ]] || continue
-                st=$("$CTR_CMD" inspect "$ctr" --format '{{.State.Status}}' 2>/dev/null || echo "")
-                if [[ "$st" == "created" ]]; then
-                    echo "  $ctr"
-                    created_found=$((created_found + 1))
-                fi
-            done
+            created_list=$(printf '%s' "$ctr_states" \
+                | awk -F'\t' '$0 ~ /\tstate=created\t/ { printf "  %s\n", $1 }')
             # `if`, not `[[ … ]] && echo`: the && form leaves the group's
             # exit status non-zero whenever a created container WAS found,
             # and under `set -e` that aborts the whole bug-report the
             # moment this block is the last command in its enclosing
             # scope. Reporting a finding must never fail the run.
-            if [[ "$created_found" -eq 0 ]]; then
+            if [[ -n "$created_list" ]]; then
+                printf '%s\n' "$created_list"
+            else
                 echo "  (none)"
             fi
         fi
@@ -2391,7 +2401,13 @@ cmd_bug_report() {
             # connection failure curl PRINTS its own "000" and ALSO exits
             # non-zero, so `$(curl … || echo 000)` appends to give "000000",
             # which matches no status test below.
-            model_code=$(curl -sS -m 20 -H "Authorization: Bearer $SK_TOKEN" \
+            # -k: the probe targets loopback, and an SSL-plugin install
+            # serves a self-signed or LAN-name certificate there. Verifying
+            # it would fail on exactly the hosts this probe is for, and the
+            # in-container probe further down already uses the same relaxation
+            # (NODE_TLS_REJECT_UNAUTHORIZED=0) for the same reason. No
+            # confidentiality is lost: the peer is 127.0.0.1.
+            model_code=$(curl -sSk -m 20 -H "Authorization: Bearer $SK_TOKEN" \
                 -o "$model_tmp" -w '%{http_code}' "$api_base/" 2>/dev/null) \
                 || model_code="000"
             model_end=$(date +%s.%N 2>/dev/null || echo 0)
@@ -2471,8 +2487,12 @@ cmd_bug_report() {
                 # bug-report on the non-zero exit before the assignment ever
                 # runs, and 124 (the expected outcome here) is non-zero.
                 ws_out="$outdir/ws-sample.txt"
+                # -k for the same reason as the model probe above: a wss://
+                # loopback target on an SSL-plugin install presents a
+                # self-signed cert, and verifying it would fail on exactly
+                # the hosts this sample is meant to measure.
                 ws_rc=0
-                timeout 5 websocat -n -B 1048576 \
+                timeout 5 websocat -n -k -B 1048576 \
                     -H "Authorization: Bearer $SK_TOKEN" \
                     -- "$ws_url" >"$ws_out" 2>/dev/null || ws_rc=$?
                 ws_frames=$(wc -l <"$ws_out" 2>/dev/null || echo 0)

@@ -155,6 +155,22 @@ fi
 unset SIGNALK_CONTAINER_NAMESPACE
 ALL_CONTAINERS='' assert_set "no containers → empty result" ""
 
+# 7. Static guard against reintroducing the bug. The helper exists so that
+#    no call site hand-rolls `--filter name=signalk-` again; a new diagnostic
+#    added later would silently reacquire the original blind spot. Comments
+#    are stripped first — the helper and several call sites document the old
+#    form by quoting it, and matching those would make this unfalsifiable.
+offenders=$(grep -vE '^[[:space:]]*#' "$TMPL"     | grep -nE "filter[ =]+'?name=signalk-" || true)
+if [[ -z "$offenders" ]]; then
+    echo "  [OK]   no call site hand-rolls the signalk- only filter"
+else
+    echo "  [MISS] a call site still filters on 'name=signalk-' directly:"
+    printf '         %s
+' "$offenders"
+    echo "         use signalk_all_containers() instead — it covers sk-* too"
+    fail=1
+fi
+
 if (( fail )); then
     echo
     echo "[ERR] bug-report container discovery is wrong — see entries above." >&2
