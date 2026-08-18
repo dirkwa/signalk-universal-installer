@@ -94,6 +94,9 @@ jobs:
       - name: app.slice CPU priority drop-in
         run: bash scripts/test/check-cpu-priority-dropin.sh
 
+      - name: mDNS EXTERNALHOST wiring
+        run: bash scripts/test/check-mdns-external-host.sh
+
       - name: render server quadlet
         run: bash scripts/test/check-render-quadlet.sh
 
