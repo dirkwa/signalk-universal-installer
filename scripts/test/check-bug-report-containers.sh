@@ -76,7 +76,8 @@ sk-openwakeword
 sk-wyoming-satellite
 devpod-questdb
 my-signalk-backup
-unrelated-redis'
+unrelated-redis
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-probe'
 
 cat >"$workdir/fakectr" <<'STUB'
 #!/usr/bin/env bash
@@ -140,32 +141,49 @@ export SIGNALK_CONTAINER_NAMESPACE='bad ns!'
 assert_set "invalid namespace falls back to defaults" \
 "signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite"
 
-# 5. Explicit `sk` namespace must not duplicate the built-in sk- prefix.
+# 5. Explicit `sk` namespace resolves to exactly the default set. Asserted
+#    as an exact set, NOT with `uniq -d`: the helper ends in `sort -u`, so a
+#    duplicate check passes for every possible input and proves nothing.
 export SIGNALK_CONTAINER_NAMESPACE=sk
-got=$(signalk_all_containers fakectr)
-dupes=$(printf '%s\n' "$got" | sort | uniq -d)
-if [[ -n "$dupes" ]]; then
-    echo "  [MISS] namespace 'sk' duplicated entries: $(printf '%s' "$dupes" | paste -sd' ' -)"
-    fail=1
-else
-    echo "  [OK]   namespace 'sk' produces no duplicates"
-fi
+assert_set "namespace 'sk' matches the default set" \
+"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite"
 
-# 6. No containers at all → empty output, no error under set -e.
+# 5b. An over-long namespace is invalid (the plugin caps it at 32 chars) and
+#     must fall back to the defaults. ALL_CONTAINERS carries a container
+#     named for that 40-char prefix, so without the length guard the helper
+#     would pick it up and this assertion fails — i.e. the case is
+#     falsifiable rather than vacuously true.
+long_ns=$(printf 'a%.0s' {1..40})
+export SIGNALK_CONTAINER_NAMESPACE="$long_ns"
+assert_set "over-long namespace falls back to defaults" \
+"signalk-dbus-proxy signalk-doctor-server signalk-server signalk-updater-server sk-ollama sk-openwakeword sk-piper sk-signalk-backup-server sk-signalk-questdb sk-whisper sk-wyoming-satellite"
+
+# 6. No containers at all → empty output, no error under set -e. Run in a
+#    subshell so the ALL_CONTAINERS override cannot leak into later tests.
 unset SIGNALK_CONTAINER_NAMESPACE
-ALL_CONTAINERS='' assert_set "no containers → empty result" ""
+( ALL_CONTAINERS=''; export ALL_CONTAINERS
+  assert_set "no containers → empty result" "" ) || fail=1
 
 # 7. Static guard against reintroducing the bug. The helper exists so that
 #    no call site hand-rolls `--filter name=signalk-` again; a new diagnostic
 #    added later would silently reacquire the original blind spot. Comments
 #    are stripped first — the helper and several call sites document the old
 #    form by quoting it, and matching those would make this unfalsifiable.
+#    scripts/doctor.sh is covered too: it is standalone (it cannot source the
+#    helper) so it duplicates the logic, and it had the identical blind spot.
 # Blank comment lines rather than deleting them, so grep -n reports line
 # numbers that match $TMPL itself — with grep -v the stream is renumbered
 # and every reported location would be wrong. The character class covers
 # the unquoted, single- and double-quoted spellings of the filter.
-offenders=$(sed 's/^[[:space:]]*#.*$//' "$TMPL" \
-    | grep -nE "filter[ =]+[\"']?name=signalk-" || true)
+DOCTOR_SH=${DOCTOR_SH:-scripts/doctor.sh}
+offenders=""
+for src in "$TMPL" "$DOCTOR_SH"; do
+    [[ -f "$src" ]] || continue
+    hits=$(sed 's/^[[:space:]]*#.*$//' "$src" \
+        | grep -nE "filter[ =]+[\"']?name=signalk-" || true)
+    [[ -n "$hits" ]] && offenders+="$src:$hits"$'\n'
+done
+offenders=${offenders%$'\n'}
 if [[ -z "$offenders" ]]; then
     echo "  [OK]   no call site hand-rolls the signalk- only filter"
 else
