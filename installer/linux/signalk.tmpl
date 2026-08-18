@@ -2603,7 +2603,12 @@ cmd_bug_report() {
                 # fires the window is ~10s, and dividing by a hardcoded 5
                 # would report double the true rate — on a diagnostic whose
                 # whole purpose is to say whether the rate is high.
-                ws_t0=$(date +%s)
+                # %s.%N, not %s: whole-second arithmetic can overstate the
+                # window by nearly a second (start at x.99, end at x+5.01
+                # reads as 5s for a real 4.02s run), which would let an early
+                # SIGKILL pass the deadline gate below. Same fractional clock
+                # the model probe above uses.
+                ws_t0=$(date +%s.%N 2>/dev/null || echo 0)
                 # Run in a subshell with job-control notices off: when the -k
                 # escalation SIGKILLs the child, bash otherwise prints its own
                 # "Killed  timeout -k 5 5 websocat … Bearer <token>" line to
@@ -2615,11 +2620,20 @@ cmd_bug_report() {
                       -H "Authorization: Bearer $SK_TOKEN" \
                       -- "$ws_url" >"$ws_out" 2>/dev/null
                 ) 2>/dev/null || ws_rc=$?
-                ws_secs=$(( $(date +%s) - ws_t0 ))
-                # `if`, not `[[ … ]] && …`: the && form leaves a non-zero
-                # status when the test is false, which under `set -e` aborts
-                # the run if this block ever becomes the last command in its
-                # scope. Also guards the divide below against a zero window.
+                ws_t1=$(date +%s.%N 2>/dev/null || echo 0)
+                # Elapsed to 2dp for the label, and a separate integer-
+                # hundredths form for the comparisons (bash cannot compare
+                # floats). LC_ALL=C so a de_DE locale does not emit a decimal
+                # comma. `if`, not `[[ … ]] && …`: the && form leaves a
+                # non-zero status when false and would abort under `set -e`
+                # if this block ever became last in its scope.
+                ws_elapsed=$(LC_ALL=C awk -v a="$ws_t0" -v b="$ws_t1" \
+                    'BEGIN{d=b-a; if (d<0) d=0; printf "%.2f", d}' 2>/dev/null || echo 0)
+                ws_cs=$(LC_ALL=C awk -v e="$ws_elapsed" \
+                    'BEGIN{printf "%d", e*100}' 2>/dev/null || echo 0)
+                # Divisor in whole seconds, floored at 1 so the rate cannot
+                # divide by zero on a sub-second window.
+                ws_secs=$(( ws_cs / 100 ))
                 if [[ "$ws_secs" -lt 1 ]]; then
                     ws_secs=1
                 fi
@@ -2642,14 +2656,14 @@ cmd_bug_report() {
                 # elapsed check that reads as a completed sample and the rate
                 # gets computed from a 1s window. `-ge 5` is the configured
                 # cutoff; the escalation only ever pushes it later.
-                if [[ ( "$ws_rc" -eq 124 || "$ws_rc" -eq 137 ) && "$ws_secs" -ge 5 ]]; then
-                    echo "frames in ${ws_secs}s: $ws_frames"
+                if [[ ( "$ws_rc" -eq 124 || "$ws_rc" -eq 137 ) && "$ws_cs" -ge 500 ]]; then
+                    echo "frames in ${ws_elapsed}s: $ws_frames"
                     echo "approx per s:  $(( ws_frames / ws_secs ))"
                     echo "(>500/s means the delta stream, not the browser, is the bottleneck;"
                     echo " a healthy cruising install is typically well under 100/s)"
                 else
                     echo "(websocket sample failed: websocat exit $ws_rc after"
-                    echo " ${ws_secs}s, url $ws_url — NOT an idle server. An exit"
+                    echo " ${ws_elapsed}s, url $ws_url — NOT an idle server. An exit"
                     echo " before the 5s cutoff means the connection dropped;"
                     echo " check the token and the scheme/port.)"
                 fi
