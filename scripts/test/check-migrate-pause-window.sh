@@ -111,4 +111,13 @@ else
     miss "bare migrate call(s): $bare"
 fi
 
+echo "== manual recovery hints stop the service before and after the migrate"
+hints=$(grep -c 'warn ".*podman system migrate' "$INSTALL_SH" || true)
+good=$(grep -c 'warn ".*systemctl --user stop podman.service && podman system migrate && systemctl --user stop podman.service' "$INSTALL_SH" || true)
+if [[ "$hints" -ge 1 && "$hints" == "$good" ]]; then
+    ok "$hints hint(s) carry stop → migrate → stop"
+else
+    miss "$good of $hints migrate hint(s) carry the stop sequence"
+fi
+
 exit "$fail"

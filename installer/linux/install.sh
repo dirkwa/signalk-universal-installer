@@ -994,7 +994,7 @@ if [[ "$STORAGE_FS" == "zfs" ]]; then
             warn "If you hit slow image pulls or 'gid_map: Invalid argument' on first start,"
             warn "edit it to set [storage].driver=\"overlay\" and"
             warn "[storage.options.overlay].mount_program=\"/usr/bin/fuse-overlayfs\","
-            warn "then run: systemctl --user stop podman.service && podman system reset --force && podman system migrate && systemctl --user stop podman.service"
+            warn "then run: systemctl --user stop podman.service && podman system reset --force && systemctl --user stop podman.service && podman system migrate && systemctl --user stop podman.service"
         fi
     else
         # `podman system reset` is destructive if images/containers
@@ -1003,7 +1003,7 @@ if [[ "$STORAGE_FS" == "zfs" ]]; then
         if [[ -n "$(podman images -q 2>/dev/null)" ]] || [[ -n "$(podman ps -aq 2>/dev/null)" ]]; then
             warn "Found existing podman images/containers — skipping driver switch to avoid data loss."
             warn "If first start is slow or fails on ZFS, manually run:"
-            warn "  systemctl --user stop podman.service && podman system reset --force && podman system migrate && systemctl --user stop podman.service"
+            warn "  systemctl --user stop podman.service && podman system reset --force && systemctl --user stop podman.service && podman system migrate && systemctl --user stop podman.service"
             warn "after writing $STORAGE_CONF (see docs/recovery.md)."
         else
             cat >"$STORAGE_CONF" <<'EOF'
