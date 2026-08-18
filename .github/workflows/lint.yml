@@ -121,6 +121,9 @@ jobs:
       - name: unwedge-podman storage-lock recovery
         run: bash scripts/test/check-unwedge-podman.sh
 
+      - name: podman migrate namespace window
+        run: bash scripts/test/check-migrate-pause-window.sh
+
       - name: Windows shim generation
         run: bash scripts/test/check-windows-shim.sh
 
