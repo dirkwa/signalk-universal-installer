@@ -26,6 +26,8 @@
 #       container restart so the operator always has these tools when
 #       something below fails. Also guarantees the source dir for the
 #       doctor Quadlet's `~/.local/bin` bind-mount exists.
+#  11a-bis. CPU priority: write app.slice.d/50-signalk-cpu-priority.conf
+#       (no sudo; after the CLI's watchers reclaimed ~/.config/systemd/user)
 #  11b. signalk-server drift apply (restart only if Quadlet drifted)
 #  12. Start doctor + updater services (warn-and-continue on failure)
 #  13. Wait for doctor + updater health
@@ -716,8 +718,25 @@ if [[ "$PRIV_PORTS" = "1" ]]; then
     # PRIV_SYSCTL_FILE is set near the prompt above (used there to detect a
     # prior "yes" and skip re-prompting).
     current_floor=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)
-    if (( current_floor <= 80 )); then
-        ok "${PRIV_SYSCTL_KEY} already ${current_floor} (≤ 80)"
+    # Gate on the DROP-IN, not on the running value. A runtime 80 proves only
+    # that something lowered it in this boot, not that it will come back after
+    # a reboot - and on a podman machine something does exactly that: a fresh
+    # WSL VM reports 80 with no file anywhere under /etc/sysctl.d or
+    # /usr/lib/sysctl.d to hold it. The old `current_floor <= 80` check read
+    # that as "already configured", skipped the write, and the next
+    # `wsl --shutdown` reset the floor to 1024. signalk-server then crash-looped
+    # on `listen EACCES: permission denied 0.0.0.0:80` while the container
+    # itself stayed "Up" - the stack looked healthy and served nothing on :80.
+    #
+    # Writing the drop-in when the value is already 80 costs one idempotent
+    # file write; not writing it costs a dead server after the next restart.
+    # Check the drop-in's CONTENT, not merely that a file is there: an empty or
+    # hand-edited file satisfies -f while persisting nothing, which reproduces
+    # exactly the failure this guard exists to prevent. Match the assignment
+    # sysctl itself would honour - optional spaces, no leading comment.
+    if grep -qE "^[[:space:]]*${PRIV_SYSCTL_KEY//./\\.}[[:space:]]*=[[:space:]]*(80|[0-9]|[1-7][0-9])[[:space:]]*$" \
+        "$PRIV_SYSCTL_FILE" 2>/dev/null && (( current_floor <= 80 )); then
+        ok "${PRIV_SYSCTL_KEY} already ${current_floor} (≤ 80, persisted in ${PRIV_SYSCTL_FILE})"
     elif [[ "$SUDO" = "MISSING" ]]; then
         warn "Cannot lower ${PRIV_SYSCTL_KEY} without sudo; 80/443 will fail to bind."
         warn "Set it manually as root:  echo '${PRIV_SYSCTL_KEY}=80' > ${PRIV_SYSCTL_FILE} && echo 80 > /proc/sys/net/ipv4/ip_unprivileged_port_start"
@@ -853,24 +872,74 @@ fi
 # range — and then the very first `podman pull` below fails with
 # "lookup user ...: no subuid ranges found". preflight only warns about this; we
 # actually fix it here. Idempotent: only added when missing.
+# `podman system migrate` makes podman re-read the ranges. Its side effects
+# are what make it dangerous on a re-run over a live install: it stops every
+# container and kills the rootless pause process (the catatonit whose user
+# namespace every container joins). A socket-activated `podman system service`
+# that was already running survives the migrate in its OLD user namespace, and
+# every container created over the socket from then until that service is
+# restarted lands in that old namespace — signalk-container's ensureRunning
+# recreates sk-signalk-grafana / -backup-server / -tailscale-server seconds
+# after signalk-server comes back, well inside that window. When step 15a
+# then restarts the service into the new pause namespace, it can no longer
+# signal those containers: `podman stop` returns "operation not permitted",
+# `podman rm` fails with "could not be stopped" (observed 2026-08-18 on a
+# re-run; the only way out is killing the container process from inside its
+# own namespace).
+#
+# Two guards: migrate only when a range was actually added — on a re-run the
+# ranges exist and the migrate is a no-op with side effects — and, when it
+# does run, stop the API service on both sides of it. The stop before removes
+# the service that predates the migrate; the stop after catches a service
+# that a socket connection respawned WHILE the migrate ran, because that one
+# joined the old pause process, which is only killed at the very end of the
+# migrate. Once the migrate has returned, any respawn creates or joins the
+# new pause namespace like every later `podman run` does.
+#
+# Stop podman.service, never podman.socket, and never mask the service: the
+# socket inode is bind-mounted into the running engine containers, and a
+# connection arriving at the socket while its service is masked puts
+# podman.socket into `failed (Result: resources)` — verified on podman 5.4.2
+# / systemd 257 — so it has to be restarted, which swaps the inode and
+# strands every container holding the old one. Also used by the
+# fuse-overlayfs switch below.
+podman_migrate() {
+    stop_podman_service
+    podman system migrate >/dev/null 2>&1 || true
+    stop_podman_service
+}
+stop_podman_service() {
+    if systemctl --user is-active --quiet podman.service 2>/dev/null; then
+        systemctl --user stop podman.service >/dev/null 2>&1 \
+            || warn "Could not stop podman.service around migrate; containers started over the socket before step 15a may land in a stale user namespace"
+    fi
+}
+
+subid_ranges_added=0
 if ! grep -q "^${USER}:" /etc/subuid 2>/dev/null; then
     info "Adding subuid range for $USER (rootless podman; requires sudo)"
-    $SUDO usermod --add-subuids 100000-165535 "$USER" || warn "could not add subuid range for $USER"
+    if $SUDO usermod --add-subuids 100000-165535 "$USER"; then
+        subid_ranges_added=1
+    else
+        warn "could not add subuid range for $USER"
+    fi
 fi
 if ! grep -q "^${USER}:" /etc/subgid 2>/dev/null; then
     info "Adding subgid range for $USER (rootless podman; requires sudo)"
-    $SUDO usermod --add-subgids 100000-165535 "$USER" || warn "could not add subgid range for $USER"
+    if $SUDO usermod --add-subgids 100000-165535 "$USER"; then
+        subid_ranges_added=1
+    else
+        warn "could not add subgid range for $USER"
+    fi
 fi
-# Re-read the (possibly new) ranges so the first pull doesn't trip over a stale
-# user-namespace mapping.
-podman system migrate >/dev/null 2>&1 || true
+if (( subid_ranges_added )); then
+    podman_migrate
+fi
 
-# NOTE: the rootless podman API service is realigned with the containers' pause
-# namespace LATE — after the final container start (search "Realigning podman
-# API service" below), NOT here. Doing it here is too early: starting the
-# keep-id containers further down recreates the pause process AFTER this point,
-# so an early realign is immediately undone and the socket service is left in a
-# sibling namespace it cannot enter. See that block's comment for the mechanism.
+# NOTE: the rootless podman API service is additionally realigned with the
+# containers' pause namespace LATE — after the final container start (search
+# "Realigning podman API service" below). podman_migrate above covers the
+# migrate window; the late restart covers a service that predates this run.
 
 # jq smooths a few optional steps (sslport / vessel-identity / security seeding,
 # admin-user lookup, the last-good snapshot) and `signalk bug-report`'s JSON
@@ -925,7 +994,7 @@ if [[ "$STORAGE_FS" == "zfs" ]]; then
             warn "If you hit slow image pulls or 'gid_map: Invalid argument' on first start,"
             warn "edit it to set [storage].driver=\"overlay\" and"
             warn "[storage.options.overlay].mount_program=\"/usr/bin/fuse-overlayfs\","
-            warn "then run: podman system reset --force && podman system migrate"
+            warn "then run: systemctl --user stop podman.service && podman system reset --force && systemctl --user stop podman.service && podman system migrate && systemctl --user stop podman.service"
         fi
     else
         # `podman system reset` is destructive if images/containers
@@ -934,7 +1003,7 @@ if [[ "$STORAGE_FS" == "zfs" ]]; then
         if [[ -n "$(podman images -q 2>/dev/null)" ]] || [[ -n "$(podman ps -aq 2>/dev/null)" ]]; then
             warn "Found existing podman images/containers — skipping driver switch to avoid data loss."
             warn "If first start is slow or fails on ZFS, manually run:"
-            warn "  podman system reset --force && podman system migrate"
+            warn "  systemctl --user stop podman.service && podman system reset --force && systemctl --user stop podman.service && podman system migrate && systemctl --user stop podman.service"
             warn "after writing $STORAGE_CONF (see docs/recovery.md)."
         else
             cat >"$STORAGE_CONF" <<'EOF'
@@ -951,7 +1020,7 @@ EOF
             chmod 0644 "$STORAGE_CONF"
             # storage layout is empty: a reset is a no-op but migrate
             # picks up the new mount_program for any future pulls.
-            podman system migrate >/dev/null 2>&1 || true
+            podman_migrate
             ok "fuse-overlayfs configured in $STORAGE_CONF"
         fi
     fi
@@ -970,6 +1039,36 @@ ok "linger enabled"
 # Re-establish XDG_RUNTIME_DIR if linger was just enabled; the user-bus
 # socket may not exist until the next login otherwise. Defensive nudge:
 systemctl --user daemon-reload || true
+
+# Reclaim ~/.config/systemd/user if something else created it as root.
+#
+# Podman machine's WSL provisioning does exactly that: it writes
+# podman-mnt-bindings.service and default.target.wants there while
+# provisioning the VM, leaving the directory root:root 0755 inside an
+# unprivileged home. Everything this installer later writes underneath it
+# then fails - the podman TasksMax drop-in a few lines below, and the
+# resolv-watch / netgate-watch units near the end - each with a different
+# and misleading message about the file it happened to be writing.
+#
+# Do it here, once, before the first write: this is the earliest point where
+# sudo is known to work (the linger step above just used it) and it is
+# ahead of every consumer.
+# Usable means writable AND searchable: a directory can be -w but not -x, and
+# the write still fails. Same test the CLI's _signalk_ensure_unit_dir applies,
+# so the two agree about what "already fine" means.
+SK_USER_UNIT_DIR="$HOME/.config/systemd/user"
+if [[ -d "$SK_USER_UNIT_DIR" ]] && { [[ ! -w "$SK_USER_UNIT_DIR" ]] || [[ ! -x "$SK_USER_UNIT_DIR" ]]; }; then
+    sk_owner=$(stat -c '%U:%G' "$SK_USER_UNIT_DIR" 2>/dev/null || echo 'unknown')
+    if $SUDO chown -R "$(id -un):$(id -gn)" "$SK_USER_UNIT_DIR" 2>/dev/null \
+        && [[ -w "$SK_USER_UNIT_DIR" && -x "$SK_USER_UNIT_DIR" ]]; then
+        ok "reclaimed $SK_USER_UNIT_DIR from ${sk_owner} (created by the VM provisioner)"
+    else
+        # chown fixes ownership, never the mode: a dir we already own with the
+        # execute bit cleared lands here too, and needs chmod rather than chown.
+        warn "$SK_USER_UNIT_DIR (owner ${sk_owner}, mode $(stat -c '%a' "$SK_USER_UNIT_DIR" 2>/dev/null || echo '?')) is not usable by $(id -un); unit installs below will fail."
+        warn "Fix with: sudo chown -R $(id -un):$(id -gn) $SK_USER_UNIT_DIR && chmod u+rwx $SK_USER_UNIT_DIR"
+    fi
+fi
 
 # The rootless podman socket at $XDG_RUNTIME_DIR/podman/podman.sock is
 # bind-mounted into all three engine containers (updater, doctor, and
@@ -1414,8 +1513,34 @@ snapshot_existing signalk-server.container
 snapshot_existing signalk-updater-server.container
 snapshot_existing signalk-doctor-server.container
 
+# The mDNS name signalk-server advertises (EXTERNALHOST). Only set under the
+# Windows shim: there the podman machine inherits the WINDOWS host's name, so
+# the announcement collides with the Windows mDNS responder already claiming
+# that name, and LAN clients resolve the host's other adapters instead of the
+# server. Verified on a real network: the box was absent from `avahi-browse`
+# on another machine until this was set, then appeared as signalk.local at
+# the LAN IP.
+#
+# On Linux/macOS the host owns its own name, nothing collides, and an
+# override would only mask the operator's chosen hostname - so this renders
+# empty and signalk-server falls back to os.hostname() exactly as before.
+#
+# SIGNALK_MDNS_HOST overrides the name; two SignalK boxes on one network
+# would otherwise both answer for signalk.local.
+SK_EXTERNAL_HOST=""
+if [[ "${SIGNALK_WINDOWS_SHIM:-0}" == "1" ]]; then
+    SK_EXTERNAL_HOST="${SIGNALK_MDNS_HOST:-signalk}"
+    # Strip a trailing .local and anything outside the mDNS label charset; an
+    # empty or malformed result falls back rather than advertising garbage.
+    SK_EXTERNAL_HOST=$(printf '%s' "$SK_EXTERNAL_HOST" \
+        | sed -e 's/\.local$//' -e 's/[^A-Za-z0-9-]/-/g' -e 's/^-*//' -e 's/-*$//')
+    [[ -z "$SK_EXTERNAL_HOST" ]] && SK_EXTERNAL_HOST="signalk"
+    info "mDNS name: ${SK_EXTERNAL_HOST}.local (Windows: avoids the host-name collision)"
+fi
+
 SERVER_QUADLET=$("$HERE/render-server-quadlet.sh" "$UPDATER_DATA/hardware.json" "$HERE/../../quadlets/signalk-server.container.template" \
-    | sed -e "s/__SK_HTTP_PORT__/${SK_HTTP_PORT}/g")
+    | sed -e "s/__SK_HTTP_PORT__/${SK_HTTP_PORT}/g" \
+          -e "s/__SK_EXTERNAL_HOST__/${SK_EXTERNAL_HOST}/g")
 atomic_write "$QUADLET_DIR/signalk-server.container" "$SERVER_QUADLET"
 
 # Substitute both the publish host (set earlier from SIGNALK_LOCALHOST_ONLY)
@@ -1544,6 +1669,50 @@ fi
 if ! "$HOME/.local/bin/signalk" netgate-watch; then
     warn "could not install the signalk-netgate-watch units; a container that"
     warn "starts before the host has a route may stay unreachable until restarted."
+fi
+
+# 11a-bis. CPU priority: rank the SK stack above the plugin containers.
+#
+# cgroup v2 cpu.weight compares siblings only. The Quadlet units (signalk-
+# server, updater, doctor) live in the user manager's app.slice; the
+# containers signalk-container starts through the podman socket (sk-questdb,
+# sk-grafana, chart-import jobs, ...) land in its user.slice. Both slices sit
+# at weight 100, so a chart import saturating every core takes half the CPU
+# from signalk-server. Raising app.slice to 300 gives the SK stack 3:1 under
+# contention and changes nothing on an idle host — it is a weight, not a cap.
+# The per-container tiers inside user.slice are signalk-container's job.
+#
+# A user-manager drop-in, no sudo. daemon-reload applies the new weight to the
+# running slice (verified live: app.slice/cpu.weight reads 300 within a couple
+# of seconds); removing the file later does NOT restore 100 until re-login,
+# which is why both uninstall paths also run `set-property --runtime`. Placed
+# after the watcher installs above on purpose: on Windows the podman machine
+# creates ~/.config/systemd/user as root, and `signalk resolv-watch` is what
+# reclaims it (#260) — an earlier mkdir here would fail on every fresh
+# Windows install.
+section "CPU priority"
+CPU_PRIORITY_DIR="$HOME/.config/systemd/user/app.slice.d"
+CPU_PRIORITY_CONF="$CPU_PRIORITY_DIR/50-signalk-cpu-priority.conf"
+CPU_PRIORITY_DESIRED='# Installed by signalk-universal-installer.
+# signalk-server and the engine consoles run in this slice; the containers
+# signalk-container manages run in user.slice next to it. Weight ranks the two
+# under CPU contention only (3:1) and never caps either.
+[Slice]
+CPUWeight=300'
+# Keyed on the presence of a CPUWeight= line, not the exact value, so an
+# operator who tuned the weight keeps it across re-runs (same rule as the
+# podman.service TasksMax drop-in above).
+if [[ -f "$CPU_PRIORITY_CONF" ]] && grep -Eq '^[[:space:]]*CPUWeight[[:space:]]*=' "$CPU_PRIORITY_CONF"; then
+    ok "app.slice CPUWeight already set ($CPU_PRIORITY_CONF: $(grep -E '^[[:space:]]*CPUWeight[[:space:]]*=' "$CPU_PRIORITY_CONF" | head -1))"
+elif mkdir -p "$CPU_PRIORITY_DIR" 2>/dev/null \
+    && printf '%s\n' "$CPU_PRIORITY_DESIRED" > "$CPU_PRIORITY_CONF"; then
+    if systemctl --user daemon-reload; then
+        ok "app.slice CPUWeight=300 applied (SK stack outranks plugin containers 3:1 under contention)"
+    else
+        warn "Wrote $CPU_PRIORITY_CONF but daemon-reload failed; CPUWeight=300 takes effect on the next login"
+    fi
+else
+    warn "Could not write $CPU_PRIORITY_CONF; SK stack shares CPU 1:1 with plugin containers under contention"
 fi
 
 # 11b. signalk-server drift apply
@@ -1968,6 +2137,11 @@ fi
 # until a socket consumer hits it — observed as the doctor's drift scan
 # reporting a baffling "Permission denied" reading package.json out of
 # signalk-server, while a shell `podman exec` on the same file worked.
+#
+# The mirror-image failure — containers created over the socket AFTER the pause
+# process was replaced but BEFORE this restart — is closed at the source by
+# podman_migrate (section "Podman"), which stops the service directly behind
+# the only `podman system migrate` calls in this script.
 #
 # Restart ONLY podman.service (never podman.socket): cycling the service makes
 # it rejoin the now-final pause namespace, while the socket inode stays put so

@@ -53,14 +53,45 @@ PODMAN_KILL_AFTER=${PODMAN_KILL_AFTER:-5}
 # together. A wedged podman is a finding; report it as one.
 container_snapshot() {
     local out rc=0
+    # Two families, and listing only the first is the 2026-08-18 field bug:
+    # engine containers are `signalk-*`, but everything the
+    # signalk-container plugin manages is `<namespace>-*` (default `sk-`) —
+    # QuestDB, Grafana, Ollama, Whisper and every user-added container. A
+    # bare `--filter name=signalk-` hides all of them, which is most of the
+    # stack an operator wants to see here.
+    #
+    # `--filter name=` is a SUBSTRING match and cannot express "starts
+    # with", so list once and select on the name column with awk. That also
+    # rejects an unrelated container merely CONTAINING the token (someone's
+    # `my-signalk-backup`), which the old filter silently included.
+    #
+    # This script is deliberately standalone (it is the SSH-only recovery
+    # surface and sources nothing), so it cannot reuse the CLI's
+    # signalk_all_containers() helper — the logic is duplicated on purpose.
+    # Honor SIGNALK_CONTAINER_NAMESPACE too, so a devcontainer's `devpod-*`
+    # stack is not invisible here. Validated the same way the plugin and the
+    # CLI helper validate it — lowercase alphanumerics, at most 32 chars —
+    # so a typo'd value falls back to the defaults instead of building a
+    # bogus pattern. Passed to awk via -v rather than interpolated into the
+    # program text.
+    local ns_alt=""
+    if [[ -n "${SIGNALK_CONTAINER_NAMESPACE:-}" \
+        && "$SIGNALK_CONTAINER_NAMESPACE" =~ ^[a-z0-9]+$ \
+        && ${#SIGNALK_CONTAINER_NAMESPACE} -le 32 ]]; then
+        ns_alt="$SIGNALK_CONTAINER_NAMESPACE"
+    fi
     out=$(timeout -k "$PODMAN_KILL_AFTER" "$PODMAN_TIMEOUT" \
-        podman ps -a --filter 'name=signalk-' \
-        --format '{{.Names}}  {{.Status}}  {{.Image}}' 2>/dev/null) || rc=$?
+        podman ps -a \
+        --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null \
+        | awk -F'\t' -v ns="$ns_alt" '
+            $1 ~ /^(signalk|sk)-/ || (ns != "" && index($1, ns "-") == 1) {
+                printf "  %s  %s  %s\n", $1, $2, $3
+            }') || rc=$?
     if [[ $rc -eq 0 ]]; then
         if [[ -n "$out" ]]; then
             printf '%s\n' "$out"
         else
-            echo "  (no signalk-* containers)"
+            echo "  (no signalk-* or sk-* containers)"
         fi
         return
     fi
@@ -134,6 +165,36 @@ root_storage() {
     esac
 }
 root_storage
+
+# app.slice (signalk-server + engine consoles) vs user.slice (containers
+# signalk-container manages) — the installer sets app.slice to CPUWeight=300
+# so a chart import cannot take half the CPU from signalk-server. Reads the
+# live cgroup value, not the drop-in, because a drop-in only takes effect
+# after daemon-reload and removal only after re-login.
+echo
+echo "=== CPU priority ==="
+cpu_priority() {
+    local slice weight conf configured
+    slice="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/app.slice"
+    conf="${HOME}/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf"
+    weight=$(cat "$slice/cpu.weight" 2>/dev/null || true)
+    configured=$(sed -n 's/^[[:space:]]*CPUWeight[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$conf" 2>/dev/null | head -1 || true)
+    if [[ -z "$weight" ]]; then
+        echo "  [WARN] app.slice cpu.weight unreadable — cgroup v2 cpu controller not"
+        echo "         delegated to the user slice; CPU priorities have no effect"
+    elif [[ -n "$configured" && "$weight" != "$configured" ]]; then
+        echo "  [WARN] app.slice cpu.weight=$weight but $conf says CPUWeight=$configured"
+        echo "         Apply:  systemctl --user daemon-reload   (or log out and back in)"
+    elif [[ "$weight" -gt 100 ]]; then
+        echo "  [OK]   app.slice cpu.weight=$weight (SK stack outranks plugin containers under contention)"
+    elif [[ -n "$configured" ]]; then
+        echo "  [OK]   app.slice cpu.weight=$weight as configured in $conf"
+    else
+        echo "  [WARN] app.slice cpu.weight=$weight — SK stack shares CPU 1:1 with plugin"
+        echo "         containers under contention; re-run the installer to set the drop-in"
+    fi
+}
+cpu_priority
 
 echo
 echo "For deeper diagnostics:"

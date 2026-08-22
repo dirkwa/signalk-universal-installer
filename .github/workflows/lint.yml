@@ -1,14 +1,38 @@
 name: lint
 
 on:
+  # `push` only on master, `pull_request` for everything else. Previously both
+  # were '**', so a branch with an open PR fired TWO identical runs per push —
+  # double the minutes, and double the exposure to a flaky step. Concurrency
+  # cannot merge them: the push run's github.ref is refs/heads/<branch> while
+  # the pull_request run's is refs/pull/<n>/merge, so they never share a group
+  # (verified on PR #269 — two runs, both completed). Restricting the trigger
+  # removes the duplicate at the source instead.
+  #
+  # Coverage is unchanged in practice: proposed work is linted via its PR, and
+  # master is linted on every push (including merge commits, which no PR run
+  # covers). A branch pushed with no PR open is not linted until a PR exists,
+  # which is when the result is actually read.
   push:
-    branches: ['**']
+    branches: [master]
   pull_request:
     branches: ['**']
+
+# Supersede an in-flight run when newer commits land on the same PR or on
+# master, so a branch under active rebase does not keep stale jobs alive.
+# This is orthogonal to the trigger change above: that removes the push/PR
+# duplicate for ONE commit, this collapses a rapid SERIES of commits.
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   shellcheck:
     runs-on: ubuntu-latest
+    # The whole suite finishes in ~1-2 minutes. 15 gives generous headroom
+    # while ensuring a wedged step fails in minutes instead of occupying a
+    # runner until the 6-hour default expires.
+    timeout-minutes: 15
     steps:
       # Full history + tags: check-pages-version.sh resolves version tags and
       # creates throwaway worktrees at specific commits, neither of which works
@@ -17,8 +41,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # ubuntu-latest ships shellcheck preinstalled (0.9.0 as of 2026-08),
+      # so the previous unconditional `apt-get update && apt-get install`
+      # reached out to every configured mirror only to report "shellcheck is
+      # already the newest version". That pointless network round-trip is
+      # exactly what hung for 42 minutes on 2026-08-18. Use what is on the
+      # image; only fall back to apt when it is genuinely missing, and bound
+      # both the step and the apt calls so a stalled mirror fails fast
+      # instead of hanging the job.
       - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if command -v shellcheck >/dev/null 2>&1; then
+            echo "shellcheck present: $(shellcheck --version | awk '/^version:/{print $2}')"
+            exit 0
+          fi
+          echo "shellcheck not on the image — installing"
+          sudo timeout -k 30 120 apt-get update
+          sudo timeout -k 30 180 apt-get install -y --no-install-recommends shellcheck
+          shellcheck --version
 
       - name: bash -n syntax check
         run: |
@@ -43,8 +85,17 @@ jobs:
       - name: installer fetch-list manifest
         run: bash scripts/test/check-installer-manifest.sh
 
+      - name: bug-report container discovery
+        run: bash scripts/test/check-bug-report-containers.sh
+
       - name: journald drop-in idempotency
         run: bash scripts/test/check-journald-idempotent.sh
+
+      - name: app.slice CPU priority drop-in
+        run: bash scripts/test/check-cpu-priority-dropin.sh
+
+      - name: mDNS EXTERNALHOST wiring
+        run: bash scripts/test/check-mdns-external-host.sh
 
       - name: render server quadlet
         run: bash scripts/test/check-render-quadlet.sh
@@ -117,6 +168,9 @@ jobs:
 
       - name: unwedge-podman storage-lock recovery
         run: bash scripts/test/check-unwedge-podman.sh
+
+      - name: podman migrate namespace window
+        run: bash scripts/test/check-migrate-pause-window.sh
 
       - name: Windows shim generation
         run: bash scripts/test/check-windows-shim.sh

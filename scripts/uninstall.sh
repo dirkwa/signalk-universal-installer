@@ -31,6 +31,17 @@ done
 # it only ever contains the proxy's unix socket.
 podman volume rm signalk-dbus-socket 2>/dev/null || true
 
+# The app.slice CPUWeight drop-in the installer wrote. Deleting the file
+# alone leaves the running slice at 300 until re-login (systemd does not
+# write the default back), so also reset the live value.
+CPU_PRIORITY_CONF="${HOME}/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf"
+if [[ -f "$CPU_PRIORITY_CONF" ]]; then
+    echo "Removing app.slice CPU priority drop-in..."
+    rm -f "$CPU_PRIORITY_CONF"
+    rmdir "$(dirname "$CPU_PRIORITY_CONF")" 2>/dev/null || true
+    systemctl --user set-property --runtime app.slice CPUWeight=100 2>/dev/null || true
+fi
+
 systemctl --user daemon-reload || true
 
 echo

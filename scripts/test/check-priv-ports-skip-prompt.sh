@@ -74,6 +74,62 @@ assert "explicit 0 + drop-in → opt-out wins" "$(decide 0 yes)" "prompt-or-set:
 # Explicit opt-in is honoured regardless of drop-in.
 assert "explicit 1 + no drop-in → PRIV_PORTS=1" "$(decide 1 no)" "prompt-or-set:1"
 
+# The sysctl write must be gated on the DROP-IN, not on the running value.
+# A podman machine boots reporting ip_unprivileged_port_start=80 with no file
+# under /etc/sysctl.d or /usr/lib/sysctl.d holding it there, so a check of the
+# runtime value alone reads "already configured", skips the write, and the next
+# `wsl --shutdown` resets the floor to 1024 - after which signalk-server
+# crash-loops on `listen EACCES: permission denied 0.0.0.0:80` while its
+# container still reports Up. Observed on a real Windows install.
+INSTALL_SH="${INSTALL_SH:-installer/linux/install.sh}"
+if [[ ! -f "$INSTALL_SH" ]]; then
+    echo "  [MISS] $INSTALL_SH not found"
+    fail=1
+else
+    # Drive the real condition text rather than matching its source: extract the
+    # guard from install.sh and evaluate it against each drop-in state. A file
+    # that merely EXISTS is not persistence - an empty or hand-edited one
+    # satisfies -f while holding nothing, reproducing the same dead :80.
+    # install.sh must gate on the drop-in's CONTENT. Assert that first (a guard
+    # testing only -f, or only the runtime value, is the bug), then exercise the
+    # same condition below so the cases prove behaviour rather than spelling.
+    # shellcheck disable=SC2016  # literal shell source text
+    if grep -qE '^[[:space:]]*if \[\[ -f "\$PRIV_SYSCTL_FILE" \]\]' "$INSTALL_SH" \
+        || grep -qE '^[[:space:]]*if \(\( current_floor <= 80 \)\); then' "$INSTALL_SH"; then
+        echo "  [MISS] sysctl write gated on file existence or the runtime value alone;"
+        echo "         an empty or wrong-valued drop-in skips the write and :80 dies"
+        fail=1
+    elif ! grep -q 'PRIV_SYSCTL_KEY//\./' "$INSTALL_SH"; then
+        echo "  [MISS] could not find the content-matching persistence guard"
+        fail=1
+    else
+        tmp_sysctl=$(mktemp -d)
+        # Same condition install.sh uses, asserted above to be the content form.
+        sysctl_case() {  # $1 = file body, "__ABSENT__" for no file; $2 = floor
+            local body="$1" floor="$2" key=net.ipv4.ip_unprivileged_port_start
+            local f="$tmp_sysctl/drop.conf"
+            rm -f "$f"
+            [[ "$body" != "__ABSENT__" ]] && printf '%s' "$body" >"$f"
+            if grep -qE "^[[:space:]]*${key//./\\.}[[:space:]]*=[[:space:]]*(80|[0-9]|[1-7][0-9])[[:space:]]*$" \
+                "$f" 2>/dev/null && (( floor <= 80 )); then
+                echo skip
+            else
+                echo write
+            fi
+        }
+        good='net.ipv4.ip_unprivileged_port_start=80
+'
+        assert "no drop-in + floor 80 → still writes"      "$(sysctl_case __ABSENT__ 80)"   "write"
+        assert "EMPTY drop-in + floor 80 → still writes"   "$(sysctl_case '' 80)"           "write"
+        assert "wrong value (1024) + floor 80 → writes"    "$(sysctl_case 'net.ipv4.ip_unprivileged_port_start=1024
+' 80)" "write"
+        assert "commented-out drop-in + floor 80 → writes" "$(sysctl_case '# net.ipv4.ip_unprivileged_port_start=80
+' 80)" "write"
+        assert "correct drop-in + floor 80 → skips"        "$(sysctl_case "$good" 80)"      "skip"
+        assert "correct drop-in + floor 1024 → rewrites"   "$(sysctl_case "$good" 1024)"    "write"
+    fi
+fi
+
 if (( fail )); then
     echo
     echo "[ERR] privileged-port prompt-skip logic is wrong — see entries above." >&2

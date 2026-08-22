@@ -596,18 +596,45 @@ function Add-FirewallRules {
     }
 }
 
-# The Windows host's primary LAN IPv4 (what to point a browser at, since under
-# mirrored networking the VM shares this address). Skips loopback and APIPA
-# (link-local) only; picks the lowest-metric interface, which is the active
-# default route - that's the real LAN NIC. We deliberately do NOT exclude
-# 172.x: 172.16.0.0/12 is a valid private LAN range, and under mirrored mode the
-# WSL NAT interface (also 172.x) isn't present on the host anyway. Returns $null
-# if none found.
+# The Windows host's LAN IPv4 - the address OTHER devices use to reach the
+# stack, since under mirrored networking the VM shares it.
+#
+# Ask the routing table which source address Windows itself would use to reach
+# the internet. Sorting Get-NetIPAddress by InterfaceMetric does not work: on a
+# real box that property comes back EMPTY for every address (observed on
+# Windows 11 26200), so the sort is a no-op and the first row wins by accident.
+# On a host with two addresses on one adapter that printed 172.31.3.54 - a
+# second, unroutable address on the same NIC - while the reachable LAN address
+# 192.168.0.54 sorted last. The installer then told the operator to open an
+# address no device on the network can reach.
+#
+# Find-NetRoute answers the question directly and needs no metric heuristics.
+# Fall back to the old scan only if it is unavailable, and prefer an address
+# whose adapter carries the default route.
+#
+# We deliberately do NOT exclude 172.x by range: 172.16.0.0/12 is a valid
+# private LAN, and picking by route makes range guessing unnecessary.
 function Get-HostLanIp {
+    try {
+        # 8.8.8.8 is a routing probe, not a connection - nothing is sent.
+        $src = Find-NetRoute -RemoteIPAddress 8.8.8.8 -ErrorAction Stop |
+            Select-Object -First 1 -ExpandProperty IPAddress
+        if ($src -and $src -notlike '127.*' -and $src -notlike '169.254.*') { return $src }
+    } catch { }
+    try {
+        # Fallback: the adapters carrying a default route, best route first.
+        $ifIdx = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
+            Sort-Object RouteMetric | Select-Object -ExpandProperty ifIndex -Unique
+        foreach ($i in $ifIdx) {
+            $ip = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $i -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+                Select-Object -First 1 -ExpandProperty IPAddress
+            if ($ip) { return $ip }
+        }
+    } catch { }
     try {
         $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
             Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
-            Sort-Object -Property @{Expression={$_.InterfaceMetric}} |
             Select-Object -First 1 -ExpandProperty IPAddress
         return $ip
     } catch { return $null }
@@ -1623,21 +1650,33 @@ Add-FirewallRules -Ports $SignalkPorts -UdpPorts $NmeaUdpPorts
 Section "Auto-start on reboot"
 Register-MachineAutostart -Machine $MachineName -CmdDir $skCmdDir
 
-# 6. Done. Under mirrored networking the stack lives at the host's LAN IP, NOT
-# localhost (mirrored replaces the NAT localhost-forward), so point the operator
-# there - that's also the address other devices use.
+# 6. Done. Two different addresses, because the Windows host and the rest of
+# the LAN do not share a working one:
+#   - other devices use the host's LAN IP (verified: a phone loads it on :80);
+#   - the Windows box itself must use 127.0.0.1. Its own mirrored LAN address
+#     is refused at the TCP layer from the host, and `localhost` resolves to
+#     ::1 first while the stack listens on IPv4, stalling ~21s per connection
+#     (measured 21.1s vs 0.01s over 127.0.0.1).
 $lanIp = Get-HostLanIp
 $accessHost = if ($lanIp) { $lanIp } else { '<this-pc-ip>' }
 @"
 
 OK - SignalK is up inside Podman Machine '$MachineName'.
 
-Open from THIS PC or any device on the network (mirrored networking - use the
-host's LAN IP, not localhost):
+From ANY OTHER DEVICE on the network (phone, tablet, laptop):
 
   SignalK admin UI : http://$accessHost        (or :3000 if you declined standard ports)
   Updater Console  : http://${accessHost}:3003
   Doctor Console   : http://${accessHost}:3004
+
+From THIS PC use 127.0.0.1 instead - http://127.0.0.1, :3003, :3004.
+
+Under mirrored networking the machine shares this PC's LAN address, and the
+host cannot reach itself through it: the addresses above answer from every
+other device but are refused here. 'localhost' does answer, but Windows tries
+IPv6 (::1) first while the stack listens on IPv4, so each new connection
+stalls ~21s before falling back (measured 21.1s, against 0.01s over
+127.0.0.1). 127.0.0.1 has neither problem.
 
 Manage it from a NEW terminal with the 'signalk' command, e.g.:
   signalk health
