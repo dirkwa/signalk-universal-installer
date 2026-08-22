@@ -155,6 +155,17 @@ Environment=SIGNALK_NODE_CONF_DIR=/home/node/.signalk
 # force-enables TLS before a certificate exists.
 Environment=PORT=__SK_HTTP_PORT__
 
+# The name signalk-server advertises over mDNS (getExternalHostname() reads
+# EXTERNALHOST first). Left empty the server falls back to the system
+# hostname, which on Windows is the WINDOWS host name: under WSL mirrored
+# networking the VM inherits it, so the announcement collides with the
+# Windows mDNS responder already claiming that name, and LAN clients resolve
+# the host other adapters instead of the server. Observed on a real boat
+# network: the box was invisible to avahi-browse until this was set, then
+# appeared as signalk.local -> the LAN IP. Rendered empty on Linux/macOS,
+# where the host owns its own name and nothing collides.
+Environment=EXTERNALHOST=__SK_EXTERNAL_HOST__
+
 # Cut podman's SIGTERM → SIGKILL grace from the default 10s to 5s.
 # signalk-server doesn't trap SIGTERM (no handler in bin/signalk-server
 # upstream), so the full grace is dead time on every version switch
