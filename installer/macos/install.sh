@@ -212,7 +212,10 @@ fi
 podman machine ssh "$MACHINE_NAME" bash << LINUX_SCRIPT
 set -euo pipefail
 cd \$HOME
-curl -fsSL '${LINUX_URL}' | ${_SK_CHAN_ENV}INSTALLER_VERSION='${INSTALLER_VERSION}' INSTALLER_BASE_URL='${INSTALLER_BASE_URL}' bash
+# Port 80 is unreachable from pasta-networked containers (updater, doctor) to
+# a Network=host signalk-server inside the same VM — pasta refuses privileged
+# ports. Use 3000 so health URLs stay valid for the updater/doctor.
+curl -fsSL '${LINUX_URL}' | ${_SK_CHAN_ENV}INSTALLER_VERSION='${INSTALLER_VERSION}' INSTALLER_BASE_URL='${INSTALLER_BASE_URL}' SIGNALK_PRIVILEGED_PORTS=0 bash
 LINUX_SCRIPT
 
 # On SELinux VMs, container label isolation blocks access to the mounted
@@ -464,7 +467,7 @@ HEALTH_URL_FIX_SCRIPT
 # 5. Forward the ports out of the machine
 section "Port forwarding"
 info "Podman Machine forwards rootless container ports to the host automatically."
-info "The main SignalK server runs with Network=host inside the VM, so we also forward localhost:3000 over SSH."
+info "The main SignalK server runs with Network=host inside the VM, so we also forward it over SSH."
 
 # A host-networked server inside podman machine is not automatically forwarded by
 # Podman itself. Detect the VM's real SignalK server port (80 or 3000) and bind
@@ -494,16 +497,9 @@ if [[ -n "$_VM_SSH_PORT" && -n "$_VM_SSH_USER" && -n "$_VM_SSH_KEY" ]]; then
     touch "$_VM_KNOWN_HOSTS"
     chmod 600 "$_VM_KNOWN_HOSTS" 2>/dev/null || true
 
-    if [[ "$_VM_SERVER_PORT" = "80" ]]; then
-        if ! _LOCAL_UI_PORT=$(pick_free_port 8080 8000 8081 8181 18080); then
-            warn "No free local UI port found for VM server port 80; skipping host-networked UI tunnel."
-            _LOCAL_UI_PORT=""
-        fi
-    else
-        if ! _LOCAL_UI_PORT=$(pick_free_port 3000 3002 3004 8080 8081 18080); then
-            warn "No free local UI port found for VM server port ${_VM_SERVER_PORT}; skipping host-networked UI tunnel."
-            _LOCAL_UI_PORT=""
-        fi
+    if ! _LOCAL_UI_PORT=$(pick_free_port 8080 8000 8081 8181 18080); then
+        warn "No free local UI port found for VM server port ${_VM_SERVER_PORT}; skipping host-networked UI tunnel."
+        _LOCAL_UI_PORT=""
     fi
     if [[ -n "$_LOCAL_UI_PORT" ]]; then
         if ! pgrep -f "ssh .*${_LOCAL_UI_PORT}:127.0.0.1:${_VM_SERVER_PORT}.*-p ${_VM_SSH_PORT}.*${_VM_SSH_USER}@127.0.0.1" >/dev/null 2>&1; then
