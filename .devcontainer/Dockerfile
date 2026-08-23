@@ -42,6 +42,11 @@ RUN printf 'allow-scripts[]=@anthropic-ai/claude-code\n' >> /root/.npmrc
 # unprivileged ICMP datagram sockets, which the host's ping_group_range
 # permits on systemd hosts (field-verified under host networking).
 # dig/nslookup/nc/wget/curl use plain sockets and work everywhere.
+# pandoc: converts the repo's Markdown (docs/*.md, PR and issue text) to
+# HTML/docx/plain text locally. ~198MB installed with its 4 deps
+# (pandoc-data, liblua5.4-0, libnuma1, libyaml-0-2). PDF output is NOT
+# available: that needs a LaTeX engine or wkhtmltopdf, both of which are
+# recommends-only and stay out under --no-install-recommends.
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -62,6 +67,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
         netcat-openbsd \
         tcpdump \
         htop \
+        pandoc \
     && setcap -r /usr/bin/ping \
     && rm -rf /var/lib/apt/lists/*
 
