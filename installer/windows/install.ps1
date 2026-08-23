@@ -1677,15 +1677,24 @@ Register-MachineAutostart -Machine $MachineName -CmdDir $skCmdDir
 #     (measured 21.1s vs 0.01s over 127.0.0.1).
 $lanIp = Get-HostLanIp
 $accessHost = if ($lanIp) { $lanIp } else { '<this-pc-ip>' }
+# SIGNALK_LOCALHOST_ONLY binds the updater and doctor to loopback INSIDE the VM
+# (it feeds __PUBLISH_HOST__ in their two quadlets only), so their LAN URLs
+# would be dead links here. signalk-server does not read that flag and stays
+# LAN-reachable either way, so only the two console lines move.
+$consoleLines = if ($env:SIGNALK_LOCALHOST_ONLY) {
+    "`n  (Updater and Doctor consoles are bound to localhost by" +
+    "`n   SIGNALK_LOCALHOST_ONLY - reachable from THIS PC only.)"
+} else {
+    "`n  Updater Console  : http://${accessHost}:3003" +
+    "`n  Doctor Console   : http://${accessHost}:3004"
+}
 @"
 
 OK - SignalK is up inside Podman Machine '$MachineName'.
 
 From ANY OTHER DEVICE on the network (phone, tablet, laptop):
 
-  SignalK admin UI : http://$accessHost        (or :3000 if you declined standard ports)
-  Updater Console  : http://${accessHost}:3003
-  Doctor Console   : http://${accessHost}:3004
+  SignalK admin UI : http://$accessHost        (or :3000 if you declined standard ports)$consoleLines
 
 From THIS PC use 127.0.0.1 instead - http://127.0.0.1, :3003, :3004.
 
