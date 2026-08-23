@@ -41,7 +41,17 @@ EOF
 #!/usr/bin/env bash
 SK_VERSION="__SK_VERSION__"
 EOF
-    echo "# readme" > "$d/README.md"
+    # Carries the quick-start command, because index.html is rendered FROM this
+    # and the root-index check asserts the command survives the render.
+    cat > "$d/README.md" <<'EOF'
+# SignalK Universal Installer
+
+## Quick start
+
+```bash
+curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
+```
+EOF
     echo "Image=x" > "$d/quadlets/a.container.template"
 }
 
@@ -253,6 +263,34 @@ for triple in "windows:$PS1:__SKENV__" "macos:$MACOS:\${_SK_CHAN_ENV}"; do
         echo "  [OK]   $plat installer splices the channel after the pipe"
     fi
 done
+
+# --- the site root must answer -----------------------------------------------
+# Pages serves the artifact as static files with no Markdown step, so staging an
+# index.md alone leaves the root a 404 while every file beneath it serves. That
+# is the state the repo's homepage field pointed at, and nothing here caught it.
+echo "-- root index --"
+for root in "$TMP/dist" "$TMP/dist/dev"; do
+    label=${root#"$TMP/dist"}
+    label=${label:-/}
+    if [[ ! -f "$root/index.html" ]]; then
+        echo "  [MISS] $label has no index.html — the site root 404s"; fail=1
+        continue
+    fi
+    # Rendered from the README, so the quick-start command must survive into it;
+    # an empty or boilerplate-only page would otherwise pass a mere -f check.
+    if ! grep -q "installer/linux/install.sh" "$root/index.html"; then
+        echo "  [MISS] $label index.html lost the install command"; fail=1
+    else
+        echo "  [OK]   $label serves a rendered index.html"
+    fi
+done
+
+# The footer carries the label of the tree it sits in — same property the
+# installers are checked for above, and the same tag-run trap if it regresses.
+root_html_ver=$(sed -n 's/.*Installer version <code>\([^<]*\)<.*/\1/p' "$TMP/dist/index.html")
+dev_html_ver=$(sed -n 's/.*Installer version <code>\([^<]*\)<.*/\1/p' "$TMP/dist/dev/index.html")
+check "site root index.html carries the release version" "0.5.1" "$root_html_ver"
+check "/dev index.html carries the master label" "0.5.1-7-gabc123" "$dev_html_ver"
 
 if [[ $fail -ne 0 ]]; then
     echo "[FAIL] site channels"
