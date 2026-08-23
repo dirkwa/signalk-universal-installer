@@ -27,9 +27,8 @@ Rootless Podman needs the calling user in the right Unix groups to forward devic
 | `gpio` | Raspberry Pi GPIO (`/dev/gpiomem`) |
 | `netdev` | SocketCAN (`vcan` setup, `ip` administration) |
 | `audio` | ALSA devices (`/dev/snd/*`) opened by managed audio containers (see [Audio passthrough](#audio-passthrough)) |
-| `input` | Input event devices (`/dev/input/event*`) opened by managed containers (see [Input passthrough](#input-passthrough)) |
 
-The installer adds you to all five at step 5 of `install.sh`, skipping any the host does not define (`input` is absent on some minimal images). Group changes only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.
+The installer adds you to all four at step 5 of `install.sh`. `input` is deliberately **not** among them — see [Input passthrough](#input-passthrough) for why. Group changes only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.
 
 **Host membership alone is not sufficient.** `UserNS=keep-id:uid=1000,gid=1000` maps only your uid and gid into the container, so a supplementary group such as `dialout` (GID 20) arrives inside as an unmapped 100020. A `/dev/tty*` node is `root:dialout` mode 660, the container process does not hold GID 20, and every `open()` fails — silently, because SignalK reports the connection as *down* rather than surfacing a permission error.
 
@@ -145,25 +144,27 @@ Volume=/dev/input:/dev/input:ro
 
 signalk-container runs *inside* the signalk-server container and stats a plugin's requested device paths on its **own** filesystem before emitting them for the target container. Without this view the probe cannot see the host's input nodes.
 
-The mount is **read-only and metadata-only**, and here that matters more than it does for audio: `/dev/input` carries the host's keyboards and mice, and an `open()` on an event node reads every keystroke. signalk-server never opens input devices — it only stats and lists them — and the consumer container gets its own bind from signalk-container. `check-render-quadlet.sh` asserts the `:ro` flag is present.
+`:ro` here means the *mount* is read-only — nothing in the container can create or remove nodes under it. It does **not** stop a process from opening a node for reading; that is governed by the node's own permissions, and `/dev/input/event*` is `root:input` mode 0660. So whether the server container can read your keystrokes comes down to one thing: whether it holds the `input` group.
+
+It does not. Unlike `audio`, the installer deliberately does **not** add you to `input` at step 5, because `GroupAdd=keep-groups` is server-wide and would carry that membership into signalk-server itself. signalk-container's probe only ever calls `readdir` and `stat`, and both work without the group — `stat` reports the overflow gid, which the probe resolves through udev convention instead. A consumer container that genuinely needs to read an encoder gets its own group emitted by signalk-container, scoped to that one container.
+
+`check-render-quadlet.sh` asserts the `:ro` flag is present.
 
 The same two guards apply as for audio: a render-time existence check (a `Volume=` with a missing source fails the whole unit at start), and `enabled` in `hardware.json` as the operator opt-out.
 
-`input` group membership (step 5) is the other half, for the same reason as `audio`: under rootless Podman the nodes keep their host ownership (`root:input`), and access rides on the calling user's supplementary groups via crun's keep-original-groups. Not every distribution defines an `input` group; the installer skips it when absent.
+This is where audio and input differ. Audio needs the group: `wyoming-satellite` opens the sound card, and under rootless Podman that access rides on the calling user's supplementary groups via crun's keep-original-groups, so the installer adds you to `audio`. Input needs no such thing at the server level — the probe never opens a node — so the group is left off and the read capability never reaches signalk-server.
 
 ### Hand-crafted Podman
 
-If you run `signalk-server` from your own `podman run` or compose file rather than the installer's Quadlet, add the metadata views yourself so signalk-container's device probe can see the host:
+If you run `signalk-server` from your own `podman run` or compose file rather than the installer's Quadlet, give the device probe the same views the Quadlet does. Rather than reproduce the flags here — this file would drift from the renderer that actually emits them — read them out of the generated unit:
 
 ```bash
-podman run \
-  --volume /dev/snd:/dev/snd:ro \
-  --volume /dev/input:/dev/input:ro \
-  --group-add keep-groups \
-  … ghcr.io/dirkwa/signalk-server:dirkwa
+grep -E '^(Volume=/dev/|GroupAdd=)' ~/.config/containers/systemd/signalk-server.container
 ```
 
-Omit either volume whose directory the host does not have. `--group-add keep-groups` is what carries your real `audio` / `input` membership across the user namespace; without it the supplementary gids arrive unmapped and every `open()` on a device node fails.
+On a host with both classes detected that prints the `/dev/snd` and `/dev/input` binds and `GroupAdd=keep-groups`. `installer/linux/render-server-quadlet.sh` is the single source for those lines; if you have no install to read from, that script and `quadlets/signalk-server.container.template` are the files to consult.
+
+Two things to carry across to a hand-written unit. Bind each device directory **`:ro`**, and omit any whose directory the host does not have. And do not add yourself to `input`: `keep-groups` is container-wide, so that membership would let anything in the server container open `/dev/input/event*` and read every keystroke on the host. The probe does not need it (see above).
 
 Neither mount is strictly required. signalk-container knows `/dev/snd`, `/dev/input` and `/dev/dri` as well-known hot-plug directories and emits them **unverified** when it cannot see them locally, so a consumer container can still work without them. What the mounts buy is a truthful probe: correct drift detection, live hot-plug tracking, and accurate `signalk doctor` reporting instead of a guess.
 

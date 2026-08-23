@@ -14,7 +14,7 @@
 #   4b. Enable user podman.socket (engine containers bind-mount it)
 #   4c. Cgroup delegation: write user@.service.d/delegate.conf if needed
 #   4d. Open-files limit: write user@.service.d/nofile.conf if needed
-#   5. Ensure group memberships (dialout, gpio, netdev, audio, input)
+#   5. Ensure group memberships (dialout, gpio, netdev, audio)
 #   6. Generate auth tokens for updater and doctor
 #   7. Initialize ~/.signalk-doctor/{snapshots,last-good.json}
 #   8. Detect hardware → ~/.signalk-updater/hardware.json
@@ -1229,16 +1229,22 @@ section "Group memberships"
 # `halpid` exists only after `signalk halpi2 apply` installed the Hat Labs
 # daemon; its socket is root:halpid 0660 and the signalk-halpi plugin reaches
 # it through this membership (GroupAdd=keep-groups). Silently absent elsewhere.
-# `input` is the same story as `audio` for event devices (/dev/input/event*,
-# root:input 0660) -- rotary encoders and keypads driven by a managed
-# container. Not every distribution defines it; the getent guard skips it there.
-for g in dialout gpio netdev audio input halpid; do
+#
+# `input` is deliberately NOT in this list, unlike `audio`. GroupAdd=keep-groups
+# is server-wide, so adding it would carry `input` into signalk-server itself,
+# and a bind of /dev/input then yields readable event nodes -- every keystroke
+# on the host. Verified: `:ro` blocks writes to the mount, not open() on a node.
+# signalk-container's probe only ever readdirs and stats, and both work WITHOUT
+# the group (stat reports the overflow gid, which the probe resolves by udev
+# convention). A consumer container that genuinely needs to read an encoder
+# gets its own group from signalk-container, scoped to that container.
+for g in dialout gpio netdev audio halpid; do
     if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
         info "Adding $USER to $g (requires sudo)"
         $SUDO /usr/sbin/usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
     fi
 done
-ok "groups: dialout, gpio, netdev, audio, input, halpid (ensured if present on host)"
+ok "groups: dialout, gpio, netdev, audio, halpid (ensured if present on host)"
 
 # 6. Tokens
 section "Authentication tokens"

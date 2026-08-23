@@ -229,8 +229,10 @@ else
     echo "  [MISS] enabled input did not emit the /dev/input volume"
     fail=1
 fi
-# The view must never be writable: an rw /dev/input would let anything in the
-# server container read every keystroke on the host.
+# The view must never be writable. Note :ro governs the MOUNT (no node
+# creation/removal), not open() on a node -- readability is decided by the
+# `input` group, which install.sh deliberately does not grant. Verified:
+# with keep-groups and the owning group, a :ro bind still opens for read.
 if grep -qE '^Volume=[^:]+:/dev/input(:|$)' <<<"$out_input" \
     && ! grep -qxF "Volume=$tmp:/dev/input:ro" <<<"$out_input"; then
     echo "  [MISS] /dev/input rendered without the :ro flag"
@@ -251,6 +253,17 @@ if grep -q ':/dev/input:ro' <<<"$out_input_missing"; then
     fail=1
 else
     echo "  [OK]   missing host path suppresses the input volume"
+fi
+
+# 5c. install.sh must NOT put the operator in the `input` group. GroupAdd=
+#     keep-groups is server-wide, so that membership would turn the read-only
+#     /dev/input view into readable event nodes -- every keystroke on the host.
+#     The probe needs only readdir+stat, which work without the group.
+if grep -qE '^for g in .*\binput\b.*; do' installer/linux/install.sh; then
+    echo "  [MISS] install.sh adds the operator to the input group"
+    fail=1
+else
+    echo "  [OK]   install.sh does not grant the input group"
 fi
 
 # 6. Serial existence guard: an enabled serial device whose node has vanished
