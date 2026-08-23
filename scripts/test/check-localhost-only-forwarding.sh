@@ -66,30 +66,54 @@ for spec in "macos:installer/macos/install.sh" "windows:installer/windows/instal
     fi
 done
 
-# macOS builds the fragment only when the operator set the variable, so an
-# unset run must not export an empty assignment into the VM.
+# The assignment that actually feeds the VM handoff. Anchoring on the variable
+# name alone is not enough: the Windows reboot-resume block mentions it too, so
+# a check that only greps the file passes with the forwarding deleted (verified
+# by removing the $skEnv append -- every other assertion still matched).
+# Each of these names the exact fragment builder the handoff interpolates.
+echo "-- the forwarding assignment --"
+# shellcheck disable=SC2016  # literal shell/PowerShell text, not an expansion
+if grep -qE '^\s*_SK_LOCAL_ENV="'"$VAR"'=' installer/macos/install.sh; then
+    echo "  [OK]   macos builds _SK_LOCAL_ENV from $VAR"
+else
+    echo "  [MISS] macos no longer builds _SK_LOCAL_ENV from $VAR"; fail=1
+fi
+# shellcheck disable=SC2016  # PowerShell's $skEnv, matched literally
+if grep -qE '^\s*\$skEnv \+= "'"$VAR"'=' installer/windows/install.ps1; then
+    echo "  [OK]   windows appends $VAR to \$skEnv"
+else
+    echo "  [MISS] windows no longer appends $VAR to \$skEnv"; fail=1
+fi
+
+# Built only when the operator set the variable, so an unset run does not send
+# an empty assignment into the VM. Checked on the line immediately guarding the
+# builder above rather than anywhere in the file.
 echo "-- conditional --"
-if grep -qE 'if \[\[ -n "\$\{'"$VAR"':-\}" \]\]' installer/macos/install.sh; then
+if grep -B5 -E '^\s*_SK_LOCAL_ENV="'"$VAR"'=' installer/macos/install.sh \
+    | grep -qE 'if \[\[ -n "\$\{'"$VAR"':-\}" \]\]'; then
     echo "  [OK]   macos forwards $VAR only when it is set"
 else
-    echo "  [MISS] macos does not gate $VAR on being set"; fail=1
+    echo "  [MISS] macos does not gate the $VAR fragment on being set"; fail=1
 fi
 # shellcheck disable=SC2016  # PowerShell's $env:, matched literally
-if grep -qE 'if \(\$env:'"$VAR"'\)' installer/windows/install.ps1; then
+if grep -B5 -E '^\s*\$skEnv \+= "'"$VAR"'=' installer/windows/install.ps1 \
+    | grep -qE 'if \(\$env:'"$VAR"'\)'; then
     echo "  [OK]   windows forwards $VAR only when it is set"
 else
-    echo "  [MISS] windows does not gate $VAR on being set"; fail=1
+    echo "  [MISS] windows does not gate the $VAR fragment on being set"; fail=1
 fi
 
 # The value is interpolated into a command a shell in the VM runs, so an
 # apostrophe would close the generated quote and leave the rest as syntax.
+# Asserted on the builder line itself, not merely somewhere in the file.
 echo "-- quoting --"
-if grep -q "SIGNALK_LOCALHOST_ONLY//" installer/macos/install.sh; then
+if grep -qE '^\s*_SK_LOCAL_ENV=.*'"$VAR"'//' installer/macos/install.sh; then
     echo "  [OK]   macos escapes the value before interpolating it"
 else
     echo "  [MISS] macos interpolates $VAR unescaped"; fail=1
 fi
-if grep -qE "env:$VAR -replace" installer/windows/install.ps1; then
+# shellcheck disable=SC2016  # PowerShell's $env:, matched literally
+if grep -qE '^\s*\$skEnv \+=.*env:'"$VAR"' -replace' installer/windows/install.ps1; then
     echo "  [OK]   windows escapes the value before interpolating it"
 else
     echo "  [MISS] windows interpolates $VAR unescaped"; fail=1
@@ -110,6 +134,25 @@ if grep -q 'resumeEnv' installer/windows/install.ps1; then
     fi
 else
     echo "  [MISS] the reboot resume command drops $VAR"; fail=1
+fi
+
+# The closing message must not advertise LAN console URLs the flag just made
+# unreachable. Linux already gates this through DISPLAY_HOST and macOS prints
+# localhost unconditionally; Windows built its URLs from the host LAN IP.
+echo "-- closing message --"
+# shellcheck disable=SC2016  # PowerShell/bash literals, matched not expanded
+if grep -q 'consoleLines' installer/windows/install.ps1 \
+    && grep -qE '\$consoleLines = if \(\$env:'"$VAR"'\)' installer/windows/install.ps1; then
+    echo "  [OK]   windows message drops the LAN console URLs in localhost mode"
+else
+    echo "  [MISS] windows message still advertises LAN consoles under $VAR"; fail=1
+fi
+# shellcheck disable=SC2016  # bash literal, matched not expanded
+if grep -qE '^\s*LAN_HOST=\$\(ip' installer/linux/install.sh \
+    && grep -qE 'if \[\[ "\$PUBLISH_HOST" = "0\.0\.0\.0" \]\]' installer/linux/install.sh; then
+    echo "  [OK]   linux resolves the display host only when LAN-bound"
+else
+    echo "  [MISS] linux no longer gates the display host on the bind address"; fail=1
 fi
 
 if [[ $fail -ne 0 ]]; then
