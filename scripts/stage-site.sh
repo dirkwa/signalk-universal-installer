@@ -29,7 +29,12 @@ fi
 mkdir -p "$DEST"
 cp -r "$SRC/installer" "$DEST/"
 cp -r "$SRC/quadlets" "$DEST/"
-[ -d "$SRC/scripts" ] && cp -r "$SRC/scripts" "$DEST/"
+if [ -d "$SRC/scripts" ]; then
+    cp -r "$SRC/scripts" "$DEST/"
+    # Build tooling is not part of the published tree: the site serves what a
+    # boat downloads, and the renderer only ever runs on the deploy runner.
+    rm -f "$DEST/scripts/render-index.ts"
+fi
 [ -d "$SRC/docs" ] && cp -r "$SRC/docs" "$DEST/"
 if [ -f "$SRC/README.md" ]; then
     cp "$SRC/README.md" "$DEST/index.md"

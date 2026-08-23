@@ -292,6 +292,15 @@ dev_html_ver=$(sed -n 's/.*Installer version <code>\([^<]*\)<.*/\1/p' "$TMP/dist
 check "site root index.html carries the release version" "0.5.1" "$root_html_ver"
 check "/dev index.html carries the master label" "0.5.1-7-gabc123" "$dev_html_ver"
 
+# Build tooling must not reach the published tree. The site serves what a boat
+# downloads, and the renderer runs only on the deploy runner -- shipping it
+# would put a TypeScript file on the path `curl … | bash` reads from.
+if find "$TMP/dist" -name '*.ts' -print -quit | grep -q .; then
+    echo "  [MISS] a TypeScript file reached the published tree"; fail=1
+else
+    echo "  [OK]   no build tooling in the published tree"
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo "[FAIL] site channels"
     exit 1
