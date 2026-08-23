@@ -167,6 +167,9 @@ jobs:
       - name: site release/master channels
         run: bash scripts/test/check-site-channels.sh
 
+      - name: SIGNALK_LOCALHOST_ONLY reaches the VM
+        run: bash scripts/test/check-localhost-only-forwarding.sh
+
       - name: staged installer payload runnable
         run: bash scripts/test/check-payload-runnable.sh
 
