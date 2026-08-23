@@ -1081,6 +1081,14 @@ foreach ($k in $skEnvVars.Keys) {
 if (-not $SkExplicitBase) {
     $skEnv += "SIGNALK_CHANNEL='" + ($Channel -replace "'", "'\''") + "' "
 }
+# The bind host is decided by the Linux installer inside the VM, so the
+# operator's choice has to travel there. Read from the environment rather than
+# a parameter: the documented entry point is `iwr … | iex`, which has no way to
+# pass one. Without this the variable is set on Windows, matches nothing, and
+# the consoles bind 0.0.0.0 while the operator who set it believes otherwise.
+if ($env:SIGNALK_LOCALHOST_ONLY) {
+    $skEnv += "SIGNALK_LOCALHOST_ONLY='" + ($env:SIGNALK_LOCALHOST_ONLY -replace "'", "'\''") + "' "
+}
 # Keep the curl|bash on ONE line - no backslash line-continuation. A `\` at end
 # of line followed by CRLF makes bash continue the line and swallow the `\r`
 # into the next token (seen as `$'bash\r': command not found`). One line has no
