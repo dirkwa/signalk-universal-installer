@@ -27,11 +27,15 @@ if (!src || !dest || !version) {
 // in the README needs raw HTML, so the safe setting costs nothing.
 const md = new MarkdownIt({ html: false, linkify: true, typographer: false })
 
+const ENTITIES: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+}
+
 const escapeHtml = (s: string): string =>
-    s.replace(
-        /[&<>"]/g,
-        (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c
-    )
+    s.replace(/[&<>"]/g, (c) => ENTITIES[c] ?? c)
 
 const body = md.render(readFileSync(src, 'utf8'))
 
