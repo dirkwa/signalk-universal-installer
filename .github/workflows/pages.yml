@@ -32,6 +32,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The site's index.html is rendered from the README by
+      # scripts/render-index.ts. Installed once at the repo root: the staging
+      # step runs against detached worktrees of the tag and of master, and
+      # neither carries node_modules, so both point RENDER_ROOT here.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      # npm >= 12 skips dependency install scripts by default. tsx's esbuild
+      # resolves its binary from an optional platform package on the runner's
+      # linux-x64, so no postinstall is needed -- assert it rather than trust
+      # it, since a silent failure here publishes a site with no landing page.
+      - run: npm ci
+      - run: node_modules/.bin/tsx --version
+
       # The label comes from the COMMIT, not from the ref that triggered this
       # run — see scripts/installer-version.sh for why (a release publishes the
       # same commit twice, and the two runs must agree or the last writer

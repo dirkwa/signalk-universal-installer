@@ -29,9 +29,36 @@ fi
 mkdir -p "$DEST"
 cp -r "$SRC/installer" "$DEST/"
 cp -r "$SRC/quadlets" "$DEST/"
-[ -d "$SRC/scripts" ] && cp -r "$SRC/scripts" "$DEST/"
+if [ -d "$SRC/scripts" ]; then
+    cp -r "$SRC/scripts" "$DEST/"
+    # Build tooling is not part of the published tree: the site serves what a
+    # boat downloads, and the renderer only ever runs on the deploy runner.
+    rm -f "$DEST/scripts/render-index.ts"
+fi
 [ -d "$SRC/docs" ] && cp -r "$SRC/docs" "$DEST/"
-[ -f "$SRC/README.md" ] && cp "$SRC/README.md" "$DEST/index.md"
+if [ -f "$SRC/README.md" ]; then
+    cp "$SRC/README.md" "$DEST/index.md"
+    # Pages serves the artifact as static files with no Markdown step, so
+    # index.md alone leaves the root a 404 while everything under it serves.
+    # Render the README to index.html so the root -- what the repo homepage and
+    # the quick-start links point at -- answers with the documentation itself.
+    #
+    # RENDER_ROOT is the checkout holding the tooling. It is deliberately not
+    # $SRC: staging runs against detached worktrees of a tag and of master, and
+    # neither has node_modules. The workflow installs once at the repo root and
+    # points every staging run at it.
+    RENDER_ROOT="${RENDER_ROOT:-$PWD}"
+    # Absolute, because the render runs from RENDER_ROOT and DEST is routinely
+    # relative (the workflow stages to dist/ and dist/dev).
+    dest_abs=$(cd "$DEST" && pwd)
+    if [ -f "$RENDER_ROOT/node_modules/.bin/tsx" ]; then
+        (cd "$RENDER_ROOT" && node_modules/.bin/tsx scripts/render-index.ts \
+            "$dest_abs/index.md" "$dest_abs/index.html" "$VERSION")
+    else
+        echo "[ERR] no renderer at $RENDER_ROOT/node_modules (run npm ci first)" >&2
+        exit 3
+    fi
+fi
 
 # Inject the version into shell + powershell installers and *.tmpl dispatchers.
 find "$DEST/installer" -type f \( -name '*.sh' -o -name '*.ps1' -o -name '*.tmpl' \) -print0 |

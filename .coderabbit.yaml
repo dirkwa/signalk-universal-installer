@@ -61,11 +61,21 @@ reviews:
         own the runtime. Reviews should reject any drift toward "the
         installer also does X at runtime".
 
-        ## Shell-only repo
+        ## Shell-only runtime
 
-        - No Node, no TypeScript, no Python in this repo. Bash on Linux/macOS
-          and PowerShell on Windows (WSL2 bootstrap). Do not suggest
-          rewriting in another language.
+        - The installer and everything it ships is Bash on Linux/macOS and
+          PowerShell on Windows (WSL2 bootstrap). No Node, no TypeScript, no
+          Python on any path a boat executes. Do not suggest rewriting in
+          another language.
+        - The exception is build tooling that never reaches an installed
+          system: `scripts/render-index.ts` renders the README into the
+          GitHub Pages landing page at deploy time, with `package.json`,
+          `tsconfig.json` and the lockfile that supports it. Pages deploys a
+          static artifact and converts no Markdown, so without a renderer the
+          site root 404s. `stage-site.sh` strips it from the published tree
+          and `check-site-channels.sh` asserts no `.ts` file ever reaches it,
+          so nothing here is fetched by `curl … | bash`, staged into
+          `installer-payload/`, or run after install.
         - All shell scripts must pass `shellcheck` and `bash -n`. These are
           in the pre-PR checklist.
         - `set -euo pipefail` at the top of every bash script. Do not
