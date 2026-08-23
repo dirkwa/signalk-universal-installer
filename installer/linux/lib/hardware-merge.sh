@@ -9,13 +9,17 @@
 # merges the operator's prior toggles back over the fresh detection so a
 # documented re-run (`curl … | bash`) can't silently flip passthrough on/off.
 #
-# audio is opt-*out* (enabled by default when present), unlike bluetooth/gpio
-# which are opt-in. It needs an explicit has() check, not `//`: jq's `//`
+# audio and input are opt-*out* (enabled by default when present), unlike
+# bluetooth/gpio which are opt-in. They need an explicit has() check, not
+# `//`: jq's `//`
 # treats a stored `false` as empty and would fall through to the fresh
 # enabled-by-default `true`, silently re-enabling an operator opt-out. So:
 # carry the prior value verbatim when present, else keep the fresh default.
 # (bluetooth/gpio tolerate `//` only because their fresh default is already
 # false, so `false // false` is harmless there.)
+#
+# input carries the same shape and the same trap; older hardware.json files
+# predate the class entirely, hence the has() check rather than a default.
 #
 # onboardSerial (HALPI2 RS-485, docs/halpi2.md) is opt-out like audio and
 # is re-emitted by every detection, so only the per-device `enabled` is
@@ -33,6 +37,9 @@ hardware_merge() {
         | .audio.enabled = (if $old | has("audio")
                             then $old.audio.enabled
                             else .audio.enabled end)
+        | .input.enabled = (if $old | has("input")
+                            then $old.input.enabled
+                            else .input.enabled end)
         | if $old.socketcanCandidate != null
           then .socketcanCandidate = $old.socketcanCandidate
           else . end

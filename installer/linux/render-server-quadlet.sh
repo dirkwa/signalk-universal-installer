@@ -13,6 +13,9 @@ TEMPLATE="${2:-}"
 # Host path probed/mounted for the audio class; overridable so the render
 # test can exercise both the present and missing cases deterministically.
 AUDIO_DIR="${AUDIO_DIR:-/dev/snd}"
+# Host path probed/mounted for the input class; overridable for the same
+# reason as AUDIO_DIR.
+INPUT_DIR="${INPUT_DIR:-/dev/input}"
 # Each serial device is emitted TWICE, deliberately.
 #
 #   AddDevice=<by-id>:<by-id>   the stable name, present inside the container
@@ -166,6 +169,26 @@ hardware_block() {
     fi
     if [ "$audio_enabled" = "true" ] && [ -d "$AUDIO_DIR" ]; then
         echo "Volume=${AUDIO_DIR}:/dev/snd:ro"
+    fi
+
+    # Input event devices (the `input` class). Identical rationale to audio
+    # above: a read-only METADATA view so signalk-container can stat the real
+    # host nodes, not input access for signalk-server. Read-only matters more
+    # here than for audio -- /dev/input carries keyboards and mice, and an
+    # open() on an event node reads every keystroke on the host. The manager
+    # only ever stats and readdirs; a consumer container that genuinely needs
+    # an encoder gets its own bind emitted by signalk-container. Same
+    # existence guard, so a stale enabled=true cannot brick the unit.
+    local input_enabled=false
+    if command -v jq >/dev/null 2>&1; then
+        [ "$(jq -r '.input.enabled // false' "$HW_FILE")" = "true" ] \
+            && input_enabled=true
+    elif grep -A2 '"input"' "$HW_FILE" 2>/dev/null | grep -q '"enabled": *true'; then
+        # No jq — same minimal-parser spirit as the audio block above.
+        input_enabled=true
+    fi
+    if [ "$input_enabled" = "true" ] && [ -d "$INPUT_DIR" ]; then
+        echo "Volume=${INPUT_DIR}:/dev/input:ro"
     fi
 
     # Host avahi socket (mDNS .local resolution). The signalk-server image ships

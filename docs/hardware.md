@@ -13,8 +13,9 @@ The installer detects host hardware at install time and passes it through to the
 | **HALPI2 board** | `/proc/device-tree/model` says Compute Module 5, then `halpid` active or the controller answering at I2C `0x6d` (see [docs/halpi2.md](halpi2.md)) | Informational — drives the `/run/halpid` mount and the install-time connection step; the `signalk halpi2 apply` step itself is triggered by the model string, before this file is written | `{ model: "halpi2", candidate, detectedVia: "model-string"\|"halpid"\|"i2c", hardwareVersion, firmwareVersion }` — absent on other hosts |
 | **Onboard serial** | Fixed UARTs a detected board provides (HALPI2: `/dev/ttyAMA4`, RS-485) | **Enabled** — same reasoning as USB serial | `{ device, label, enabled }` per port, under `onboardSerial` |
 | **ALSA audio** | Presence of `/dev/snd` | **Enabled when present** — the mount is a read-only *metadata view* for signalk-container's device probe, not direct audio access (see [Audio passthrough](#audio-passthrough)); the low risk doesn't warrant install-time friction for voice-stack users | `{ present, enabled }` |
+| **Input devices** | Presence of `/dev/input` | **Enabled when present** — same read-only *metadata view* as audio, for encoders and keypads (see [Input passthrough](#input-passthrough)) | `{ present, enabled }` |
 
-For each enabled entry the renderer (`render-server-quadlet.sh`) emits an `AddDevice=` line (USB serial, onboard serial, CAN) or a `Volume=` line (DBus, GPIO, audio, halpid socket) inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. Anything outside that block — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
+For each enabled entry the renderer (`render-server-quadlet.sh`) emits an `AddDevice=` line (USB serial, onboard serial, CAN) or a `Volume=` line (DBus, GPIO, audio, input, halpid socket) inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. Anything outside that block — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
 
 ## Group memberships
 
@@ -26,8 +27,9 @@ Rootless Podman needs the calling user in the right Unix groups to forward devic
 | `gpio` | Raspberry Pi GPIO (`/dev/gpiomem`) |
 | `netdev` | SocketCAN (`vcan` setup, `ip` administration) |
 | `audio` | ALSA devices (`/dev/snd/*`) opened by managed audio containers (see [Audio passthrough](#audio-passthrough)) |
+| `input` | Input event devices (`/dev/input/event*`) opened by managed containers (see [Input passthrough](#input-passthrough)) |
 
-The installer adds you to all four at step 5 of `install.sh`. Group changes only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.
+The installer adds you to all five at step 5 of `install.sh`, skipping any the host does not define (`input` is absent on some minimal images). Group changes only take effect on a new login session, so on a `curl … | bash` first run you'll see a hint to log out and back in.
 
 **Host membership alone is not sufficient.** `UserNS=keep-id:uid=1000,gid=1000` maps only your uid and gid into the container, so a supplementary group such as `dialout` (GID 20) arrives inside as an unmapped 100020. A `/dev/tty*` node is `root:dialout` mode 660, the container process does not hold GID 20, and every `open()` fails — silently, because SignalK reports the connection as *down* rather than surfacing a permission error.
 
@@ -44,7 +46,7 @@ signalk hardware status    # what was detected, and when
 signalk hardware rescan    # re-detect, re-render the Quadlet, restart if it changed
 ```
 
-`rescan` carries your operator toggles across the re-detect — a fresh detection reports bluetooth and GPIO as disabled and audio at its `/dev/snd`-derived default, so a naive overwrite would switch off passthrough you had turned on. If it cannot merge (no `jq`, or the payload is incomplete) it refuses to write rather than clobbering them. `--no-render` stops before touching the Quadlet.
+`rescan` carries your operator toggles across the re-detect — a fresh detection reports bluetooth and GPIO as disabled, and audio and input at their `/dev/snd`- and `/dev/input`-derived defaults, so a naive overwrite would switch off passthrough you had turned on. If it cannot merge (no `jq`, or the payload is incomplete) it refuses to write rather than clobbering them. `--no-render` stops before touching the Quadlet.
 
 Re-running the bash installer also works and is idempotent, but it re-pulls every image as well; on an SD-card host that is minutes and a restarted server to pick up a device that is already plugged in.
 
@@ -131,6 +133,40 @@ Two guards keep it safe:
 
 The `audio` group membership (step 5) is the other half: under rootless Podman the device nodes keep their host ownership (`root:audio`), and the consumer container's access rides on the calling user's own supplementary groups (crun's keep-original-groups), not on a uid mapping.
 
+## Input passthrough
+
+Plugins that drive a rotary encoder, a keypad, or a joystick run their consumer as a **sibling container managed through signalk-container**, exactly like the audio case above. signalk-container emits the `/dev/input` bind and the `input` group for that container; the installer does not.
+
+What the installer contributes is the same one level of indirection:
+
+```ini
+Volume=/dev/input:/dev/input:ro
+```
+
+signalk-container runs *inside* the signalk-server container and stats a plugin's requested device paths on its **own** filesystem before emitting them for the target container. Without this view the probe cannot see the host's input nodes.
+
+The mount is **read-only and metadata-only**, and here that matters more than it does for audio: `/dev/input` carries the host's keyboards and mice, and an `open()` on an event node reads every keystroke. signalk-server never opens input devices — it only stats and lists them — and the consumer container gets its own bind from signalk-container. `check-render-quadlet.sh` asserts the `:ro` flag is present.
+
+The same two guards apply as for audio: a render-time existence check (a `Volume=` with a missing source fails the whole unit at start), and `enabled` in `hardware.json` as the operator opt-out.
+
+`input` group membership (step 5) is the other half, for the same reason as `audio`: under rootless Podman the nodes keep their host ownership (`root:input`), and access rides on the calling user's supplementary groups via crun's keep-original-groups. Not every distribution defines an `input` group; the installer skips it when absent.
+
+### Hand-crafted Podman
+
+If you run `signalk-server` from your own `podman run` or compose file rather than the installer's Quadlet, add the metadata views yourself so signalk-container's device probe can see the host:
+
+```bash
+podman run \
+  --volume /dev/snd:/dev/snd:ro \
+  --volume /dev/input:/dev/input:ro \
+  --group-add keep-groups \
+  … ghcr.io/dirkwa/signalk-server:dirkwa
+```
+
+Omit either volume whose directory the host does not have. `--group-add keep-groups` is what carries your real `audio` / `input` membership across the user namespace; without it the supplementary gids arrive unmapped and every `open()` on a device node fails.
+
+Neither mount is strictly required. signalk-container knows `/dev/snd`, `/dev/input` and `/dev/dri` as well-known hot-plug directories and emits them **unverified** when it cannot see them locally, so a consumer container can still work without them. What the mounts buy is a truthful probe: correct drift detection, live hot-plug tracking, and accurate `signalk doctor` reporting instead of a guess.
+
 ## Platform notes
 
 ### Raspberry Pi (3 / 4 / 5)
@@ -149,6 +185,10 @@ USB serial is supported **only** when the Podman Machine is created with `--usb`
 
 CAN, Bluetooth, and GPIO are **not** supported on macOS Podman Machine — there's no host CAN stack to forward, no DBus, and no GPIO.
 
+Audio and input are likewise unavailable: detection runs inside the Podman Machine VM, whose `/dev/snd` and `/dev/input` (when present at all) belong to the VM, not to the Mac. Neither class is passed through from macOS.
+
 ### Windows (WSL2)
 
 USB serial requires [usbipd-win](https://github.com/dorssel/usbipd-win) to attach the device to the Linux side. See [docs/installation.md](installation.md#windows-usb-serial). CAN, Bluetooth, and GPIO are not supported.
+
+Audio and input carry the same WSL2 caveat as macOS: detection sees the WSL2 VM's devices, not Windows'. A USB sound card or encoder has to be attached with `usbipd-win` before it exists on the Linux side at all.
