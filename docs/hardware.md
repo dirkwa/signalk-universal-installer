@@ -144,6 +144,8 @@ Volume=/dev/input:/dev/input:ro
 
 signalk-container runs *inside* the signalk-server container and stats a plugin's requested device paths on its **own** filesystem before emitting them for the target container. Without this view the probe cannot see the host's input nodes.
 
+`installer/linux/render-server-quadlet.sh` is what emits that line and owns its exact form; the block above illustrates the shape, and the generated `signalk-server.container` is the authority for what your host actually got.
+
 `:ro` here means the *mount* is read-only — nothing in the container can create or remove nodes under it. It does **not** stop a process from opening a node for reading; that is governed by the node's own permissions, and `/dev/input/event*` is `root:input` mode 0660. So whether the server container can read your keystrokes comes down to one thing: whether it holds the `input` group.
 
 It does not. Unlike `audio`, the installer deliberately does **not** add you to `input` at step 5, because `GroupAdd=keep-groups` is server-wide and would carry that membership into signalk-server itself. signalk-container's probe only ever calls `readdir` and `stat`, and both work without the group — `stat` reports the overflow gid, which the probe resolves through udev convention instead. A consumer container that genuinely needs to read an encoder gets its own group emitted by signalk-container, scoped to that one container.

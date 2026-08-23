@@ -233,9 +233,17 @@ fi
 # creation/removal), not open() on a node -- readability is decided by the
 # `input` group, which install.sh deliberately does not grant. Verified:
 # with keep-groups and the owning group, a :ro bind still opens for read.
-if grep -qE '^Volume=[^:]+:/dev/input(:|$)' <<<"$out_input" \
-    && ! grep -qxF "Volume=$tmp:/dev/input:ro" <<<"$out_input"; then
-    echo "  [MISS] /dev/input rendered without the :ro flag"
+# Check EVERY /dev/input line, not just that a good one exists: a writable
+# mount emitted ALONGSIDE the read-only one would satisfy a presence test
+# while still handing the container an openable node.
+input_vol_bad=0
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    [[ "$line" == "Volume=$tmp:/dev/input:ro" ]] && continue
+    echo "  [MISS] unexpected /dev/input volume line: $line"
+    input_vol_bad=1
+done < <(grep -E '^Volume=[^:]*:/dev/input(:|$)' <<<"$out_input" || true)
+if (( input_vol_bad )); then
     fail=1
 fi
 err_input_missing="$tmp/stderr-input-missing.log"
@@ -259,8 +267,20 @@ fi
 #     keep-groups is server-wide, so that membership would turn the read-only
 #     /dev/input view into readable event nodes -- every keystroke on the host.
 #     The probe needs only readdir+stat, which work without the group.
-if grep -qE '^for g in .*\binput\b.*; do' installer/linux/install.sh; then
-    echo "  [MISS] install.sh adds the operator to the input group"
+#     Matched on any shape that could grant it -- a `for g in ...` list, a
+#     usermod -aG argument, a group array -- rather than one line format, so
+#     reformatting the loop cannot silently retire the guard. Comments are
+#     stripped first: this file and install.sh both DISCUSS the input group at
+#     length, and the guard is about code, not prose.
+#     Backslash continuations are joined first, so splitting the group list
+#     across lines does not hide the grant from the keyword match.
+input_grant=$(sed 's/#.*//' installer/linux/install.sh \
+    | sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' \
+    | grep -nE "(^|[^-[:alnum:]_])input([^-[:alnum:]_]|$)" \
+    | grep -E 'for g in|usermod|groupadd|GROUPS|gpasswd|adduser' || true)
+if [[ -n "$input_grant" ]]; then
+    echo "  [MISS] install.sh appears to grant the input group:"
+    printf '%s\n' "$input_grant" | sed 's/^/         /'
     fail=1
 else
     echo "  [OK]   install.sh does not grant the input group"
