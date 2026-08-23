@@ -209,13 +209,25 @@ if [[ "$_SK_EXPLICIT_BASE" == false ]]; then
     _SK_CHAN_ENV="SIGNALK_CHANNEL='${SIGNALK_CHANNEL}' "
 fi
 
+# The bind host is decided by the Linux installer inside the VM, so the
+# operator's choice has to travel there. Without this the variable is read on
+# the host, matches nothing, and the consoles bind 0.0.0.0 while the operator
+# who set it believes they are localhost-only.
+_SK_LOCAL_ENV=""
+if [[ -n "${SIGNALK_LOCALHOST_ONLY:-}" ]]; then
+    # Escaped the way the channel and the resume URL are: the value lands
+    # single-quoted inside a command built here and run by a shell in the VM,
+    # so an apostrophe would close the quote and leave the rest as syntax.
+    _SK_LOCAL_ENV="SIGNALK_LOCALHOST_ONLY='${SIGNALK_LOCALHOST_ONLY//\'/\'\\\'\'}' "
+fi
+
 podman machine ssh "$MACHINE_NAME" bash << LINUX_SCRIPT
 set -euo pipefail
 cd \$HOME
 # Port 80 is unreachable from pasta-networked containers (updater, doctor) to
 # a Network=host signalk-server inside the same VM — pasta refuses privileged
 # ports. Use 3000 so health URLs stay valid for the updater/doctor.
-curl -fsSL '${LINUX_URL}' | ${_SK_CHAN_ENV}INSTALLER_VERSION='${INSTALLER_VERSION}' INSTALLER_BASE_URL='${INSTALLER_BASE_URL}' SIGNALK_PRIVILEGED_PORTS=0 bash
+curl -fsSL '${LINUX_URL}' | ${_SK_CHAN_ENV}${_SK_LOCAL_ENV}INSTALLER_VERSION='${INSTALLER_VERSION}' INSTALLER_BASE_URL='${INSTALLER_BASE_URL}' SIGNALK_PRIVILEGED_PORTS=0 bash
 LINUX_SCRIPT
 
 # On SELinux VMs, container label isolation blocks access to the mounted

@@ -346,6 +346,16 @@ function Stop-ForReboot {
             $resumeArgs += "-$($kv.Key) '$($v -replace "'", "''")'"
         }
     }
+    # SIGNALK_LOCALHOST_ONLY arrives through the environment, not through a
+    # parameter, so $PSBoundParameters above cannot see it. A process-scoped
+    # value dies with this shell, and the reboot path is exactly where that
+    # bites: a fresh box reboots to enable WSL2, and the resumed run would bind
+    # the consoles to 0.0.0.0 while the operator believes they set otherwise.
+    # Prefix the assignment onto whichever resume form is printed.
+    $resumeEnv = ''
+    if ($env:SIGNALK_LOCALHOST_ONLY) {
+        $resumeEnv = "`$env:SIGNALK_LOCALHOST_ONLY='$($env:SIGNALK_LOCALHOST_ONLY -replace "'", "''")'; "
+    }
     # With nothing to carry the one-liner is still the friendlier form, so only
     # fall back to download-then-invoke when there is something to preserve.
     if ($resumeArgs.Count -gt 0) {
@@ -357,9 +367,9 @@ function Stop-ForReboot {
         # otherwise close the string and break the printed command.
         $resumeUrl = "$InstallerBaseUrl/installer/windows/install.ps1" -replace "'", "''"
         Write-Host "       iwr -useb '$resumeUrl' -OutFile $resumeFile"
-        Write-Host "       .\$resumeFile $($resumeArgs -join ' ')"
+        Write-Host "       $resumeEnv.\$resumeFile $($resumeArgs -join ' ')"
     } else {
-        Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
+        Write-Host "       $resumeEnv`iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
     }
     Write-Host ""
     Write-Host "  (If WSL still fails after the reboot, confirm hardware virtualization"
@@ -1081,6 +1091,14 @@ foreach ($k in $skEnvVars.Keys) {
 if (-not $SkExplicitBase) {
     $skEnv += "SIGNALK_CHANNEL='" + ($Channel -replace "'", "'\''") + "' "
 }
+# The bind host is decided by the Linux installer inside the VM, so the
+# operator's choice has to travel there. Read from the environment rather than
+# a parameter: the documented entry point is `iwr … | iex`, which has no way to
+# pass one. Without this the variable is set on Windows, matches nothing, and
+# the consoles bind 0.0.0.0 while the operator who set it believes otherwise.
+if ($env:SIGNALK_LOCALHOST_ONLY) {
+    $skEnv += "SIGNALK_LOCALHOST_ONLY='" + ($env:SIGNALK_LOCALHOST_ONLY -replace "'", "'\''") + "' "
+}
 # Keep the curl|bash on ONE line - no backslash line-continuation. A `\` at end
 # of line followed by CRLF makes bash continue the line and swallow the `\r`
 # into the next token (seen as `$'bash\r': command not found`). One line has no
@@ -1659,15 +1677,24 @@ Register-MachineAutostart -Machine $MachineName -CmdDir $skCmdDir
 #     (measured 21.1s vs 0.01s over 127.0.0.1).
 $lanIp = Get-HostLanIp
 $accessHost = if ($lanIp) { $lanIp } else { '<this-pc-ip>' }
+# SIGNALK_LOCALHOST_ONLY binds the updater and doctor to loopback INSIDE the VM
+# (it feeds __PUBLISH_HOST__ in their two quadlets only), so their LAN URLs
+# would be dead links here. signalk-server does not read that flag and stays
+# LAN-reachable either way, so only the two console lines move.
+$consoleLines = if ($env:SIGNALK_LOCALHOST_ONLY) {
+    "`n  (Updater and Doctor consoles are bound to localhost by" +
+    "`n   SIGNALK_LOCALHOST_ONLY - reachable from THIS PC only.)"
+} else {
+    "`n  Updater Console  : http://${accessHost}:3003" +
+    "`n  Doctor Console   : http://${accessHost}:3004"
+}
 @"
 
 OK - SignalK is up inside Podman Machine '$MachineName'.
 
 From ANY OTHER DEVICE on the network (phone, tablet, laptop):
 
-  SignalK admin UI : http://$accessHost        (or :3000 if you declined standard ports)
-  Updater Console  : http://${accessHost}:3003
-  Doctor Console   : http://${accessHost}:3004
+  SignalK admin UI : http://$accessHost        (or :3000 if you declined standard ports)$consoleLines
 
 From THIS PC use 127.0.0.1 instead - http://127.0.0.1, :3003, :3004.
 
