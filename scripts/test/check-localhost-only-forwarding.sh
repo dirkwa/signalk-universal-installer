@@ -81,6 +81,37 @@ else
     echo "  [MISS] windows does not gate $VAR on being set"; fail=1
 fi
 
+# The value is interpolated into a command a shell in the VM runs, so an
+# apostrophe would close the generated quote and leave the rest as syntax.
+echo "-- quoting --"
+if grep -q "SIGNALK_LOCALHOST_ONLY//" installer/macos/install.sh; then
+    echo "  [OK]   macos escapes the value before interpolating it"
+else
+    echo "  [MISS] macos interpolates $VAR unescaped"; fail=1
+fi
+if grep -qE "env:$VAR -replace" installer/windows/install.ps1; then
+    echo "  [OK]   windows escapes the value before interpolating it"
+else
+    echo "  [MISS] windows interpolates $VAR unescaped"; fail=1
+fi
+
+# A fresh Windows box reboots to enable WSL2 and re-runs the installer. The
+# resume command is rebuilt from $PSBoundParameters, which holds parameters
+# only -- an env var set for the first process is gone by the second, so the
+# resumed run would bind 0.0.0.0 after the operator asked for localhost.
+echo "-- reboot resume --"
+if grep -q 'resumeEnv' installer/windows/install.ps1; then
+    # shellcheck disable=SC2016  # PowerShell's $resumeEnv, matched literally
+    resume_lines=$(grep -c 'Write-Host "       \$resumeEnv' installer/windows/install.ps1)
+    if [[ "$resume_lines" -eq 2 ]]; then
+        echo "  [OK]   both resume commands carry $VAR across the reboot"
+    else
+        echo "  [MISS] only $resume_lines of 2 resume commands carry $VAR"; fail=1
+    fi
+else
+    echo "  [MISS] the reboot resume command drops $VAR"; fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
     echo "[FAIL] localhost-only forwarding"
     exit 1

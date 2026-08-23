@@ -215,7 +215,10 @@ fi
 # who set it believes they are localhost-only.
 _SK_LOCAL_ENV=""
 if [[ -n "${SIGNALK_LOCALHOST_ONLY:-}" ]]; then
-    _SK_LOCAL_ENV="SIGNALK_LOCALHOST_ONLY='${SIGNALK_LOCALHOST_ONLY}' "
+    # Escaped the way the channel and the resume URL are: the value lands
+    # single-quoted inside a command built here and run by a shell in the VM,
+    # so an apostrophe would close the quote and leave the rest as syntax.
+    _SK_LOCAL_ENV="SIGNALK_LOCALHOST_ONLY='${SIGNALK_LOCALHOST_ONLY//\'/\'\\\'\'}' "
 fi
 
 podman machine ssh "$MACHINE_NAME" bash << LINUX_SCRIPT

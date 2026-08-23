@@ -346,6 +346,16 @@ function Stop-ForReboot {
             $resumeArgs += "-$($kv.Key) '$($v -replace "'", "''")'"
         }
     }
+    # SIGNALK_LOCALHOST_ONLY arrives through the environment, not through a
+    # parameter, so $PSBoundParameters above cannot see it. A process-scoped
+    # value dies with this shell, and the reboot path is exactly where that
+    # bites: a fresh box reboots to enable WSL2, and the resumed run would bind
+    # the consoles to 0.0.0.0 while the operator believes they set otherwise.
+    # Prefix the assignment onto whichever resume form is printed.
+    $resumeEnv = ''
+    if ($env:SIGNALK_LOCALHOST_ONLY) {
+        $resumeEnv = "`$env:SIGNALK_LOCALHOST_ONLY='$($env:SIGNALK_LOCALHOST_ONLY -replace "'", "''")'; "
+    }
     # With nothing to carry the one-liner is still the friendlier form, so only
     # fall back to download-then-invoke when there is something to preserve.
     if ($resumeArgs.Count -gt 0) {
@@ -357,9 +367,9 @@ function Stop-ForReboot {
         # otherwise close the string and break the printed command.
         $resumeUrl = "$InstallerBaseUrl/installer/windows/install.ps1" -replace "'", "''"
         Write-Host "       iwr -useb '$resumeUrl' -OutFile $resumeFile"
-        Write-Host "       .\$resumeFile $($resumeArgs -join ' ')"
+        Write-Host "       $resumeEnv.\$resumeFile $($resumeArgs -join ' ')"
     } else {
-        Write-Host "       iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
+        Write-Host "       $resumeEnv`iwr -useb $InstallerBaseUrl/installer/windows/install.ps1 | iex"
     }
     Write-Host ""
     Write-Host "  (If WSL still fails after the reboot, confirm hardware virtualization"
