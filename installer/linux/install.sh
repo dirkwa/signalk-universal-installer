@@ -1234,6 +1234,10 @@ section "Group memberships"
 # is server-wide, so adding it would carry `input` into signalk-server itself,
 # and a bind of /dev/input then yields readable event nodes -- every keystroke
 # on the host. Verified: `:ro` blocks writes to the mount, not open() on a node.
+# Excluding it here is only half the story: keep-groups carries membership the
+# user already had, from a desktop distro or a local admin. That case is
+# handled at render time -- render-server-quadlet.sh withholds the /dev/input
+# view entirely when the service user is in `input`.
 # signalk-container's probe only ever readdirs and stats, and both work WITHOUT
 # the group (stat reports the overflow gid, which the probe resolves by udev
 # convention). A consumer container that genuinely needs to read an encoder

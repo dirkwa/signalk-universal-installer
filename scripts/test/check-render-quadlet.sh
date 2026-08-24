@@ -286,6 +286,38 @@ else
     echo "  [OK]   install.sh does not grant the input group"
 fi
 
+# 5c-bis. A user who ALREADY holds the host `input` group must not get the
+#     mount. GroupAdd=keep-groups carries every supplementary host group
+#     whoever granted it, and :ro restricts the mount rather than open() on a
+#     node, so rendering the view for such a user hands signalk-server
+#     readable event nodes. install.sh never adds `input`, but a desktop
+#     distro or a local admin may have -- and this renderer also runs on hosts
+#     the installer did not set up, so the source scan in 5c cannot cover it.
+out_input_grp=$(INPUT_GROUP_OVERRIDE=yes INPUT_DIR="$tmp" bash "$RENDER" \
+    "$tmp/hardware-input.json" "$TEMPLATE" 2>"$tmp/stderr-input-grp.log") || {
+    echo "  [MISS] render (input enabled, user in group) exited non-zero"
+    fail=1
+}
+if [[ -s "$tmp/stderr-input-grp.log" ]]; then
+    echo "  [MISS] render (input enabled, user in group) wrote to stderr:"
+    sed 's/^/         /' "$tmp/stderr-input-grp.log"
+    fail=1
+fi
+if grep -qE '^Volume=[^:]*:/dev/input(:|$)' <<<"$out_input_grp"; then
+    echo "  [MISS] /dev/input mounted for a user already in the input group"
+    fail=1
+else
+    echo "  [OK]   input-group membership suppresses the /dev/input view"
+fi
+# The skip must be explained in the unit, not silent -- an operator who loses
+# the view needs to know why and how to restore it.
+if grep -q 'input.*group' <<<"$out_input_grp"; then
+    echo "  [OK]   suppressed view is explained in the rendered unit"
+else
+    echo "  [MISS] view suppressed with no explanation in the unit"
+    fail=1
+fi
+
 # 6. Serial existence guard: an enabled serial device whose node has vanished
 #    between detect and render (unplugged / re-enumerating flaky ACM adapter)
 #    must be DROPPED, not emitted. An AddDevice= pointing at a missing node

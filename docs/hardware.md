@@ -136,25 +136,24 @@ The `audio` group membership (step 5) is the other half: under rootless Podman t
 
 Plugins that drive a rotary encoder, a keypad, or a joystick run their consumer as a **sibling container managed through signalk-container**, exactly like the audio case above. signalk-container emits the `/dev/input` bind and the `input` group for that container; the installer does not.
 
-What the installer contributes is the same one level of indirection:
-
-```ini
-Volume=/dev/input:/dev/input:ro
-```
+What the installer contributes is the same one level of indirection: a read-only bind of the host's `/dev/input` into the server container. `installer/linux/render-server-quadlet.sh` emits it and owns its exact form; run the `grep` under [Hand-crafted Podman](#hand-crafted-podman) against your generated `signalk-server.container` to see what your host actually got.
 
 signalk-container runs *inside* the signalk-server container and stats a plugin's requested device paths on its **own** filesystem before emitting them for the target container. Without this view the probe cannot see the host's input nodes.
 
-`installer/linux/render-server-quadlet.sh` is what emits that line and owns its exact form; the block above illustrates the shape, and the generated `signalk-server.container` is the authority for what your host actually got.
+### Why the group matters more than the mount
 
-`:ro` here means the *mount* is read-only — nothing in the container can create or remove nodes under it. It does **not** stop a process from opening a node for reading; that is governed by the node's own permissions, and `/dev/input/event*` is `root:input` mode 0660. So whether the server container can read your keystrokes comes down to one thing: whether it holds the `input` group.
+`:ro` makes the *mount* read-only — nothing in the container can create or remove nodes under it. It does **not** stop a process from opening a node for reading; that is governed by the node's own permissions, and `/dev/input/event*` is `root:input` mode 0660. So whether the server container can read your keystrokes comes down to one thing: whether it holds the `input` group.
 
-It does not. Unlike `audio`, the installer deliberately does **not** add you to `input` at step 5, because `GroupAdd=keep-groups` is server-wide and would carry that membership into signalk-server itself. signalk-container's probe only ever calls `readdir` and `stat`, and both work without the group — `stat` reports the overflow gid, which the probe resolves through udev convention instead. A consumer container that genuinely needs to read an encoder gets its own group emitted by signalk-container, scoped to that one container.
+`GroupAdd=keep-groups` carries **every** supplementary host group into the container, whoever granted it. Two things follow, and both are enforced:
 
-`check-render-quadlet.sh` asserts the `:ro` flag is present.
+- The installer never adds you to `input` at step 5, unlike `audio`. `check-render-quadlet.sh` asserts that install.sh grants no such membership, in any command shape.
+- Membership you already had is not the installer's to remove, and this renderer also runs on hosts the installer did not set up. So the mount is **withheld entirely** when the service user is in `input`, with a comment in the rendered unit saying why. Losing it costs only probe accuracy: signalk-container falls back to emitting `/dev/input` unverified, and a consumer container still works.
 
-The same two guards apply as for audio: a render-time existence check (a `Volume=` with a missing source fails the whole unit at start), and `enabled` in `hardware.json` as the operator opt-out.
+The probe itself never needs the group. It only calls `readdir` and `stat`, both of which work without it — `stat` reports the overflow gid, which the probe resolves through udev convention instead. A consumer container that genuinely needs to read an encoder gets its own group emitted by signalk-container, scoped to that one container.
 
-This is where audio and input differ. Audio needs the group: `wyoming-satellite` opens the sound card, and under rootless Podman that access rides on the calling user's supplementary groups via crun's keep-original-groups, so the installer adds you to `audio`. Input needs no such thing at the server level — the probe never opens a node — so the group is left off and the read capability never reaches signalk-server.
+This is where audio and input differ. Audio needs the group: `wyoming-satellite` opens the sound card, and under rootless Podman that access rides on the calling user's supplementary groups via crun's keep-original-groups, so the installer adds you to `audio`. Input needs no such thing at the server level, so the group is left off — and the mount steps aside when the host grants it anyway.
+
+Beyond that, the same two guards apply as for audio: a render-time existence check (a `Volume=` with a missing source fails the whole unit at start), and `enabled` in `hardware.json` as the operator opt-out.
 
 ### Hand-crafted Podman
 
@@ -166,7 +165,7 @@ grep -E '^(Volume=/dev/|GroupAdd=)' ~/.config/containers/systemd/signalk-server.
 
 On a host with both classes detected that prints the `/dev/snd` and `/dev/input` binds and `GroupAdd=keep-groups`. `installer/linux/render-server-quadlet.sh` is the single source for those lines; if you have no install to read from, that script and `quadlets/signalk-server.container.template` are the files to consult.
 
-Two things to carry across to a hand-written unit. Bind each device directory **`:ro`**, and omit any whose directory the host does not have. And do not add yourself to `input`: `keep-groups` is container-wide, so that membership would let anything in the server container open `/dev/input/event*` and read every keystroke on the host. The probe does not need it (see above).
+Two things to carry across to a hand-written unit. Bind each device directory **`:ro`**, and omit any whose directory the host does not have. And check `id -nG` before binding `/dev/input` at all: if the user running the container is in the `input` group, leave that bind out. `keep-groups` is container-wide, so the membership would let anything in the server container open `/dev/input/event*` and read every keystroke on the host, and `:ro` does not prevent it. The installer's renderer applies this same rule automatically. The probe does not need the group (see above).
 
 Neither mount is strictly required. signalk-container knows `/dev/snd`, `/dev/input` and `/dev/dri` as well-known hot-plug directories and emits them **unverified** when it cannot see them locally, so a consumer container can still work without them. What the mounts buy is a truthful probe: correct drift detection, live hot-plug tracking, and accurate `signalk doctor` reporting instead of a guess.
 
