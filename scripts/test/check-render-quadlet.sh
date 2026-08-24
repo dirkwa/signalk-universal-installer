@@ -267,11 +267,16 @@ fi
 #     keep-groups is server-wide, so that membership would turn the read-only
 #     /dev/input view into readable event nodes -- every keystroke on the host.
 #     The probe needs only readdir+stat, which work without the group.
-#     Matched on any shape that could grant it -- a `for g in ...` list, a
-#     usermod -aG argument, a group array -- rather than one line format, so
-#     reformatting the loop cannot silently retire the guard. Comments are
-#     stripped first: this file and install.sh both DISCUSS the input group at
-#     length, and the guard is about code, not prose.
+#     Matched over the group-management patterns we know -- a `for g in ...`
+#     list, usermod, gpasswd, adduser, groupadd, a GROUPS array -- rather than
+#     one line format, so reformatting the loop cannot silently retire the
+#     guard. Comments are stripped first: this file and install.sh both DISCUSS
+#     the input group at length, and the guard is about code, not prose.
+#
+#     This is a REGRESSION guard over known shapes, not a proof of absence: an
+#     obfuscated or indirect grant would evade it. What actually enforces the
+#     outcome is the render-time `id -nG` check in 5c-bis below, which holds
+#     regardless of how the membership was acquired.
 #     Backslash continuations are joined first, so splitting the group list
 #     across lines does not hide the grant from the keyword match.
 input_grant=$(sed 's/#.*//' installer/linux/install.sh \

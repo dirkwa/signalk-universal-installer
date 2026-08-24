@@ -146,7 +146,7 @@ signalk-container runs *inside* the signalk-server container and stats a plugin'
 
 `GroupAdd=keep-groups` carries **every** supplementary host group into the container, whoever granted it. Two things follow, and both are enforced:
 
-- The installer never adds you to `input` at step 5, unlike `audio`. `check-render-quadlet.sh` asserts that install.sh grants no such membership, in any command shape.
+- The installer never adds you to `input` at step 5, unlike `audio`. `check-render-quadlet.sh` guards against that regressing, scanning install.sh for the group-management patterns it knows (`for g in …`, `usermod`, `gpasswd`, `adduser`, `groupadd`, a `GROUPS` list), with comments stripped and line continuations joined. It is a regression guard over known shapes, not a proof of absence — the render-time check below is what actually enforces the outcome.
 - Membership you already had is not the installer's to remove, and this renderer also runs on hosts the installer did not set up. So the mount is **withheld entirely** when the service user is in `input`, with a comment in the rendered unit saying why. Losing it costs only probe accuracy: signalk-container falls back to emitting `/dev/input` unverified, and a consumer container still works.
 
 The probe itself never needs the group. It only calls `readdir` and `stat`, both of which work without it — `stat` reports the overflow gid, which the probe resolves through udev convention instead. A consumer container that genuinely needs to read an encoder gets its own group emitted by signalk-container, scoped to that one container.
