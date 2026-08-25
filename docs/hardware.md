@@ -123,7 +123,7 @@ What the installer contributes is one level of indirection up: signalk-container
 Volume=/dev/snd:/dev/snd:ro
 ```
 
-gives it a truthful view of the host's sound devices — full drift fidelity, live hot-plug tracking, and correct doctor reporting. It is deliberately **read-only and metadata-only**: signalk-server itself never opens audio devices, and the audio consumer container gets its own (writable) bind from signalk-container. Newer signalk-container releases also emit well-known device paths *unverified* when they can't see them locally, so audio can work without this mount — the mount removes the guesswork.
+gives it a truthful view of the host's sound devices — full drift fidelity, live hot-plug tracking, and correct doctor reporting. It is deliberately **read-only and metadata-only**: signalk-server itself never opens audio devices, and the audio consumer container gets its own (writable) bind from signalk-container. signalk-container 1.24.0 and newer also emit well-known device paths *unverified* when they can't see them locally, so audio can work without this mount — the mount removes the guesswork.
 
 Two guards keep it safe:
 
@@ -147,7 +147,7 @@ signalk-container runs *inside* the signalk-server container and stats a plugin'
 `GroupAdd=keep-groups` carries **every** supplementary host group into the container, whoever granted it. Two things follow, and both are enforced:
 
 - The installer never adds you to `input` at step 5, unlike `audio`. `check-render-quadlet.sh` guards against that regressing, scanning install.sh for the group-management patterns it knows (`for g in …`, `usermod`, `gpasswd`, `adduser`, `groupadd`, a `GROUPS` list), with comments stripped and line continuations joined. It is a regression guard over known shapes, not a proof of absence — the render-time check below is what actually enforces the outcome.
-- Membership you already had is not the installer's to remove, and this renderer also runs on hosts the installer did not set up. So the mount is **withheld entirely** when the service user is in `input`, with a comment in the rendered unit saying why. Losing it costs only probe accuracy: signalk-container falls back to emitting `/dev/input` unverified, and a consumer container still works.
+- Membership you already had is not the installer's to remove, and this renderer also runs on hosts the installer did not set up. So the mount is **withheld entirely** when the service user is in `input`, with a comment in the rendered unit saying why. Losing it costs only probe accuracy: signalk-container 1.24.0 and newer fall back to emitting `/dev/input` unverified, so a consumer container still works. The installer bundles the current release, but an install that has held signalk-container below 1.24.0 gets no fallback — there the consumer container needs the device declared explicitly.
 
 The probe itself never needs the group. It only calls `readdir` and `stat`, both of which work without it — `stat` reports the overflow gid, which the probe resolves through udev convention instead. A consumer container that genuinely needs to read an encoder gets its own group emitted by signalk-container, scoped to that one container.
 
@@ -167,7 +167,7 @@ On a host with both classes detected that prints the `/dev/snd` and `/dev/input`
 
 Two things to carry across to a hand-written unit. Bind each device directory **`:ro`**, and omit any whose directory the host does not have. And check `id -nG` before binding `/dev/input` at all: if the user running the container is in the `input` group, leave that bind out. `keep-groups` is container-wide, so the membership would let anything in the server container open `/dev/input/event*` and read every keystroke on the host, and `:ro` does not prevent it. The installer's renderer applies this same rule automatically. The probe does not need the group (see above).
 
-Neither mount is strictly required. signalk-container knows `/dev/snd`, `/dev/input` and `/dev/dri` as well-known hot-plug directories and emits them **unverified** when it cannot see them locally, so a consumer container can still work without them. What the mounts buy is a truthful probe: correct drift detection, live hot-plug tracking, and accurate `signalk doctor` reporting instead of a guess.
+Neither mount is strictly required. signalk-container 1.24.0 and newer know `/dev/snd`, `/dev/input` and `/dev/dri` as well-known hot-plug directories and emit them **unverified** when they cannot be seen locally, so a consumer container can still work without them. What the mounts buy is a truthful probe: correct drift detection, live hot-plug tracking, and accurate `signalk doctor` reporting instead of a guess.
 
 ## Platform notes
 
