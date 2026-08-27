@@ -13,6 +13,9 @@ TEMPLATE="${2:-}"
 # Host path probed/mounted for the audio class; overridable so the render
 # test can exercise both the present and missing cases deterministically.
 AUDIO_DIR="${AUDIO_DIR:-/dev/snd}"
+# Host path probed/mounted for the input class; overridable for the same
+# reason as AUDIO_DIR.
+INPUT_DIR="${INPUT_DIR:-/dev/input}"
 # Each serial device is emitted TWICE, deliberately.
 #
 #   AddDevice=<by-id>:<by-id>   the stable name, present inside the container
@@ -118,6 +121,33 @@ guard_adddevice() {
 # 30s later with "Tried to write a message to a closed stream". The proxy
 # rewrites the AUTH uid in transit — see
 # quadlets/signalk-dbus-proxy.container.template for the full mechanism.
+# True when the service user holds the host `input` group.
+#
+# Checked against the RUNNING user's supplementary set (`id -nG`), not against
+# what install.sh grants: GroupAdd=keep-groups carries every host group into the
+# container regardless of who added it. INPUT_GROUP_OVERRIDE lets the render
+# test drive both branches without touching real group membership.
+user_in_input_group() {
+    if [ -n "${INPUT_GROUP_OVERRIDE:-}" ]; then
+        [ "$INPUT_GROUP_OVERRIDE" = "yes" ]
+        return
+    fi
+    id -nG 2>/dev/null | tr ' ' '\n' | grep -qx input
+}
+
+# Explain the skip in the unit itself. A `warn` on stderr would be wrong here:
+# this is a routine, correct outcome, and the render is also consumed by
+# scripts that treat any stderr as a failure. A comment reaches the operator
+# reading their Quadlet and is inert to systemd.
+warn_input_group_skip() {
+    echo "# /dev/input view SKIPPED: this user is in the host 'input' group."
+    echo "# Mounting it would make event nodes readable inside signalk-server"
+    echo "# (:ro restricts the mount, not open() on a node), so the metadata"
+    echo "# view is withheld. signalk-container still emits /dev/input for a"
+    echo "# consumer container unverified. Remove yourself from 'input' and"
+    echo "# re-run 'signalk hardware rescan' to restore the view."
+}
+
 hardware_block() {
     {
     if command -v jq >/dev/null 2>&1; then
@@ -166,6 +196,39 @@ hardware_block() {
     fi
     if [ "$audio_enabled" = "true" ] && [ -d "$AUDIO_DIR" ]; then
         echo "Volume=${AUDIO_DIR}:/dev/snd:ro"
+    fi
+
+    # Input event devices (the `input` class). Identical rationale to audio
+    # above: a read-only METADATA view so signalk-container can stat the real
+    # host nodes, not input access for signalk-server. The manager only ever
+    # stats and readdirs; a consumer container that genuinely needs an encoder
+    # gets its own bind emitted by signalk-container. Same existence guard, so
+    # a stale enabled=true cannot brick the unit.
+    #
+    # THIRD guard, specific to this class: skip the mount entirely when the
+    # service user is in the host `input` group. `:ro` makes the MOUNT
+    # read-only, not the nodes -- open() is decided by the node's own
+    # permissions (root:input 0660) -- and GroupAdd=keep-groups carries EVERY
+    # supplementary host group, whoever granted it. install.sh never adds
+    # `input`, but a desktop distro or a local admin may have, and this script
+    # also runs on hosts the installer did not set up. Without this check such
+    # a host would hand signalk-server readable event nodes: a keylogger
+    # surface. Losing the metadata view costs only probe accuracy --
+    # signalk-container falls back to emitting /dev/input unverified.
+    local input_enabled=false
+    if command -v jq >/dev/null 2>&1; then
+        [ "$(jq -r '.input.enabled // false' "$HW_FILE")" = "true" ] \
+            && input_enabled=true
+    elif grep -A2 '"input"' "$HW_FILE" 2>/dev/null | grep -q '"enabled": *true'; then
+        # No jq — same minimal-parser spirit as the audio block above.
+        input_enabled=true
+    fi
+    if [ "$input_enabled" = "true" ] && [ -d "$INPUT_DIR" ]; then
+        if user_in_input_group; then
+            warn_input_group_skip
+        else
+            echo "Volume=${INPUT_DIR}:/dev/input:ro"
+        fi
     fi
 
     # Host avahi socket (mDNS .local resolution). The signalk-server image ships

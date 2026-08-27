@@ -52,6 +52,7 @@ cat >"$tmp/fresh.json" <<'JSON'
   "can": [],
   "bluetooth": { "dbusAvailable": true, "enabled": false },
   "audio": { "present": true, "enabled": true },
+  "input": { "present": true, "enabled": true },
   "gpio": { "platform": "rpi5", "enabled": false }
 }
 JSON
@@ -61,11 +62,13 @@ cat >"$tmp/old.json" <<'JSON'
 {
   "bluetooth": { "dbusAvailable": true, "enabled": true },
   "audio": { "present": true, "enabled": false },
+  "input": { "present": true, "enabled": false },
   "gpio": { "platform": "rpi5", "enabled": true }
 }
 JSON
 merge "$tmp/old.json" "$tmp/fresh.json" >"$tmp/merged.json"
 check "operator-disabled audio survives re-detect" '.audio.enabled' "false"
+check "operator-disabled input survives re-detect" '.input.enabled' "false"
 check "operator-enabled bluetooth survives re-detect" '.bluetooth.enabled' "true"
 check "operator-enabled gpio survives re-detect" '.gpio.enabled' "true"
 
@@ -79,6 +82,9 @@ cat >"$tmp/old-noaudio.json" <<'JSON'
 JSON
 merge "$tmp/old-noaudio.json" "$tmp/fresh.json" >"$tmp/merged.json"
 check "audio default preserved when old file lacks audio key" '.audio.enabled' "true"
+# Same upgrade path for input: every hardware.json written before this class
+# existed lacks the key, and must land on the fresh default rather than false.
+check "input default preserved when old file lacks input key" '.input.enabled' "true"
 
 # Case 3: HALPI2 classes. `onboardSerial` is opt-out and re-emitted by every
 # detection, so only the per-device `enabled` (matched by `device`) is

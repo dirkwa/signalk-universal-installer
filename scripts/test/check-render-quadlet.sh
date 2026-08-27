@@ -61,6 +61,7 @@ cat >"$tmp/hardware.json" <<JSON
   ],
   "bluetooth": { "dbusAvailable": true, "enabled": false },
   "audio": { "present": true, "enabled": false },
+  "input": { "present": true, "enabled": false },
   "gpio": { "platform": "rpi5", "enabled": false }
 }
 JSON
@@ -126,11 +127,11 @@ fi
 # something else is not hardware leaking into the render. Grepping the raw
 # output made this assertion fire on documentation.
 if grep -vE '^[[:space:]]*#' <<<"$out" \
-    | grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem|/dev/snd'; then
+    | grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem|/dev/snd|/dev/input'; then
     echo "  [MISS] disabled hardware leaked into output"
     fail=1
 else
-    echo "  [OK]   disabled CAN/BLE/GPIO/audio correctly excluded"
+    echo "  [OK]   disabled CAN/BLE/GPIO/audio/input correctly excluded"
 fi
 
 # 4. Enabled bluetooth must render the auth-proxy's named socket volume.
@@ -205,6 +206,121 @@ if grep -q ':/dev/snd:ro' <<<"$out_audio_missing"; then
     fail=1
 else
     echo "  [OK]   missing host path suppresses the audio volume"
+fi
+
+# 5b. Enabled input renders the read-only /dev/input view, under the same
+#     existence guard as audio: a Volume= whose source is missing fails the
+#     unit at start, so a stale enabled=true on a host that lost its input
+#     devices must render nothing rather than brick the server.
+jq '.input.enabled = true' "$tmp/hardware.json" >"$tmp/hardware-input.json"
+err_input="$tmp/stderr-input.log"
+out_input=$(INPUT_DIR="$tmp" bash "$RENDER" "$tmp/hardware-input.json" "$TEMPLATE" 2>"$err_input") || {
+    echo "  [MISS] render (input enabled) exited non-zero"
+    fail=1
+}
+if [[ -s "$err_input" ]]; then
+    echo "  [MISS] render (input enabled) wrote to stderr:"
+    sed 's/^/         /' "$err_input"
+    fail=1
+fi
+if grep -qxF "Volume=$tmp:/dev/input:ro" <<<"$out_input"; then
+    echo "  [OK]   enabled input emits the read-only /dev/input view"
+else
+    echo "  [MISS] enabled input did not emit the /dev/input volume"
+    fail=1
+fi
+# The view must never be writable. Note :ro governs the MOUNT (no node
+# creation/removal), not open() on a node -- readability is decided by the
+# `input` group, which install.sh deliberately does not grant. Verified:
+# with keep-groups and the owning group, a :ro bind still opens for read.
+# Check EVERY /dev/input line, not just that a good one exists: a writable
+# mount emitted ALONGSIDE the read-only one would satisfy a presence test
+# while still handing the container an openable node.
+input_vol_bad=0
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    [[ "$line" == "Volume=$tmp:/dev/input:ro" ]] && continue
+    echo "  [MISS] unexpected /dev/input volume line: $line"
+    input_vol_bad=1
+done < <(grep -E '^Volume=[^:]*:/dev/input(:|$)' <<<"$out_input" || true)
+if (( input_vol_bad )); then
+    fail=1
+fi
+err_input_missing="$tmp/stderr-input-missing.log"
+out_input_missing=$(INPUT_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-input.json" "$TEMPLATE" 2>"$err_input_missing") || {
+    echo "  [MISS] render (input enabled, path missing) exited non-zero"
+    fail=1
+}
+if [[ -s "$err_input_missing" ]]; then
+    echo "  [MISS] render (input enabled, path missing) wrote to stderr:"
+    sed 's/^/         /' "$err_input_missing"
+    fail=1
+fi
+if grep -q ':/dev/input:ro' <<<"$out_input_missing"; then
+    echo "  [MISS] input volume rendered although the host path is missing"
+    fail=1
+else
+    echo "  [OK]   missing host path suppresses the input volume"
+fi
+
+# 5c. install.sh must NOT put the operator in the `input` group. GroupAdd=
+#     keep-groups is server-wide, so that membership would turn the read-only
+#     /dev/input view into readable event nodes -- every keystroke on the host.
+#     The probe needs only readdir+stat, which work without the group.
+#     Matched over the group-management patterns we know -- a `for g in ...`
+#     list, usermod, gpasswd, adduser, groupadd, a GROUPS array -- rather than
+#     one line format, so reformatting the loop cannot silently retire the
+#     guard. Comments are stripped first: this file and install.sh both DISCUSS
+#     the input group at length, and the guard is about code, not prose.
+#
+#     This is a REGRESSION guard over known shapes, not a proof of absence: an
+#     obfuscated or indirect grant would evade it. What actually enforces the
+#     outcome is the render-time `id -nG` check in 5c-bis below, which holds
+#     regardless of how the membership was acquired.
+#     Backslash continuations are joined first, so splitting the group list
+#     across lines does not hide the grant from the keyword match.
+input_grant=$(sed 's/#.*//' installer/linux/install.sh \
+    | sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' \
+    | grep -nE "(^|[^-[:alnum:]_])input([^-[:alnum:]_]|$)" \
+    | grep -E 'for g in|usermod|groupadd|GROUPS|gpasswd|adduser' || true)
+if [[ -n "$input_grant" ]]; then
+    echo "  [MISS] install.sh appears to grant the input group:"
+    printf '%s\n' "$input_grant" | sed 's/^/         /'
+    fail=1
+else
+    echo "  [OK]   install.sh does not grant the input group"
+fi
+
+# 5c-bis. A user who ALREADY holds the host `input` group must not get the
+#     mount. GroupAdd=keep-groups carries every supplementary host group
+#     whoever granted it, and :ro restricts the mount rather than open() on a
+#     node, so rendering the view for such a user hands signalk-server
+#     readable event nodes. install.sh never adds `input`, but a desktop
+#     distro or a local admin may have -- and this renderer also runs on hosts
+#     the installer did not set up, so the source scan in 5c cannot cover it.
+out_input_grp=$(INPUT_GROUP_OVERRIDE=yes INPUT_DIR="$tmp" bash "$RENDER" \
+    "$tmp/hardware-input.json" "$TEMPLATE" 2>"$tmp/stderr-input-grp.log") || {
+    echo "  [MISS] render (input enabled, user in group) exited non-zero"
+    fail=1
+}
+if [[ -s "$tmp/stderr-input-grp.log" ]]; then
+    echo "  [MISS] render (input enabled, user in group) wrote to stderr:"
+    sed 's/^/         /' "$tmp/stderr-input-grp.log"
+    fail=1
+fi
+if grep -qE '^Volume=[^:]*:/dev/input(:|$)' <<<"$out_input_grp"; then
+    echo "  [MISS] /dev/input mounted for a user already in the input group"
+    fail=1
+else
+    echo "  [OK]   input-group membership suppresses the /dev/input view"
+fi
+# The skip must be explained in the unit, not silent -- an operator who loses
+# the view needs to know why and how to restore it.
+if grep -q 'input.*group' <<<"$out_input_grp"; then
+    echo "  [OK]   suppressed view is explained in the rendered unit"
+else
+    echo "  [MISS] view suppressed with no explanation in the unit"
+    fail=1
 fi
 
 # 6. Serial existence guard: an enabled serial device whose node has vanished

@@ -1229,6 +1229,19 @@ section "Group memberships"
 # `halpid` exists only after `signalk halpi2 apply` installed the Hat Labs
 # daemon; its socket is root:halpid 0660 and the signalk-halpi plugin reaches
 # it through this membership (GroupAdd=keep-groups). Silently absent elsewhere.
+#
+# `input` is deliberately NOT in this list, unlike `audio`. GroupAdd=keep-groups
+# is server-wide, so adding it would carry `input` into signalk-server itself,
+# and a bind of /dev/input then yields readable event nodes -- every keystroke
+# on the host. Verified: `:ro` blocks writes to the mount, not open() on a node.
+# Excluding it here is only half the story: keep-groups carries membership the
+# user already had, from a desktop distro or a local admin. That case is
+# handled at render time -- render-server-quadlet.sh withholds the /dev/input
+# view entirely when the service user is in `input`.
+# signalk-container's probe only ever readdirs and stats, and both work WITHOUT
+# the group (stat reports the overflow gid, which the probe resolves by udev
+# convention). A consumer container that genuinely needs to read an encoder
+# gets its own group from signalk-container, scoped to that container.
 for g in dialout gpio netdev audio halpid; do
     if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
         info "Adding $USER to $g (requires sudo)"

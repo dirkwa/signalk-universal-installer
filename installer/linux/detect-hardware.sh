@@ -110,6 +110,12 @@ emit_json() {
     local audio_present=false
     [[ -d /dev/snd ]] && audio_present=true
 
+    # Input event devices (rotary encoders, keypads, joysticks). Same shape
+    # and same rationale as audio: the mount is a read-only metadata view for
+    # signalk-container's device probe, not input access for signalk-server.
+    local input_present=false
+    [[ -d /dev/input ]] && input_present=true
+
     detect_board
 
     local pi_platform="none"
@@ -150,6 +156,10 @@ emit_json() {
         echo "  \"audio\": {"
         echo "    \"present\": $audio_present,"
         echo "    \"enabled\": $audio_present"
+        echo "  },"
+        echo "  \"input\": {"
+        echo "    \"present\": $input_present,"
+        echo "    \"enabled\": $input_present"
         echo "  },"
         echo "  \"gpio\": {"
         echo "    \"platform\": \"$pi_platform\","
