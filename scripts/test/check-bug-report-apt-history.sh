@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-TMPL=${TMPL:-installer/linux/signalk.tmpl}
+TMPL="${TMPL:-installer/linux/signalk.tmpl}"
 
 if [[ ! -f "$TMPL" ]]; then
     echo "[ERR] $TMPL not found (run from repo root)" >&2
@@ -59,12 +59,12 @@ EOF
 extract() {
     awk 'BEGIN{RS="";FS="\n"}
          /i2c-tools|can-utils|halpid|halpi2-firmware|blinkenlights|gpsd/{
-           d="";p="";
-           for(i=1;i<=NF;i++){
-             if($i ~ /^Start-Date:/) d=substr($i,13);
-             if($i ~ /^(Install|Upgrade):/) p=$i;
-           }
-           if(p!="") print d"  "p;
+           d="";
+           for(i=1;i<=NF;i++)
+             if($i ~ /^Start-Date:/) { d=substr($i,13); break; }
+           for(i=1;i<=NF;i++)
+             if($i ~ /^(Install|Upgrade|Remove|Purge|Downgrade|Reinstall):/)
+               print d"  "$i;
          }' "$1"
 }
 
@@ -104,11 +104,34 @@ else
     miss "cannot separate i2c-tools from halpid: '$i2c_ts' / '$hal_ts'"
 fi
 
+# 4b. A stanza may carry Install: AND Upgrade: — an install that also upgraded
+#     a dependency. Keeping only the last action line meant a stanza matched on
+#     i2c-tools could report an unrelated libc6 upgrade instead: a row that
+#     looks fine with the package of interest silently gone.
+cat >"$root/mixed.log" <<'EOF'
+Start-Date: 2026-08-30  12:30:18
+Commandline: apt-get install -y i2c-tools
+Install: i2c-tools:arm64 (4.3-2)
+Upgrade: libc6:arm64 (2.36-9, 2.36-10)
+End-Date: 2026-08-30  12:30:20
+EOF
+mixed_out=$(extract "$root/mixed.log")
+if printf '%s\n' "$mixed_out" | grep -q 'Install: i2c-tools'; then
+    ok "mixed Install/Upgrade stanza keeps the Install line"
+else
+    miss "i2c-tools dropped from a mixed-action stanza: $mixed_out"
+fi
+if [[ "$(printf '%s\n' "$mixed_out" | grep -c '^2026-08-30  12:30:18')" -eq 2 ]]; then
+    ok "both action lines reported under the stanza's timestamp"
+else
+    miss "expected 2 timestamped action rows, got: $mixed_out"
+fi
+
 # 5. Multi-file collection: fusion, ordering, and gzip-only hosts. These are
 #    properties of the shell pipeline, not of awk alone, so drive the same
 #    shape the collector uses.
 collect() {
-    local d=$1
+    local d="$1"
     {
         for f in "$d"/history.log.[0-9] "$d"/history.log; do
             [[ -r "$f" ]] || continue
@@ -122,12 +145,12 @@ collect() {
         fi
     } | awk 'BEGIN{RS="";FS="\n"}
              /i2c-tools|can-utils|halpid|halpi2-firmware|blinkenlights|gpsd/{
-               d="";p="";
-               for(i=1;i<=NF;i++){
-                 if($i ~ /^Start-Date:/) d=substr($i,13);
-                 if($i ~ /^(Install|Upgrade):/) p=$i;
-               }
-               if(p!="") print d"  "p;
+               d="";
+               for(i=1;i<=NF;i++)
+                 if($i ~ /^Start-Date:/) { d=substr($i,13); break; }
+               for(i=1;i<=NF;i++)
+                 if($i ~ /^(Install|Upgrade|Remove|Purge|Downgrade|Reinstall):/)
+                   print d"  "$i;
              }' | sort -u | tail -20
 }
 
@@ -152,7 +175,7 @@ else
 fi
 
 # Archives are numbered newest-first, so no file order is chronological.
-if [[ "$(printf '%s\n' "$multi_out" | sort -c 2>&1; echo $?)" == "0" ]]; then
+if [[ "$(printf '%s\n' "$multi_out" | sort -c 2>&1; echo "$?")" == "0" ]]; then
     ok "rows are ordered oldest-first regardless of file order"
 else
     miss "rows not chronological: $multi_out"
@@ -169,7 +192,8 @@ else
 fi
 
 # 6. The awk in signalk.tmpl must be the one tested here.
-for frag in 'RS=""' 'Start-Date:' '(Install|Upgrade):' 'i2c-tools|can-utils|halpid'; do
+for frag in 'RS=""' 'Start-Date:' '(Install|Upgrade|Remove|Purge|Downgrade|Reinstall):' \
+            'i2c-tools|can-utils|halpid'; do
     if grep -qF "$frag" "$TMPL"; then
         ok "signalk.tmpl still carries the stanza parser fragment: $frag"
     else
