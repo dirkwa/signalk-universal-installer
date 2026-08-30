@@ -104,7 +104,71 @@ else
     miss "cannot separate i2c-tools from halpid: '$i2c_ts' / '$hal_ts'"
 fi
 
-# 5. The awk in signalk.tmpl must be the one tested here.
+# 5. Multi-file collection: fusion, ordering, and gzip-only hosts. These are
+#    properties of the shell pipeline, not of awk alone, so drive the same
+#    shape the collector uses.
+collect() {
+    local d=$1
+    {
+        for f in "$d"/history.log.[0-9] "$d"/history.log; do
+            [[ -r "$f" ]] || continue
+            cat "$f"; echo
+        done
+        if command -v zcat >/dev/null 2>&1; then
+            for f in "$d"/history.log.*.gz; do
+                [[ -r "$f" ]] || continue
+                zcat -f "$f" 2>/dev/null || true; echo
+            done
+        fi
+    } | awk 'BEGIN{RS="";FS="\n"}
+             /i2c-tools|can-utils|halpid|halpi2-firmware|blinkenlights|gpsd/{
+               d="";p="";
+               for(i=1;i<=NF;i++){
+                 if($i ~ /^Start-Date:/) d=substr($i,13);
+                 if($i ~ /^(Install|Upgrade):/) p=$i;
+               }
+               if(p!="") print d"  "p;
+             }' | sort -u | tail -20
+}
+
+multi="$root/multi"; mkdir -p "$multi"
+stanza() {
+    printf 'Start-Date: %s\nCommandline: apt install %s\nInstall: %s:arm64 (1)\nEnd-Date: %s\n' \
+        "$1" "$2" "$2" "$1"
+}
+stanza "2026-08-30  12:00:00" halpid    >"$multi/history.log"
+stanza "2026-05-05  08:00:00" i2c-tools >"$multi/history.log.1"
+stanza "2026-01-01  09:00:00" gpsd | gzip >"$multi/history.log.2.gz"
+
+multi_out=$(collect "$multi")
+
+# apt's files do not end in a blank line, so naive concatenation fuses the
+# last stanza of one file with the first of the next; RS="" then reads them
+# as one record and the earlier transaction is DROPPED, not just reordered.
+if [[ "$(printf '%s\n' "$multi_out" | grep -c .)" -eq 3 ]]; then
+    ok "stanzas across files stay separate (no fusion loss)"
+else
+    miss "expected 3 rows across 3 files, got: $multi_out"
+fi
+
+# Archives are numbered newest-first, so no file order is chronological.
+if [[ "$(printf '%s\n' "$multi_out" | sort -c 2>&1; echo $?)" == "0" ]]; then
+    ok "rows are ordered oldest-first regardless of file order"
+else
+    miss "rows not chronological: $multi_out"
+fi
+
+# On a long-lived box the plain logs can rotate away entirely — exactly when
+# the history matters most.
+gzonly="$root/gzonly"; mkdir -p "$gzonly"
+stanza "2026-01-01  09:00:00" gpsd | gzip >"$gzonly/history.log.2.gz"
+if [[ "$(collect "$gzonly")" == *"gpsd"* ]]; then
+    ok "gzip-only host still reports its history"
+else
+    miss "gzip-only host reported nothing"
+fi
+
+# 6. The awk in signalk.tmpl must be the one tested here.
 for frag in 'RS=""' 'Start-Date:' '(Install|Upgrade):' 'i2c-tools|can-utils|halpid'; do
     if grep -qF "$frag" "$TMPL"; then
         ok "signalk.tmpl still carries the stanza parser fragment: $frag"
@@ -113,7 +177,7 @@ for frag in 'RS=""' 'Start-Date:' '(Install|Upgrade):' 'i2c-tools|can-utils|halp
     fi
 done
 
-# 6. Absent logs degrade to a message, never an error.
+# 7. Absent logs degrade to a message, never an error.
 if grep -q 'not an apt host, or logs rotated away' "$TMPL"; then
     ok "non-apt hosts get an explanation rather than a silent gap"
 else

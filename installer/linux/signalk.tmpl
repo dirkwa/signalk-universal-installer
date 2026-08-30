@@ -3325,14 +3325,35 @@ cmd_bug_report() {
         # distinction the package list alone cannot make (2026-08 HALPI2 field
         # report). Rotated logs are gzipped; both are best-effort and absent on
         # non-apt hosts.
-        if [[ -r /var/log/apt/history.log || -r /var/log/apt/history.log.1 ]]; then
-            # The timestamp is on the Start-Date: line and the packages on
-            # Install:/Upgrade:, i.e. different lines of the same stanza, so
-            # match per stanza (RS="") and print the pair. Oldest first.
+        # A gzipped archive alone is enough — on a long-lived box the plain
+        # logs may have rotated away entirely, which is exactly when the
+        # history matters most.
+        apt_hist_found=0
+        for f in /var/log/apt/history.log /var/log/apt/history.log.[0-9] \
+                 /var/log/apt/history.log.*.gz; do
+            [[ -r "$f" ]] && { apt_hist_found=1; break; }
+        done
+        if (( apt_hist_found )); then
+            # Each source is emitted with a trailing blank line: apt's files do
+            # not end in one, so plain concatenation FUSES the last stanza of
+            # one file with the first of the next. RS="" then reads them as a
+            # single record and the loop's last Start-Date/Install wins — the
+            # earlier transaction is not merely misordered, it is dropped.
+            #
+            # Sort by Start-Date afterwards rather than trusting file order:
+            # archives are numbered newest-first (.1 is more recent than .2),
+            # so no concatenation order is chronological, and `tail` must see
+            # sorted input or it keeps the wrong rows.
             {
-                cat /var/log/apt/history.log.1 /var/log/apt/history.log 2>/dev/null || true
+                for f in /var/log/apt/history.log.[0-9] /var/log/apt/history.log; do
+                    [[ -r "$f" ]] || continue
+                    cat "$f"; echo
+                done
                 if command -v zcat >/dev/null 2>&1; then
-                    zcat -f /var/log/apt/history.log.*.gz 2>/dev/null || true
+                    for f in /var/log/apt/history.log.*.gz; do
+                        [[ -r "$f" ]] || continue
+                        zcat -f "$f" 2>/dev/null || true; echo
+                    done
                 fi
             } | awk 'BEGIN{RS="";FS="\n"}
                      /i2c-tools|can-utils|halpid|halpi2-firmware|blinkenlights|gpsd/{
@@ -3342,7 +3363,7 @@ cmd_bug_report() {
                          if($i ~ /^(Install|Upgrade):/) p=$i;
                        }
                        if(p!="") print d"  "p;
-                     }' | tail -20
+                     }' | sort -u | tail -20
         else
             echo "(no /var/log/apt/history.log — not an apt host, or logs rotated away)"
         fi
