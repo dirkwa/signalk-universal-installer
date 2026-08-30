@@ -104,18 +104,49 @@ else
     miss "preflight.sh still tells the operator to reboot and re-run"
 fi
 
-if grep -q 'PREFLIGHT_DEFER_REBOOT_NOTICE' "$PREFLIGHT" \
-    && grep -q 'PREFLIGHT_DEFER_REBOOT_NOTICE=1' "$INSTALL_SH"; then
-    ok "preflight suppresses its manual 'sudo reboot' line when install.sh drives it"
+# Run the guarded lines in both modes rather than grepping for the variable
+# name. A `grep -q PREFLIGHT_DEFER_REBOOT_NOTICE` also matches the identifier
+# sitting in a comment, so it passes with the wiring deleted — verified: with
+# both sides removed and the name left in a comment, the token check still
+# reported OK. Extract the guarded line and execute it.
+guarded=$(grep -F 'PREFLIGHT_DEFER_REBOOT_NOTICE' "$PREFLIGHT" | grep -F 'sudo reboot' | head -1)
+if [[ -z "$guarded" ]]; then
+    miss "preflight.sh has no 'sudo reboot' line guarded by the defer flag"
 else
-    miss "PREFLIGHT_DEFER_REBOOT_NOTICE not wired between install.sh and preflight.sh"
+    # SC2317: warn() looks unreachable because its only caller is inside the
+    # eval'd string.
+    # shellcheck disable=SC2317
+    off=$(warn() { printf '%s\n' "$*"; }; eval "$guarded" 2>&1 || true)
+    # shellcheck disable=SC2317
+    on=$(warn() { printf '%s\n' "$*"; }; PREFLIGHT_DEFER_REBOOT_NOTICE=1 eval "$guarded" 2>&1 || true)
+    if [[ "$off" == *"sudo reboot"* && "$on" != *"sudo reboot"* ]]; then
+        ok "preflight's manual 'sudo reboot' prints standalone, is silent when deferred"
+    else
+        miss "defer flag does not gate the line (standalone='$off' deferred='$on')"
+    fi
 fi
 
-if grep -q 'HALPI2_DEFER_REBOOT_NOTICE' "$TMPL" \
-    && grep -q 'HALPI2_DEFER_REBOOT_NOTICE=1' "$INSTALL_SH"; then
-    ok "HALPI2 template suppresses its own reboot notice when install.sh drives it"
+# install.sh must actually SET the flag on the preflight invocation — an
+# assignment prefixing the command, not merely a mention.
+# shellcheck disable=SC2016  # literal install.sh source text, no expansion wanted
+if grep -qE '^\s*PREFLIGHT_DEFER_REBOOT_NOTICE=1 bash "\$HERE/preflight\.sh"' "$INSTALL_SH"; then
+    ok "install.sh sets the defer flag on the preflight invocation"
 else
-    miss "HALPI2_DEFER_REBOOT_NOTICE not wired between install.sh and the template"
+    miss "install.sh does not set PREFLIGHT_DEFER_REBOOT_NOTICE on the preflight call"
+fi
+
+# shellcheck disable=SC2016  # literal install.sh source text, no expansion wanted
+if grep -qE '^\s*HALPI2_DEFER_REBOOT_NOTICE=1 bash "\$HERE/signalk-halpi2\.tmpl" apply' "$INSTALL_SH"; then
+    ok "install.sh sets the defer flag on the HALPI2 apply invocation"
+else
+    miss "install.sh does not set HALPI2_DEFER_REBOOT_NOTICE on the HALPI2 call"
+fi
+
+# The template must branch on it, not just contain the name.
+if grep -qE '^\s*if \[\[ "\$\{HALPI2_DEFER_REBOOT_NOTICE:-0\}" = "1" \]\]; then' "$TMPL"; then
+    ok "HALPI2 template branches on the defer flag"
+else
+    miss "HALPI2_DEFER_REBOOT_NOTICE is not an executable branch in $TMPL"
 fi
 
 # Standalone `signalk halpi2 apply` has no batching caller, so it must KEEP
