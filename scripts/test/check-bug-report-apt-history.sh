@@ -59,7 +59,7 @@ EOF
 extract() {
     awk 'BEGIN{RS="";FS="\n"}
          /i2c-tools|can-utils|halpid|halpi2-firmware|blinkenlights|gpsd/{
-           d="";
+           d="?";
            for(i=1;i<=NF;i++)
              if($i ~ /^Start-Date:/) { d=substr($i,13); break; }
            for(i=1;i<=NF;i++)
@@ -145,13 +145,13 @@ collect() {
         fi
     } | awk 'BEGIN{RS="";FS="\n"}
              /i2c-tools|can-utils|halpid|halpi2-firmware|blinkenlights|gpsd/{
-               d="";
+               d="?";
                for(i=1;i<=NF;i++)
                  if($i ~ /^Start-Date:/) { d=substr($i,13); break; }
                for(i=1;i<=NF;i++)
                  if($i ~ /^(Install|Upgrade|Remove|Purge|Downgrade|Reinstall):/)
                    print d"  "$i;
-             }' | sort -u | tail -20
+             }' | sort -u | tail -40
 }
 
 multi="$root/multi"; mkdir -p "$multi"
@@ -200,6 +200,21 @@ for frag in 'RS=""' 'Start-Date:' '(Install|Upgrade|Remove|Purge|Downgrade|Reins
         miss "signalk.tmpl no longer contains '$frag' — this test has drifted"
     fi
 done
+
+# 6b. A truncated log can start mid-stanza, leaving no Start-Date. Such a row
+#     must still name its action rather than starting with blank columns and
+#     sorting above every dated row.
+cat >"$root/nodate.log" <<'EOF'
+Commandline: apt-get install -y i2c-tools
+Install: i2c-tools:arm64 (4.3-2)
+End-Date: 2026-08-30  12:30:20
+EOF
+nodate_out=$(extract "$root/nodate.log")
+if [[ "$nodate_out" == "?  Install: i2c-tools"* ]]; then
+    ok "stanza without Start-Date is dated '?', not blank"
+else
+    miss "dateless stanza produced: '$nodate_out'"
+fi
 
 # 7. Absent logs degrade to a message, never an error.
 if grep -q 'not an apt host, or logs rotated away' "$TMPL"; then

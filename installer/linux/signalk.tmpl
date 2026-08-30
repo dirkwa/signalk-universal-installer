@@ -3355,22 +3355,24 @@ cmd_bug_report() {
                         zcat -f "$f" 2>/dev/null || true; echo
                     done
                 fi
-            #
+            } |
             # One stanza may carry Install: AND Upgrade: (an install that also
-            # upgraded a dependency). Print every action line, not just the
-            # last: overwriting kept whichever came second, so a stanza that
+            # upgraded a dependency), so print every action line, not just the
+            # last: overwriting kept whichever came second, and a stanza that
             # matched on i2c-tools could report only an unrelated libc6
             # upgrade — a plausible-looking row with the package of interest
-            # silently gone.
-            } | awk 'BEGIN{RS="";FS="\n"}
-                     /i2c-tools|can-utils|halpid|halpi2-firmware|blinkenlights|gpsd/{
-                       d="";
-                       for(i=1;i<=NF;i++)
-                         if($i ~ /^Start-Date:/) { d=substr($i,13); break; }
-                       for(i=1;i<=NF;i++)
-                         if($i ~ /^(Install|Upgrade|Remove|Purge|Downgrade|Reinstall):/)
-                           print d"  "$i;
-                     }' | sort -u | tail -20
+            # silently gone. A stanza with no Start-Date (truncated log) is
+            # dated "?" rather than emitting a row that starts with blanks and
+            # sorts to the top.
+            awk 'BEGIN{RS="";FS="\n"}
+                 /i2c-tools|can-utils|halpid|halpi2-firmware|blinkenlights|gpsd/{
+                   d="?";
+                   for(i=1;i<=NF;i++)
+                     if($i ~ /^Start-Date:/) { d=substr($i,13); break; }
+                   for(i=1;i<=NF;i++)
+                     if($i ~ /^(Install|Upgrade|Remove|Purge|Downgrade|Reinstall):/)
+                       print d"  "$i;
+                 }' | sort -u | tail -40
         else
             echo "(no /var/log/apt/history.log — not an apt host, or logs rotated away)"
         fi
