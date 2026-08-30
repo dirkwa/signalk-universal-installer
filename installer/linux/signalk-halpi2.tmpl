@@ -618,14 +618,39 @@ cmd_apply() {
     # an existing install, so this only suppresses the misleading message.
     local have_probe=1
     ensure_i2c_tools || have_probe=0
+    # Record why the bus could not be brought up. Every call here is
+    # best-effort (`2>/dev/null || true`), which used to make a failed
+    # live-enable indistinguishable from a silent controller: a HALPI2 with
+    # i2c-tools already installed still reached "did not answer at 0x6d" and
+    # nothing said whether /dev/i2c-1 had ever appeared. The reason is
+    # reported below and lands in install.log for a bug report.
+    local bus_note=""
     if [[ ! -e "$HALPI2_I2C_DEV" ]]; then
         if command -v dtparam >/dev/null 2>&1; then
-            run_root dtparam i2c_arm=on 2>/dev/null || true
+            if run_root dtparam i2c_arm=on 2>/dev/null; then
+                bus_note="dtparam i2c_arm=on applied"
+            else
+                bus_note="dtparam i2c_arm=on failed"
+            fi
+        else
+            bus_note="dtparam absent"
         fi
-        [[ -e "$HALPI2_I2C_DEV" ]] || run_root modprobe i2c-dev 2>/dev/null || true
+        if [[ ! -e "$HALPI2_I2C_DEV" ]]; then
+            if run_root modprobe i2c-dev 2>/dev/null; then
+                bus_note="${bus_note}; modprobe i2c-dev ok"
+            else
+                bus_note="${bus_note}; modprobe i2c-dev failed"
+            fi
+        fi
         # Module load and device-node creation are not synchronous.
         if [[ ! -e "$HALPI2_I2C_DEV" ]] && command -v udevadm >/dev/null 2>&1; then
             run_root udevadm settle --timeout=5 2>/dev/null || true
+        fi
+        if [[ -e "$HALPI2_I2C_DEV" ]]; then
+            info "I2C enabled live (${bus_note})"
+            bus_note=""
+        else
+            bus_note="${HALPI2_I2C_DEV} still absent after: ${bus_note}"
         fi
     fi
     local confirmed=0
@@ -638,10 +663,24 @@ cmd_apply() {
         esac
     elif [[ "$mode" == yes ]]; then
         warn "controller did not answer at I2C 0x6d; continuing because SIGNALK_HALPI2=yes"
+        # Unattended runs are where a diagnostic matters most: nobody is
+        # watching, and the bundle is all there is afterwards.
+        if [[ -n "$bus_note" ]]; then
+            warn "(${bus_note})"
+        fi
     else
         if (( have_probe )); then
             warn "Compute Module 5 detected but the HALPI2 controller did not answer at I2C 0x6d"
-            warn "(no ${HALPI2_I2C_DEV} yet, or a different CM5 carrier)."
+            if [[ -n "$bus_note" ]]; then
+                # The bus never came up, so the controller was never asked.
+                # Say which step fell short instead of implying the board
+                # stayed silent — before the config.txt block below is written
+                # and the box rebooted, I2C may simply not be enabled yet.
+                warn "(${bus_note})"
+            else
+                warn "(${HALPI2_I2C_DEV} is present, so this is a silent controller"
+                warn "or a different CM5 carrier.)"
+            fi
         else
             warn "Compute Module 5 detected but the controller probe could not run"
             warn "(i2ctransfer missing — see above). This says nothing about the board."

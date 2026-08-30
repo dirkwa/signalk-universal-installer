@@ -65,7 +65,9 @@ shim systemctl  'echo "$*" >>"$LOG/systemctl"; case "$*" in "is-active --quiet h
 shim usermod    'echo "$*" >>"$LOG/usermod"'
 shim findmnt    'echo "${SHIM_ROOTDEV:-/dev/nvme0n1p2}"'
 shim i2ctransfer 'echo "$*" >>"$LOG/i2ctransfer"; [[ "${SHIM_I2C:-ok}" == ok ]] || exit 1; case "$4" in 0x04) echo "0x03 0x03 0x01 0xff";; 0x03) echo "0x02 0x00 0x00 0xff";; esac'
+# shellcheck disable=SC2016  # shim bodies are literal scripts; $vars expand when they run
 shim dtparam    'echo "$*" >>"$LOG/dtparam"'
+# shellcheck disable=SC2016
 shim modprobe   'echo "$*" >>"$LOG/modprobe"'
 shim curl       '[[ "${SHIM_CURL_FAIL:-0}" == 1 ]] && exit 22; echo "-----BEGIN PGP PUBLIC KEY BLOCK-----FAKE-----END PGP PUBLIC KEY BLOCK-----"'
 }
@@ -205,6 +207,69 @@ if grep -q "i2ctransfer is still missing" "$root/out"; then
     ok "apt no-op: missing i2ctransfer reported, not silently probed"
 else
     miss "apt no-op: no warning that i2ctransfer is absent"
+fi
+
+# 5b-ter. When the bus cannot be brought up, the warning must name the step
+# that fell short. Every call in the live-enable path is best-effort
+# (`2>/dev/null || true`), which made a failed enable indistinguishable from a
+# silent controller: a board with i2c-tools already present still reached
+# "did not answer at 0x6d" with nothing saying whether /dev/i2c-1 ever
+# appeared — the ambiguity that made the 2026-08 field report undiagnosable.
+reset_fs
+rm -f "$root/i2c-1"
+mv "$bin/dtparam" "$root/dtparam.hidden"
+printf '#!/usr/bin/env bash
+exit 1
+' >"$bin/modprobe"   # node never appears
+rc=$(run_apply SHIM_I2C=fail)
+mv "$root/dtparam.hidden" "$bin/dtparam"
+# shellcheck disable=SC2016  # shim body is a literal script; $vars expand when it runs
+shim modprobe 'echo "$*" >>"$LOG/modprobe"'
+if grep -q "still absent after" "$root/out"; then
+    ok "failed bus bring-up names the step, not just the board"
+else
+    miss "no diagnostic for a bus that never came up: $(grep -i '0x6d' "$root/out" | head -2)"
+fi
+if grep -qE "dtparam absent|modprobe i2c-dev failed" "$root/out"; then
+    ok "the diagnostic identifies which call fell short"
+else
+    miss "diagnostic present but does not say which step failed"
+fi
+
+# 5b-quater. dtparam present but FAILING is a different branch from dtparam
+# absent, and it is the likelier one on a stock HALPI2: the binary ships with
+# Raspberry Pi OS, and i2c_arm only reaches config.txt via the block `apply`
+# itself writes.
+reset_fs
+rm -f "$root/i2c-1"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/dtparam"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/modprobe"
+rc=$(run_apply SHIM_I2C=fail)
+# shellcheck disable=SC2016  # shim bodies are literal scripts; $vars expand when they run
+shim dtparam  'echo "$*" >>"$LOG/dtparam"'
+# shellcheck disable=SC2016
+shim modprobe 'echo "$*" >>"$LOG/modprobe"'
+if grep -q "dtparam i2c_arm=on failed" "$root/out"; then
+    ok "a failing dtparam is reported as failed, not as absent"
+else
+    miss "dtparam failure not distinguished: $(grep -i 'absent after' "$root/out" | head -1)"
+fi
+
+# 5b-quinquies. SIGNALK_HALPI2=yes takes its own branch, and unattended runs
+# are where the diagnostic matters most — nobody is watching.
+reset_fs
+rm -f "$root/i2c-1"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/dtparam"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/modprobe"
+rc=$(run_apply SHIM_I2C=fail SIGNALK_HALPI2=yes)
+# shellcheck disable=SC2016  # shim bodies are literal scripts; $vars expand when they run
+shim dtparam  'echo "$*" >>"$LOG/dtparam"'
+# shellcheck disable=SC2016
+shim modprobe 'echo "$*" >>"$LOG/modprobe"'
+if grep -q "still absent after" "$root/out"; then
+    ok "SIGNALK_HALPI2=yes keeps the bus diagnostic"
+else
+    miss "unattended mode lost the diagnostic: $(grep -i '0x6d' "$root/out" | head -1)"
 fi
 
 # 5c. the i2c node already exists → no module load needed, and no dtparam call

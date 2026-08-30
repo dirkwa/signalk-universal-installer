@@ -181,20 +181,31 @@ data type NMEA 0183, source `gpsd`, host `localhost`, port `2947`.
 ## Troubleshooting
 
 **"Compute Module 5 detected but the HALPI2 controller did not answer at I2C
-0x6d" on a genuine HALPI2.** Most often the probe tool is missing rather than
-the controller silent: `apply` installs `i2c-tools` first, but `apt-get install
--y -qq` exits 0 even when it resolves nothing from a stale index, so a failed
-install used to pass unnoticed and the probe then failed on the absent
-`i2ctransfer`. It now says so explicitly; `sudo apt-get update && sudo apt-get
-install i2c-tools`, then re-run.
+0x6d" on a genuine HALPI2.** Seen on a real board on its first run. Answering
+`y` is the documented candidate path and is correct on HALPI2 hardware: the
+reboot brings up `can0`, `/dev/ttyAMA4` and `halpid`, and the next run confirms
+the board via `halpid` without asking.
 
-Otherwise the bus itself is not up yet. `apply` enables it live before probing
-(`dtparam i2c_arm=on`, which on a Pi also brings in `i2c-dev`), but where the
-firmware refuses that at runtime the bus stays off until the `config.txt` block
-is written and the box rebooted — and `halpid` is not installed at that point
-either, so neither detection rung can answer. Answering `y` there is the
-documented candidate path and is correct on real HALPI2 hardware: the reboot
-brings up both rungs and the next run confirms the board via `halpid`.
+The message now names which step fell short, because two quite different
+situations produce it:
+
+- **The bus never came up**, so the controller was never actually asked. On a
+  stock HALPI2 `dtparam=i2c_arm=on` arrives only with the `config.txt` block
+  `apply` itself writes, so before the first reboot I2C may not be enabled.
+  `apply` tries to enable it live first (`dtparam i2c_arm=on`, then `modprobe
+  i2c-dev`), and now reports whether that worked — e.g. `/dev/i2c-1 still
+  absent after: dtparam i2c_arm=on failed`. `halpid` is not installed at this
+  point either, so neither detection rung can answer.
+- **The bus is up and the controller stayed silent** — `/dev/i2c-1` exists and
+  the transfer got nothing. That is a genuinely unresponsive controller or a
+  different CM5 carrier, and the message says so.
+
+A third cause is possible but has not been observed in the field: `apply`
+installs `i2c-tools` for the probe, and `apt-get install -y -qq` exits 0 even
+when it resolves nothing from a stale index. A silent no-op there would leave
+`i2ctransfer` absent; the installer now checks for the binary and reports that
+separately rather than blaming the board. Fix with `sudo apt-get update &&
+sudo apt-get install i2c-tools`, then re-run.
 
 **Asked for boat name, MMSI and credentials on every run.** Older installers
 prompted before the reboot gates, and neither answer is written to disk until
