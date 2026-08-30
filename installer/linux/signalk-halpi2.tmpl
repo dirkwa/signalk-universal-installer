@@ -579,12 +579,27 @@ cmd_apply() {
     # different CM5 carrier must not end up with halpid and the LED daemon.
     # Only i2c-tools (Debian) goes in first, for the probe. Enabling I2C live
     # (what raspi-config does) lets a first run probe before the config.txt
-    # reboot; dtparam is Raspberry Pi OS specific, so its absence only means
-    # "cannot confirm yet".
+    # reboot.
+    #
+    # The two steps are independent and must stay that way. `modprobe i2c-dev`
+    # is plain Debian and is what creates the /dev/i2c-* nodes; `dtparam` ships
+    # with Raspberry Pi OS (raspi-utils) and only sets the pin mux. Gating the
+    # modprobe on `command -v dtparam` meant that on plain Debian — which the
+    # HALPI2 also runs — the module never loaded, so the first run could never
+    # confirm the board over I2C and fell through to the "did not answer at
+    # 0x6d" prompt on genuine hardware. halpid is not installed yet at this
+    # point (apply_packages runs below), so I2C is the only rung available on a
+    # first run.
     ensure_i2c_tools || true
-    if [[ ! -e "$HALPI2_I2C_DEV" ]] && command -v dtparam >/dev/null 2>&1; then
-        run_root dtparam i2c_arm=on 2>/dev/null || true
+    if [[ ! -e "$HALPI2_I2C_DEV" ]]; then
         run_root modprobe i2c-dev 2>/dev/null || true
+        if command -v dtparam >/dev/null 2>&1; then
+            run_root dtparam i2c_arm=on 2>/dev/null || true
+        fi
+        # Module load and device-node creation are not synchronous.
+        if [[ ! -e "$HALPI2_I2C_DEV" ]] && command -v udevadm >/dev/null 2>&1; then
+            run_root udevadm settle --timeout=5 2>/dev/null || true
+        fi
     fi
     local confirmed=0
     rc=0; detect_board root || rc=$?
@@ -649,9 +664,17 @@ cmd_apply() {
         return 1
     fi
     if (( reboot )); then
-        warn "Reboot required to load the device-tree changes:  sudo reboot"
-        warn "Then re-run the installer (or 'signalk hardware rescan') so can0 and"
-        warn "${HALPI2_RS485_DEV} are picked up."
+        # install.sh sets HALPI2_DEFER_REBOOT_NOTICE=1 because it batches this
+        # reboot with preflight's cmdline patch and prints one combined
+        # "Reboot required" block of its own. Standalone `signalk halpi2 apply`
+        # has no such caller, so it keeps printing the instruction itself.
+        if [[ "${HALPI2_DEFER_REBOOT_NOTICE:-0}" = "1" ]]; then
+            warn "Device-tree changes written; they load on the next reboot."
+        else
+            warn "Reboot required to load the device-tree changes:  sudo reboot"
+            warn "Then re-run the installer (or 'signalk hardware rescan') so can0 and"
+            warn "${HALPI2_RS485_DEV} are picked up."
+        fi
         if pkg_installed halpi2-firmware; then
             info "If apt just flashed new controller firmware it activates on the next full"
             info "power-off, not on reboot; do that when someone can reach the power button."

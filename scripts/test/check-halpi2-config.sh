@@ -176,6 +176,35 @@ else
     miss "candidate: Hat Labs packages/repo touched before confirmation"
 fi
 
+# 5b. plain Debian (no dtparam on PATH): the i2c-dev module must still be
+# loaded. `modprobe i2c-dev` creates the /dev/i2c-* nodes and is plain
+# Debian; `dtparam` is Raspberry-Pi-OS-only and merely sets the pin mux.
+# Gating the modprobe on `command -v dtparam` meant a HALPI2 running plain
+# Debian never loaded the module, so the first run could not confirm the
+# board over I2C — halpid is not installed yet at that point — and fell
+# through to the "did not answer at 0x6d" prompt on genuine hardware.
+reset_fs
+rm -f "$root/i2c-1"                 # node absent: this is what triggers the load
+mv "$bin/dtparam" "$root/dtparam.hidden"
+rc=$(run_apply SHIM_I2C=fail)
+mv "$root/dtparam.hidden" "$bin/dtparam"
+if grep -q "i2c-dev" "$LOG/modprobe" 2>/dev/null; then
+    ok "no dtparam (plain Debian): modprobe i2c-dev still attempted"
+else
+    miss "no dtparam: modprobe i2c-dev skipped — first run cannot confirm over I2C"
+fi
+if [[ "$rc" == 1 ]]; then ok "no dtparam: still a clean candidate rc 1"; else miss "no dtparam: rc $rc (want 1)"; fi
+
+# 5c. the i2c node already exists → no module load needed, and no dtparam call
+reset_fs
+touch "$root/i2c-1"
+rc=$(run_apply SHIM_HALPID=active)
+if [[ ! -s "$LOG/modprobe" ]]; then
+    ok "i2c node present: no needless modprobe"
+else
+    miss "i2c node present: modprobe called anyway ($(cat "$LOG/modprobe"))"
+fi
+
 # 6. candidate + SIGNALK_HALPI2=yes → applied
 reset_fs
 rc=$(run_apply SHIM_I2C=fail SIGNALK_HALPI2=yes)
