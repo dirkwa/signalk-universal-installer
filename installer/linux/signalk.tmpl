@@ -3315,6 +3315,37 @@ cmd_bug_report() {
         else
             echo "(signalk-server not running; probe skipped)"
         fi
+        echo
+        echo "=== apt install history (hardware-relevant packages) ==="
+        # WHEN a package landed, not just whether it is present. The installer
+        # installs i2c-tools for the HALPI2 controller probe and the Hat Labs
+        # set later in the same run, so "installed at the same timestamp as
+        # halpid" vs "installed earlier" distinguishes a probe that ran without
+        # its tool from one that ran and genuinely got no answer — a
+        # distinction the package list alone cannot make (2026-08 HALPI2 field
+        # report). Rotated logs are gzipped; both are best-effort and absent on
+        # non-apt hosts.
+        if [[ -r /var/log/apt/history.log || -r /var/log/apt/history.log.1 ]]; then
+            # The timestamp is on the Start-Date: line and the packages on
+            # Install:/Upgrade:, i.e. different lines of the same stanza, so
+            # match per stanza (RS="") and print the pair. Oldest first.
+            {
+                cat /var/log/apt/history.log.1 /var/log/apt/history.log 2>/dev/null || true
+                if command -v zcat >/dev/null 2>&1; then
+                    zcat -f /var/log/apt/history.log.*.gz 2>/dev/null || true
+                fi
+            } | awk 'BEGIN{RS="";FS="\n"}
+                     /i2c-tools|can-utils|halpid|halpi2-firmware|blinkenlights|gpsd/{
+                       d="";p="";
+                       for(i=1;i<=NF;i++){
+                         if($i ~ /^Start-Date:/) d=substr($i,13);
+                         if($i ~ /^(Install|Upgrade):/) p=$i;
+                       }
+                       if(p!="") print d"  "p;
+                     }' | tail -20
+        else
+            echo "(no /var/log/apt/history.log — not an apt host, or logs rotated away)"
+        fi
     } >"$bundle/host-extra.txt" 2>&1
 
     # Tar it up.
