@@ -63,7 +63,7 @@ dtparam=sd=off
 2. `systemctl is-active halpid` → confirmed (`detectedVia: "halpid"`).
 3. `/dev/i2c-1` readable and `i2ctransfer -y 1 w1@0x6d 0x04 r4` answers → confirmed (`detectedVia: "i2c"`, `firmwareVersion` / `hardwareVersion` filled in). This is the same write-register-then-read-4-bytes transaction `halpid` uses.
 
-`signalk halpi2 apply` runs the same ladder after installing `i2c-tools`, and when `/dev/i2c-1` is missing it brings I2C up live first, so a first run can confirm the board before the reboot. `modprobe i2c-dev` is what creates the device node and runs on any Debian; `dtparam i2c_arm=on` sets the pin mux and runs only where `dtparam` exists (Raspberry Pi OS). The two are independent — gating the module load on `dtparam` is what made plain-Debian HALPI2 boxes fail the probe on their first run.
+`signalk halpi2 apply` runs the same ladder after installing `i2c-tools`, and when `/dev/i2c-1` is missing it brings I2C up live first, so a first run can confirm the board before the reboot. `modprobe i2c-dev` is what creates the device node and runs on any Debian; `dtparam i2c_arm=on` sets the pin mux and runs only where `dtparam` exists (Raspberry Pi OS). `dtparam` runs first where it exists, since on a Pi it brings in `i2c-dev` itself; `modprobe` is the fallback for hosts without it. Where the firmware cannot apply `i2c_arm` at runtime the bus stays off until the reboot, so a first run may still fall through to the candidate prompt.
 
 hardware.json then carries a `board` object and an `onboardSerial` list (shapes in [docs/hardware.md](hardware.md)). `onboardSerial` is listed whenever `/dev/ttyAMA4` exists (the node only appears once the `uart4-pi5` overlay is active), is opt-out like USB serial, and its `enabled` survives a re-detect. `board` is a hardware fact and is regenerated every time. The renderer passes the RS-485 port into the container (existence-guarded, like USB serial) and bind-mounts `/run/halpid` read-only while `halpid.sock` exists, so the `signalk-halpi` plugin from the App Store can read the controller's voltages, temperatures and state.
 
@@ -173,19 +173,26 @@ data type NMEA 0183, source `gpsd`, host `localhost`, port `2947`.
 ## Troubleshooting
 
 **"Compute Module 5 detected but the HALPI2 controller did not answer at I2C
-0x6d" on a genuine HALPI2.** Fixed in the installer as of the commit that added
-this note: `modprobe i2c-dev` was gated behind `command -v dtparam`, which is
-Raspberry-Pi-OS-only, so on plain Debian `/dev/i2c-1` never appeared and the
-first run could not probe the controller. `halpid` is not installed yet at that
-point, so I2C is the only detection rung available. Answering `y` to the prompt
-was always safe on real HALPI2 hardware. On an older installer, `sudo modprobe
-i2c-dev` before re-running has the same effect.
+0x6d" on a genuine HALPI2.** Most often the probe tool is missing rather than
+the controller silent: `apply` installs `i2c-tools` first, but `apt-get install
+-y -qq` exits 0 even when it resolves nothing from a stale index, so a failed
+install used to pass unnoticed and the probe then failed on the absent
+`i2ctransfer`. It now says so explicitly; `sudo apt-get update && sudo apt-get
+install i2c-tools`, then re-run.
 
-**Asked for boat name, MMSI and credentials on every run.** Also fixed: the
-prompts ran before the reboot gates, and the answers are not written to disk
-until much later in the run, so each reboot cycle discarded them. Nothing was
-wrong with the answers themselves — the run just never got far enough to save
-them.
+Otherwise the bus itself is not up yet. `apply` enables it live before probing
+(`dtparam i2c_arm=on`, which on a Pi also brings in `i2c-dev`), but where the
+firmware refuses that at runtime the bus stays off until the `config.txt` block
+is written and the box rebooted — and `halpid` is not installed at that point
+either, so neither detection rung can answer. Answering `y` there is the
+documented candidate path and is correct on real HALPI2 hardware: the reboot
+brings up both rungs and the next run confirms the board via `halpid`.
+
+**Asked for boat name, MMSI and credentials on every run.** Older installers
+prompted before the reboot gates, and neither answer is written to disk until
+much later in the run, so each reboot cycle discarded them. Nothing is wrong
+with the answers — the run never got far enough to save them. Re-running after
+the final reboot keeps whatever the last completed run stored.
 
 ## Out of scope
 

@@ -39,7 +39,10 @@ line_of() { grep -nE -m1 "$1" "$2" 2>/dev/null | cut -d: -f1; }
 pf_line=$(line_of '^section "Pre-flight"' "$INSTALL_SH")
 halpi2_line=$(line_of '^# 2c\. Hat Labs HALPI2 carrier board' "$INSTALL_SH")
 exit_line=$(line_of '^if \(\( REBOOT_PENDING \)\); then' "$INSTALL_SH")
-vessel_line=$(line_of '^# Vessel identity \(boat name / MMSI' "$INSTALL_SH")
+# Anchor on the executable prompts, not the comments above them: a comment
+# can be left behind by an edit that moves the read, and the ordering claim
+# is about what actually asks the operator a question.
+vessel_line=$(line_of "printf 'Boat name: '" "$INSTALL_SH")
 admin_line=$(line_of "printf 'Admin username \[admin\]: '" "$INSTALL_SH")
 
 if [[ -z "$pf_line" || -z "$halpi2_line" || -z "$exit_line" || -z "$vessel_line" || -z "$admin_line" ]]; then
