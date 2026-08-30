@@ -272,6 +272,20 @@ else
     miss "unattended mode lost the diagnostic: $(grep -i '0x6d' "$root/out" | head -1)"
 fi
 
+# 5b-sexies. Unattended mode with no probe tool: nothing was ever asked of the
+# controller, so saying it "did not answer" sends the operator after the board
+# for a missing package. The interactive branch already distinguishes these.
+reset_fs
+mv "$bin/i2ctransfer" "$root/i2ctransfer.hidden"
+rc=$(run_apply SIGNALK_HALPI2=yes)
+mv "$root/i2ctransfer.hidden" "$bin/i2ctransfer"
+if grep -q "probe could not run" "$root/out" \
+    && ! grep -q "controller did not answer at I2C 0x6d" "$root/out"; then
+    ok "unattended + no i2ctransfer: reports the missing tool, not a silent board"
+else
+    miss "unattended run blamed the controller for a missing tool: $(grep -i '0x6d\|probe could not' "$root/out" | head -2)"
+fi
+
 # 5c. the i2c node already exists → no module load needed, and no dtparam call
 reset_fs
 touch "$root/i2c-1"

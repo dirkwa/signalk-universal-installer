@@ -662,11 +662,19 @@ cmd_apply() {
             halpid) ok "halpid is running — HALPI2 confirmed" ;;
         esac
     elif [[ "$mode" == yes ]]; then
-        warn "controller did not answer at I2C 0x6d; continuing because SIGNALK_HALPI2=yes"
         # Unattended runs are where a diagnostic matters most: nobody is
-        # watching, and the bundle is all there is afterwards.
-        if [[ -n "$bus_note" ]]; then
-            warn "(${bus_note})"
+        # watching, and the bundle is all there is afterwards. Say what
+        # actually happened — with no i2ctransfer no transaction was attempted,
+        # so "the controller did not answer" would send the operator after the
+        # board for a missing tool.
+        if (( ! have_probe )); then
+            warn "controller probe could not run (i2ctransfer missing — see above);"
+            warn "continuing because SIGNALK_HALPI2=yes"
+        else
+            warn "controller did not answer at I2C 0x6d; continuing because SIGNALK_HALPI2=yes"
+            if [[ -n "$bus_note" ]]; then
+                warn "(${bus_note})"
+            fi
         fi
     else
         if (( have_probe )); then
