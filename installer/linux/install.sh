@@ -506,9 +506,120 @@ SIGNALK_URL="http://127.0.0.1:${SK_HTTP_PORT}/signalk"
 export SK_HTTP_PORT SK_HTTPS_PORT
 info "signalk-server ports: HTTP :${SK_HTTP_PORT}, HTTPS :${SK_HTTPS_PORT}"
 
+# Detect a previous successful install. install.sh's last step (#18)
+# writes `bootstrappedAt` into ~/.signalk-doctor/last-good.json after
+# every successful pass; presence of that key means at least one full
+# bootstrap completed. We don't change the run sequence in that case —
+# every step is already idempotent — but we DO add a verification pass
+# at the end (step 18b) that reports what's healthy vs. still broken
+# after the idempotent re-run, so the operator can tell whether issues
+# were resolved.
+VERIFY_MODE=0
+if [[ -f "${DOCTOR_DATA}/last-good.json" ]] \
+    && grep -q '"bootstrappedAt"' "${DOCTOR_DATA}/last-good.json" 2>/dev/null; then
+    VERIFY_MODE=1
+    info "Existing install detected — running in verify mode."
+    info "Steps will be re-run idempotently; a summary at the end will tell you"
+    info "what was already healthy, what got fixed, and what still needs attention."
+fi
+
+# 2. Pre-flight
+section "Pre-flight"
+# Preflight may apply a kernel-cmdline patch that requires a reboot
+# (Pi memory controller). It signals that case with exit code 2 — its
+# own [OK]/[!] messages already told the operator what to do; we just
+# need to stop cleanly without flagging it as a generic preflight fail.
+#
+# The reboot is DEFERRED rather than taken immediately: on a HALPI2 the
+# step below also wants a reboot (config.txt device-tree block), and
+# exiting here made the operator reboot twice for two patches that could
+# have been written in one pass. REBOOT_PENDING carries the intent to the
+# single exit at the end of step 2c. Only step 2c may consolidate — it is
+# the one remaining step before the exit that touches boot-time config,
+# and anything past it needs the memory controller the patch enables.
+REBOOT_PENDING=0
+REBOOT_REASONS=()
+set +e
+bash "$HERE/preflight.sh"
+PREFLIGHT_RC=$?
+set -e
+if (( PREFLIGHT_RC == 2 )); then
+    REBOOT_PENDING=1
+    REBOOT_REASONS+=("kernel cmdline patch (memory controller)")
+elif (( PREFLIGHT_RC != 0 )); then
+    exit "$PREFLIGHT_RC"
+fi
+
+# 2c. Hat Labs HALPI2 carrier board (Raspberry Pi CM5). On a CM5 the helper
+# probes the HALPI2 controller at I2C 0x6d, installs the Hat Labs packages
+# (halpid, halpi2-firmware, blinkenlights-daemon, i2c-tools, can-utils),
+# writes the config.txt device-tree block, the can0 bitrate and i2c-dev at
+# boot, then asks for a reboot — same exit-and-re-run contract as the
+# preflight cmdline patch above: the re-run finds can0 / ttyAMA4 / halpid
+# live and the normal hardware detection picks them up. Runs the template
+# directly because ~/.local/bin/signalk-halpi2 is installed later (11a).
+# SIGNALK_HALPI2=no skips it; SIGNALK_HALPI2=yes skips its prompts. Details
+# and the manual recipe: docs/halpi2.md. Never fails the install: rc 1 =
+# declined/incomplete, warned and carried on. Runs only when sudo is usable.
+case "${SIGNALK_HALPI2:-auto}" in
+    no|NO|0|false|FALSE) ;;
+    *)
+        if [[ "$SUDO" = "MISSING" ]]; then
+            # detect: 0 confirmed, 1 candidate, 2 not a CM5
+            set +e
+            bash "$HERE/signalk-halpi2.tmpl" detect >/dev/null 2>&1
+            HALPI2_DETECT_RC=$?
+            set -e
+            if (( HALPI2_DETECT_RC == 0 || HALPI2_DETECT_RC == 1 )); then
+                warn "Compute Module 5 detected but sudo is unavailable — HALPI2 setup skipped."
+                warn "Run 'signalk halpi2 apply' with sudo later (docs/halpi2.md)."
+            fi
+        else
+            set +e
+            HALPI2_DEFER_REBOOT_NOTICE=1 bash "$HERE/signalk-halpi2.tmpl" apply
+            HALPI2_RC=$?
+            set -e
+            if (( HALPI2_RC == 2 )); then
+                REBOOT_PENDING=1
+                REBOOT_REASONS+=("HALPI2 device-tree block in config.txt")
+            elif (( HALPI2_RC != 0 )); then
+                warn "HALPI2 setup incomplete (see above); continuing with the install."
+            fi
+        fi
+        ;;
+esac
+
+# Single exit for every boot-time change made above. Both patches are on
+# disk; one reboot activates them together. The re-run finds the memory
+# controller live and, on a HALPI2, can0 / ttyAMA4 / halpid up, and the
+# normal hardware detection picks them up. Nothing has prompted for
+# vessel identity or credentials at this point — that is deliberate, and
+# is what keeps a reboot cycle from discarding the operator's answers.
+if (( REBOOT_PENDING )); then
+    section "Reboot required"
+    if (( ${#REBOOT_REASONS[@]} > 1 )); then
+        info "Applied ${#REBOOT_REASONS[@]} changes that only take effect after a reboot:"
+    else
+        info "Applied a change that only takes effect after a reboot:"
+    fi
+    for _reason in "${REBOOT_REASONS[@]}"; do
+        info "  - ${_reason}"
+    done
+    info ""
+    info "  sudo reboot"
+    info ""
+    info "Then re-run this installer to finish the install."
+    exit 0
+fi
+
 # Vessel identity (boat name / MMSI / VHF call sign). Collected up front
-# alongside the ports prompt so the operator isn't called back
-# mid-install; applied as a ~/.signalk/baseDeltas.json seed right before
+# so the operator isn't called back mid-install, but deliberately AFTER
+# the reboot gates above (preflight cmdline patch, HALPI2 config.txt):
+# those exit the run ~1300 lines before this answer would be written to
+# disk, so asking first meant every reboot cycle discarded what was typed
+# and asked again on the next run. Nothing here is persisted until the
+# seed step, so a run that is going to exit for a reboot must not ask.
+# Applied as a ~/.signalk/baseDeltas.json seed right before
 # signalk-server's first start, which pre-fills the admin UI's Server →
 # Settings page. Env overrides for unattended runs: SIGNALK_VESSEL_NAME /
 # SIGNALK_VESSEL_MMSI / SIGNALK_VESSEL_CALLSIGN. Every field is optional
@@ -632,78 +743,6 @@ else
     ADMIN_UNSECURED=1
 fi
 
-# Detect a previous successful install. install.sh's last step (#18)
-# writes `bootstrappedAt` into ~/.signalk-doctor/last-good.json after
-# every successful pass; presence of that key means at least one full
-# bootstrap completed. We don't change the run sequence in that case —
-# every step is already idempotent — but we DO add a verification pass
-# at the end (step 18b) that reports what's healthy vs. still broken
-# after the idempotent re-run, so the operator can tell whether issues
-# were resolved.
-VERIFY_MODE=0
-if [[ -f "${DOCTOR_DATA}/last-good.json" ]] \
-    && grep -q '"bootstrappedAt"' "${DOCTOR_DATA}/last-good.json" 2>/dev/null; then
-    VERIFY_MODE=1
-    info "Existing install detected — running in verify mode."
-    info "Steps will be re-run idempotently; a summary at the end will tell you"
-    info "what was already healthy, what got fixed, and what still needs attention."
-fi
-
-# 2. Pre-flight
-section "Pre-flight"
-# Preflight may apply a kernel-cmdline patch that requires a reboot
-# (Pi memory controller). It signals that case with exit code 2 — its
-# own [OK]/[!] messages already told the operator what to do; we just
-# need to stop cleanly without flagging it as a generic preflight fail.
-set +e
-bash "$HERE/preflight.sh"
-PREFLIGHT_RC=$?
-set -e
-if (( PREFLIGHT_RC == 2 )); then
-    info "Preflight applied a kernel cmdline patch; reboot and re-run this installer."
-    exit 0
-elif (( PREFLIGHT_RC != 0 )); then
-    exit "$PREFLIGHT_RC"
-fi
-
-# 2c. Hat Labs HALPI2 carrier board (Raspberry Pi CM5). On a CM5 the helper
-# probes the HALPI2 controller at I2C 0x6d, installs the Hat Labs packages
-# (halpid, halpi2-firmware, blinkenlights-daemon, i2c-tools, can-utils),
-# writes the config.txt device-tree block, the can0 bitrate and i2c-dev at
-# boot, then asks for a reboot — same exit-and-re-run contract as the
-# preflight cmdline patch above: the re-run finds can0 / ttyAMA4 / halpid
-# live and the normal hardware detection picks them up. Runs the template
-# directly because ~/.local/bin/signalk-halpi2 is installed later (11a).
-# SIGNALK_HALPI2=no skips it; SIGNALK_HALPI2=yes skips its prompts. Details
-# and the manual recipe: docs/halpi2.md. Never fails the install: rc 1 =
-# declined/incomplete, warned and carried on. Runs only when sudo is usable.
-case "${SIGNALK_HALPI2:-auto}" in
-    no|NO|0|false|FALSE) ;;
-    *)
-        if [[ "$SUDO" = "MISSING" ]]; then
-            # detect: 0 confirmed, 1 candidate, 2 not a CM5
-            set +e
-            bash "$HERE/signalk-halpi2.tmpl" detect >/dev/null 2>&1
-            HALPI2_DETECT_RC=$?
-            set -e
-            if (( HALPI2_DETECT_RC == 0 || HALPI2_DETECT_RC == 1 )); then
-                warn "Compute Module 5 detected but sudo is unavailable — HALPI2 setup skipped."
-                warn "Run 'signalk halpi2 apply' with sudo later (docs/halpi2.md)."
-            fi
-        else
-            set +e
-            bash "$HERE/signalk-halpi2.tmpl" apply
-            HALPI2_RC=$?
-            set -e
-            if (( HALPI2_RC == 2 )); then
-                info "HALPI2 support applied; reboot and re-run this installer."
-                exit 0
-            elif (( HALPI2_RC != 0 )); then
-                warn "HALPI2 setup incomplete (see above); continuing with the install."
-            fi
-        fi
-        ;;
-esac
 
 # 2b. Privileged-port sysctl (only when standard web ports were chosen)
 #

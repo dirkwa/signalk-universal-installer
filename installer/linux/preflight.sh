@@ -431,9 +431,14 @@ offer_pi_cmdline_fix() {
         return 1
     fi
     ok "Patched $cmdline (backup at $backup)."
-    warn "Reboot required for the kernel to expose the memory controller:"
-    warn "  sudo reboot"
-    warn "Re-run the installer after the reboot."
+    # The reboot instruction itself is deliberately NOT printed here.
+    # install.sh defers it (REBOOT_PENDING) so it can be combined with the
+    # HALPI2 config.txt change into one reboot, and prints a single
+    # "Reboot required" block listing every pending reason. Printing
+    # "reboot now" here would contradict a run that is still going.
+    # Standalone runs of preflight.sh still see the ok() line above, and
+    # the caller's exit-2 contract is unchanged.
+    warn "A reboot is needed for the kernel to expose the memory controller."
     return 0
 }
 
