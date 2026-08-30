@@ -361,6 +361,23 @@ if [[ -f "$DOC" ]]; then
     # shellcheck disable=SC2016  # the -c body is sourced later, not expanded here
     real_lines=$(env -i HOME="$root" PATH="$bin:$PATH" bash -c '. "$1"; render_block' _ "$funcs" | grep -E '^(\[all\]|dt(param|overlay)=)' | sort)
     if [[ -n "$doc_lines" && "$doc_lines" == "$real_lines" ]]; then ok "docs/halpi2.md block matches render_block"; else miss "docs/halpi2.md block drifted from render_block"; diff <(echo "$doc_lines") <(echo "$real_lines") || true; fi
+
+    # The troubleshooting entry quotes the diagnostics verbatim so an operator
+    # can match the string their terminal printed. That only helps while the
+    # two agree, so pin it: any reword in the template must reach the docs.
+    # Markdown wraps prose, so compare against the doc with newlines folded to
+    # spaces — otherwise a quoted phrase split across two lines reads as absent.
+    doc_flat=$(tr '\n' ' ' <"$DOC" | tr -s ' ')
+    for phrase in "still absent after" "dtparam i2c_arm=on failed" \
+                  "did not answer at I2C 0x6d"; do
+        if grep -qF "$phrase" "$TMPL" && printf '%s' "$doc_flat" | grep -qF "$phrase"; then
+            ok "docs quote the live diagnostic: \"$phrase\""
+        elif grep -qF "$phrase" "$TMPL"; then
+            miss "\"$phrase\" is emitted by $TMPL but missing from $DOC"
+        else
+            miss "\"$phrase\" no longer emitted by $TMPL — docs now describe a dead string"
+        fi
+    done
 fi
 
 # 9. SIGNALK_HALPI2=no
