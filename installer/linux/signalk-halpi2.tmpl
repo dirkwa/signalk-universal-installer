@@ -611,7 +611,13 @@ cmd_apply() {
     # rebooted, halpid is not installed yet either (apply_packages runs further
     # down), and `apply` falls through to the "did not answer at 0x6d" prompt.
     # Answering yes is correct there — the documented candidate path.
-    ensure_i2c_tools || true
+    # Keep the result: without i2ctransfer the I2C rung cannot run at all, and
+    # the generic "did not answer at 0x6d / no ${HALPI2_I2C_DEV} yet" message
+    # below would contradict the warning ensure_i2c_tools just printed and send
+    # the operator looking at the bus or the board. halpid can still confirm on
+    # an existing install, so this only suppresses the misleading message.
+    local have_probe=1
+    ensure_i2c_tools || have_probe=0
     if [[ ! -e "$HALPI2_I2C_DEV" ]]; then
         if command -v dtparam >/dev/null 2>&1; then
             run_root dtparam i2c_arm=on 2>/dev/null || true
@@ -633,8 +639,13 @@ cmd_apply() {
     elif [[ "$mode" == yes ]]; then
         warn "controller did not answer at I2C 0x6d; continuing because SIGNALK_HALPI2=yes"
     else
-        warn "Compute Module 5 detected but the HALPI2 controller did not answer at I2C 0x6d"
-        warn "(no ${HALPI2_I2C_DEV} yet, or a different CM5 carrier)."
+        if (( have_probe )); then
+            warn "Compute Module 5 detected but the HALPI2 controller did not answer at I2C 0x6d"
+            warn "(no ${HALPI2_I2C_DEV} yet, or a different CM5 carrier)."
+        else
+            warn "Compute Module 5 detected but the controller probe could not run"
+            warn "(i2ctransfer missing — see above). This says nothing about the board."
+        fi
         if interactive; then
             local reply=""
             printf 'Continue with the HALPI2 setup anyway (Hat Labs packages, config.txt)? [y/N] ' >>"$TTY_OUT"

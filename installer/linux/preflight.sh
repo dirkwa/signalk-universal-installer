@@ -308,7 +308,11 @@ check_cgroups_v2() {
             warn "  sudo cp /boot/firmware/cmdline.txt /boot/firmware/cmdline.txt.bak.\$(date +%Y%m%d)"
             warn "  sudo sed -i 's/\\bcgroup_disable=memory\\b//; s/\$/ cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt"
             warn "  # /boot/firmware/cmdline.txt must remain a single line — verify: wc -l /boot/firmware/cmdline.txt"
-            warn "  sudo reboot"
+            # The trailing `sudo reboot` belongs to the MANUAL recipe above. When
+            # install.sh drives this it batches the reboot with the HALPI2
+            # config.txt change and prints one consolidated block, so printing
+            # "sudo reboot" here would contradict a run that keeps going.
+            [[ "${PREFLIGHT_DEFER_REBOOT_NOTICE:-0}" = "1" ]] || warn "  sudo reboot"
             if offer_pi_cmdline_fix strip-disable; then
                 # Patch landed but the running kernel still lacks the
                 # controller. Exit non-zero so the parent install.sh
@@ -322,7 +326,7 @@ check_cgroups_v2() {
             warn "  sudo cp /boot/firmware/cmdline.txt /boot/firmware/cmdline.txt.bak.\$(date +%Y%m%d)"
             warn "  sudo sed -i 's/\$/ cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt"
             warn "  # /boot/firmware/cmdline.txt must remain a single line — verify: wc -l /boot/firmware/cmdline.txt"
-            warn "  sudo reboot"
+            [[ "${PREFLIGHT_DEFER_REBOOT_NOTICE:-0}" = "1" ]] || warn "  sudo reboot"
             if offer_pi_cmdline_fix enable-only; then
                 exit 2
             fi

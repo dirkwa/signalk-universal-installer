@@ -540,7 +540,7 @@ section "Pre-flight"
 REBOOT_PENDING=0
 REBOOT_REASONS=()
 set +e
-bash "$HERE/preflight.sh"
+PREFLIGHT_DEFER_REBOOT_NOTICE=1 bash "$HERE/preflight.sh"
 PREFLIGHT_RC=$?
 set -e
 if (( PREFLIGHT_RC == 2 )); then

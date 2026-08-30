@@ -148,10 +148,16 @@ MAX-M8Q have no backup battery and lose their settings on every power cycle, so
 the rate and dynamic model have to be reapplied at each boot. Hat Labs packages
 that as `halos-ublox-config`, usable without a full HaLOS image:
 
+The repository is suited per Debian release; derive it rather than hardcoding
+`trixie`, and check the suite exists before adding the source:
+
 ```bash
+SUITE=$(. /etc/os-release && echo "$VERSION_CODENAME")
+curl -fsSL "https://apt.halos.fi/dists/${SUITE}-stable/Release" -o /dev/null \
+    || echo "no halos suite for ${SUITE} — skip this step"
 curl -fsSL https://apt.halos.fi/halos-apt-key.asc \
     | sudo gpg --dearmor -o /usr/share/keyrings/halos.gpg
-echo "deb [signed-by=/usr/share/keyrings/halos.gpg] https://apt.halos.fi trixie-stable main" \
+echo "deb [signed-by=/usr/share/keyrings/halos.gpg] https://apt.halos.fi ${SUITE}-stable main" \
     | sudo tee /etc/apt/sources.list.d/halos.list
 sudo apt update && sudo apt install -y halos-ublox-config
 ```

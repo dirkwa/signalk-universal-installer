@@ -104,6 +104,13 @@ else
     miss "preflight.sh still tells the operator to reboot and re-run"
 fi
 
+if grep -q 'PREFLIGHT_DEFER_REBOOT_NOTICE' "$PREFLIGHT" \
+    && grep -q 'PREFLIGHT_DEFER_REBOOT_NOTICE=1' "$INSTALL_SH"; then
+    ok "preflight suppresses its manual 'sudo reboot' line when install.sh drives it"
+else
+    miss "PREFLIGHT_DEFER_REBOOT_NOTICE not wired between install.sh and preflight.sh"
+fi
+
 if grep -q 'HALPI2_DEFER_REBOOT_NOTICE' "$TMPL" \
     && grep -q 'HALPI2_DEFER_REBOOT_NOTICE=1' "$INSTALL_SH"; then
     ok "HALPI2 template suppresses its own reboot notice when install.sh drives it"
