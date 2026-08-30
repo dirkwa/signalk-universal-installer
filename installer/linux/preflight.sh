@@ -435,14 +435,16 @@ offer_pi_cmdline_fix() {
         return 1
     fi
     ok "Patched $cmdline (backup at $backup)."
-    # The reboot instruction itself is deliberately NOT printed here.
-    # install.sh defers it (REBOOT_PENDING) so it can be combined with the
-    # HALPI2 config.txt change into one reboot, and prints a single
-    # "Reboot required" block listing every pending reason. Printing
-    # "reboot now" here would contradict a run that is still going.
-    # Standalone runs of preflight.sh still see the ok() line above, and
-    # the caller's exit-2 contract is unchanged.
     warn "A reboot is needed for the kernel to expose the memory controller."
+    # Under install.sh the reboot is DEFERRED (REBOOT_PENDING) so it can be
+    # batched with the HALPI2 config.txt change into one consolidated block,
+    # and telling the operator to reboot now would contradict a run that keeps
+    # going. Standalone preflight.sh has no such caller, so it must still say
+    # what to do — same gate as the two manual recipes in check_cgroups_v2().
+    if [[ "${PREFLIGHT_DEFER_REBOOT_NOTICE:-0}" != "1" ]]; then
+        warn "  sudo reboot"
+        warn "Re-run the installer after the reboot."
+    fi
     return 0
 }
 

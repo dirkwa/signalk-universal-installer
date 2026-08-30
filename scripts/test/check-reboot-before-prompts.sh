@@ -98,10 +98,21 @@ fi
 # 3. Exactly one reboot instruction reaches the operator. preflight.sh and the
 #    HALPI2 template each used to print their own "sudo reboot", which would
 #    now contradict a run that keeps going.
-if ! grep -qE 'Re-run the installer after the reboot' "$PREFLIGHT"; then
-    ok "preflight.sh no longer prints its own re-run instruction"
+# The instruction must be GATED, not deleted: standalone preflight.sh has no
+# caller to print a consolidated block, so removing it outright leaves the
+# operator told a reboot is needed with no idea what to run. An earlier draft
+# of this test asserted absence and so demanded exactly that regression.
+if grep -qE 'Re-run the installer after the reboot' "$PREFLIGHT"; then
+    ok "preflight.sh still has a standalone re-run instruction"
+    reexec=$(awk '/Re-run the installer after the reboot/{print NR}' "$PREFLIGHT" | head -1)
+    gate=$(awk '/PREFLIGHT_DEFER_REBOOT_NOTICE/{print NR}' "$PREFLIGHT" | awk -v n="$reexec" '$1 < n' | tail -1)
+    if [[ -n "$gate" ]] && (( reexec - gate <= 4 )); then
+        ok "the re-run instruction sits inside a defer-flag gate (line $gate guards $reexec)"
+    else
+        miss "re-run instruction at line $reexec is not gated by the defer flag"
+    fi
 else
-    miss "preflight.sh still tells the operator to reboot and re-run"
+    miss "preflight.sh lost its standalone re-run instruction entirely"
 fi
 
 # Run the guarded lines in both modes rather than grepping for the variable

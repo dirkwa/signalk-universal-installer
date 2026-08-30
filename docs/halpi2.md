@@ -153,13 +153,15 @@ The repository is suited per Debian release; derive it rather than hardcoding
 
 ```bash
 SUITE=$(. /etc/os-release && echo "$VERSION_CODENAME")
-curl -fsSL "https://apt.halos.fi/dists/${SUITE}-stable/Release" -o /dev/null \
-    || echo "no halos suite for ${SUITE} — skip this step"
-curl -fsSL https://apt.halos.fi/halos-apt-key.asc \
-    | sudo gpg --dearmor -o /usr/share/keyrings/halos.gpg
-echo "deb [signed-by=/usr/share/keyrings/halos.gpg] https://apt.halos.fi ${SUITE}-stable main" \
-    | sudo tee /etc/apt/sources.list.d/halos.list
-sudo apt update && sudo apt install -y halos-ublox-config
+if curl -fsSL "https://apt.halos.fi/dists/${SUITE}-stable/Release" -o /dev/null; then
+    curl -fsSL https://apt.halos.fi/halos-apt-key.asc \
+        | sudo gpg --dearmor -o /usr/share/keyrings/halos.gpg
+    echo "deb [signed-by=/usr/share/keyrings/halos.gpg] https://apt.halos.fi ${SUITE}-stable main" \
+        | sudo tee /etc/apt/sources.list.d/halos.list
+    sudo apt update && sudo apt install -y halos-ublox-config
+else
+    echo "no halos suite for ${SUITE} — skip step 4 and use the factory rate"
+fi
 ```
 
 It installs `configure-ublox-marine.service`, a `Before=gpsd.service` oneshot
