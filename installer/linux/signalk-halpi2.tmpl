@@ -474,6 +474,18 @@ ensure_i2c_tools() {
         || { run_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 \
              && run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq i2c-tools >/dev/null 2>&1; } \
         || { warn "could not install i2c-tools; the controller probe cannot run"; return 1; }
+    # Check the binary, not apt's exit status. `apt-get install -y -qq` exits 0
+    # when the package cannot be resolved from a stale index, and every stream
+    # here goes to /dev/null, so a silent no-op looks like success. The probe
+    # then fails at the `command -v i2ctransfer` gate in halpi2_i2c_version()
+    # and the operator is told the controller "did not answer at 0x6d" — the
+    # hardware blamed for a missing tool.
+    if ! command -v i2ctransfer >/dev/null 2>&1; then
+        warn "apt-get reported success but i2ctransfer is still missing;"
+        warn "the controller probe cannot run. Try 'sudo apt-get update' and"
+        warn "'sudo apt-get install i2c-tools', then re-run."
+        return 1
+    fi
 }
 
 # Returns 0 when something was installed/changed, 1 when nothing was.
@@ -579,12 +591,42 @@ cmd_apply() {
     # different CM5 carrier must not end up with halpid and the LED daemon.
     # Only i2c-tools (Debian) goes in first, for the probe. Enabling I2C live
     # (what raspi-config does) lets a first run probe before the config.txt
-    # reboot; dtparam is Raspberry Pi OS specific, so its absence only means
-    # "cannot confirm yet".
-    ensure_i2c_tools || true
-    if [[ ! -e "$HALPI2_I2C_DEV" ]] && command -v dtparam >/dev/null 2>&1; then
-        run_root dtparam i2c_arm=on 2>/dev/null || true
-        run_root modprobe i2c-dev 2>/dev/null || true
+    # reboot.
+    #
+    # The two steps are independent and must stay that way. `modprobe i2c-dev`
+    # creates the /dev/i2c-* node and works on any Debian; `dtparam i2c_arm=on`
+    # enables the bus itself and exists only where raspi-utils is installed.
+    # Gating the module load on `command -v dtparam` tied a plain-Debian-safe
+    # step to a Raspberry-Pi-OS-only binary for no reason, so run each under
+    # its own condition.
+    #
+    # dtparam runs FIRST where it exists: on a Pi it enables the bus and pulls
+    # in i2c-dev itself, which is what actually materialises /dev/i2c-1
+    # (verified on a CM5/HALPI2 — `dtparam i2c_arm=on` alone yields the node
+    # with no reboot). modprobe is the fallback for hosts without dtparam,
+    # where the bus is already on and only the module is missing.
+    #
+    # Neither can help if the firmware refuses the runtime change; there
+    # i2c_arm stays off until the config.txt block below is written and the box
+    # rebooted, halpid is not installed yet either (apply_packages runs further
+    # down), and `apply` falls through to the "did not answer at 0x6d" prompt.
+    # Answering yes is correct there — the documented candidate path.
+    # Keep the result: without i2ctransfer the I2C rung cannot run at all, and
+    # the generic "did not answer at 0x6d / no ${HALPI2_I2C_DEV} yet" message
+    # below would contradict the warning ensure_i2c_tools just printed and send
+    # the operator looking at the bus or the board. halpid can still confirm on
+    # an existing install, so this only suppresses the misleading message.
+    local have_probe=1
+    ensure_i2c_tools || have_probe=0
+    if [[ ! -e "$HALPI2_I2C_DEV" ]]; then
+        if command -v dtparam >/dev/null 2>&1; then
+            run_root dtparam i2c_arm=on 2>/dev/null || true
+        fi
+        [[ -e "$HALPI2_I2C_DEV" ]] || run_root modprobe i2c-dev 2>/dev/null || true
+        # Module load and device-node creation are not synchronous.
+        if [[ ! -e "$HALPI2_I2C_DEV" ]] && command -v udevadm >/dev/null 2>&1; then
+            run_root udevadm settle --timeout=5 2>/dev/null || true
+        fi
     fi
     local confirmed=0
     rc=0; detect_board root || rc=$?
@@ -597,8 +639,13 @@ cmd_apply() {
     elif [[ "$mode" == yes ]]; then
         warn "controller did not answer at I2C 0x6d; continuing because SIGNALK_HALPI2=yes"
     else
-        warn "Compute Module 5 detected but the HALPI2 controller did not answer at I2C 0x6d"
-        warn "(no ${HALPI2_I2C_DEV} yet, or a different CM5 carrier)."
+        if (( have_probe )); then
+            warn "Compute Module 5 detected but the HALPI2 controller did not answer at I2C 0x6d"
+            warn "(no ${HALPI2_I2C_DEV} yet, or a different CM5 carrier)."
+        else
+            warn "Compute Module 5 detected but the controller probe could not run"
+            warn "(i2ctransfer missing — see above). This says nothing about the board."
+        fi
         if interactive; then
             local reply=""
             printf 'Continue with the HALPI2 setup anyway (Hat Labs packages, config.txt)? [y/N] ' >>"$TTY_OUT"
@@ -649,9 +696,17 @@ cmd_apply() {
         return 1
     fi
     if (( reboot )); then
-        warn "Reboot required to load the device-tree changes:  sudo reboot"
-        warn "Then re-run the installer (or 'signalk hardware rescan') so can0 and"
-        warn "${HALPI2_RS485_DEV} are picked up."
+        # install.sh sets HALPI2_DEFER_REBOOT_NOTICE=1 because it batches this
+        # reboot with preflight's cmdline patch and prints one combined
+        # "Reboot required" block of its own. Standalone `signalk halpi2 apply`
+        # has no such caller, so it keeps printing the instruction itself.
+        if [[ "${HALPI2_DEFER_REBOOT_NOTICE:-0}" = "1" ]]; then
+            warn "Device-tree changes written; they load on the next reboot."
+        else
+            warn "Reboot required to load the device-tree changes:  sudo reboot"
+            warn "Then re-run the installer (or 'signalk hardware rescan') so can0 and"
+            warn "${HALPI2_RS485_DEV} are picked up."
+        fi
         if pkg_installed halpi2-firmware; then
             info "If apt just flashed new controller firmware it activates on the next full"
             info "power-off, not on reboot; do that when someone can reach the power button."

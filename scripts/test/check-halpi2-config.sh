@@ -176,6 +176,47 @@ else
     miss "candidate: Hat Labs packages/repo touched before confirmation"
 fi
 
+# 5b. no dtparam on PATH: the i2c-dev module must still be loaded. modprobe
+# creates the /dev/i2c-* node and works on any Debian; dtparam enables the
+# bus and exists only where raspi-utils is installed. The two ran under one
+# condition, tying a distro-agnostic step to a Raspberry-Pi-OS-only binary.
+reset_fs
+rm -f "$root/i2c-1"                 # node absent: this is what triggers the load
+mv "$bin/dtparam" "$root/dtparam.hidden"
+rc=$(run_apply SHIM_I2C=fail)
+mv "$root/dtparam.hidden" "$bin/dtparam"
+if grep -q "i2c-dev" "$LOG/modprobe" 2>/dev/null; then
+    ok "no dtparam: modprobe i2c-dev still attempted"
+else
+    miss "no dtparam: modprobe i2c-dev skipped — the node is never created"
+fi
+if [[ "$rc" == 1 ]]; then ok "no dtparam: still a clean candidate rc 1"; else miss "no dtparam: rc $rc (want 1)"; fi
+
+# 5b-bis. apt exits 0 but i2ctransfer never appears (stale index, or the
+# package silently unresolvable — apt-get install -y -qq returns 0 in that
+# case and every stream here is sent to /dev/null). The probe would then fail
+# at the `command -v i2ctransfer` gate and report "did not answer at 0x6d",
+# blaming the hardware for a missing tool. ensure_i2c_tools must catch it.
+reset_fs
+mv "$bin/i2ctransfer" "$root/i2ctransfer.hidden"
+rc=$(run_apply)
+mv "$root/i2ctransfer.hidden" "$bin/i2ctransfer"
+if grep -q "i2ctransfer is still missing" "$root/out"; then
+    ok "apt no-op: missing i2ctransfer reported, not silently probed"
+else
+    miss "apt no-op: no warning that i2ctransfer is absent"
+fi
+
+# 5c. the i2c node already exists → no module load needed, and no dtparam call
+reset_fs
+touch "$root/i2c-1"
+rc=$(run_apply SHIM_HALPID=active)
+if [[ ! -s "$LOG/modprobe" && ! -s "$LOG/dtparam" ]]; then
+    ok "i2c node present: neither modprobe nor dtparam called"
+else
+    miss "i2c node present: modprobe='$(cat "$LOG/modprobe" 2>/dev/null)' dtparam='$(cat "$LOG/dtparam" 2>/dev/null)'"
+fi
+
 # 6. candidate + SIGNALK_HALPI2=yes → applied
 reset_fs
 rc=$(run_apply SHIM_I2C=fail SIGNALK_HALPI2=yes)

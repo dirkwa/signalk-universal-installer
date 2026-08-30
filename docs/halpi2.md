@@ -17,9 +17,11 @@ signalk halpi2 connections   # create the NMEA 2000 / RS-485 Signal K connection
 
 Fresh install on a HALPI2:
 
-1. Run the usual one-liner. On a Compute Module 5 the installer probes the HALPI2 controller at I2C address `0x6d`, installs the Hat Labs packages, shows the proposed `config.txt` change, and stops with "reboot and re-run this installer".
+1. Run the usual one-liner. On a Compute Module 5 the installer probes the HALPI2 controller at I2C address `0x6d`, installs the Hat Labs packages, shows the proposed `config.txt` change, and stops with a "Reboot required" block listing what it wrote.
 2. `sudo reboot`.
 3. Run the one-liner again. `can0`, `/dev/ttyAMA4` and `halpid` are live now; the normal hardware detection records them, the server Quadlet gets `AddDevice=/dev/ttyAMA4` and the `/run/halpid` mount, and step 15c creates the two Signal K connections.
+
+One reboot, not two. Preflight may also need a kernel cmdline patch on a Pi (`cgroup_enable=memory cgroup_memory=1`, for the memory controller). It used to stop the run on the spot, so a fresh HALPI2 rebooted once for `cmdline.txt` and again for `config.txt`. Both patches now land in the same pass and the run exits once, listing every pending reason. The installer asks for vessel identity and admin credentials only *after* those gates, so a run that ends in a reboot never prompts — before, each cycle discarded what was typed and asked again.
 
 Existing install: `signalk halpi2 apply`, reboot, `signalk hardware rescan`, `signalk halpi2 connections`. `connections` creates a connection only when its device exists (`can0`, `/dev/ttyAMA4`), so it belongs after the reboot; a skipped one is reported and re-running adds it.
 
@@ -61,7 +63,7 @@ dtparam=sd=off
 2. `systemctl is-active halpid` → confirmed (`detectedVia: "halpid"`).
 3. `/dev/i2c-1` readable and `i2ctransfer -y 1 w1@0x6d 0x04 r4` answers → confirmed (`detectedVia: "i2c"`, `firmwareVersion` / `hardwareVersion` filled in). This is the same write-register-then-read-4-bytes transaction `halpid` uses.
 
-`signalk halpi2 apply` runs the same ladder after installing `i2c-tools`, and — when `/dev/i2c-1` is missing and `dtparam` exists (Raspberry Pi OS) — enables I2C live with `dtparam i2c_arm=on` + `modprobe i2c-dev` first, exactly what raspi-config does, so a first run can confirm the board before the reboot.
+`signalk halpi2 apply` runs the same ladder after installing `i2c-tools`, and when `/dev/i2c-1` is missing it brings I2C up live first, so a first run can confirm the board before the reboot. `modprobe i2c-dev` is what creates the device node and runs on any Debian; `dtparam i2c_arm=on` sets the pin mux and runs only where `dtparam` exists (Raspberry Pi OS). `dtparam` runs first where it exists, since on a Pi it brings in `i2c-dev` itself; `modprobe` is the fallback for hosts without it. Where the firmware cannot apply `i2c_arm` at runtime the bus stays off until the reboot, so a first run may still fall through to the candidate prompt.
 
 hardware.json then carries a `board` object and an `onboardSerial` list (shapes in [docs/hardware.md](hardware.md)). `onboardSerial` is listed whenever `/dev/ttyAMA4` exists (the node only appears once the `uart4-pi5` overlay is active), is opt-out like USB serial, and its `enabled` survives a re-detect. `board` is a hardware fact and is regenerated every time. The renderer passes the RS-485 port into the container (existence-guarded, like USB serial) and bind-mounts `/run/halpid` read-only while `halpid.sock` exists, so the `signalk-halpi` plugin from the App Store can read the controller's voltages, temperatures and state.
 
@@ -111,9 +113,97 @@ ls -l /dev/ttyAMA4                    # the RS-485 port
 systemctl status halpid blinkenlights-daemon
 ```
 
+## Optional GNSS HAT (gpsd on UART0)
+
+Not installed or configured by this installer — `signalk halpi2 apply` writes
+`uart4-pi5` for RS-485 and nothing for UART0. This is the manual recipe for a
+u-blox receiver (e.g. a Waveshare MAX-M8Q) on the HALPI2's UART0, contributed
+by a HALPI2 operator and checked against the packages it names.
+
+**1. Enable UART0 and free it from the serial console.** On Raspberry Pi OS,
+`sudo raspi-config` → *Interface Options* → *Serial Port* → login shell **no**,
+serial hardware **yes**. On plain Debian there is no `raspi-config`: add
+`enable_uart=1` to `/boot/firmware/config.txt` and remove any
+`console=serial0,115200` from `/boot/firmware/cmdline.txt` (keep it one line).
+Either way, reboot and confirm `/dev/ttyAMA0` exists and no getty holds it.
+
+**2. Install gpsd.**
+
+```bash
+sudo apt install -y gpsd gpsd-clients
+```
+
+**3. Point gpsd at the receiver.** Edit `/etc/default/gpsd`:
+
+```sh
+DEVICES="/dev/ttyAMA0"
+GPSD_OPTIONS="-s 115200"
+USBAUTO="true"
+```
+
+Set `-s 9600` instead if you skip step 4 — that is the receiver's factory rate.
+
+**4. Optional: marine auto-configuration.** ROM-based u-blox modules like the
+MAX-M8Q have no backup battery and lose their settings on every power cycle, so
+the rate and dynamic model have to be reapplied at each boot. Hat Labs packages
+that as `halos-ublox-config`, usable without a full HaLOS image:
+
+The repository is suited per Debian release; derive it rather than hardcoding
+`trixie`, and check the suite exists before adding the source:
+
+```bash
+SUITE=$(. /etc/os-release && echo "$VERSION_CODENAME")
+if curl -fsSL "https://apt.halos.fi/dists/${SUITE}-stable/Release" -o /dev/null; then
+    curl -fsSL https://apt.halos.fi/halos-apt-key.asc \
+        | sudo gpg --dearmor -o /usr/share/keyrings/halos.gpg
+    echo "deb [signed-by=/usr/share/keyrings/halos.gpg] https://apt.halos.fi ${SUITE}-stable main" \
+        | sudo tee /etc/apt/sources.list.d/halos.list
+    sudo apt update && sudo apt install -y halos-ublox-config
+else
+    echo "no halos suite for ${SUITE} — skip step 4 and use the factory rate"
+fi
+```
+
+It installs `configure-ublox-marine.service`, a `Before=gpsd.service` oneshot
+that reads `DEVICES` from `/etc/default/gpsd`, probes each device at 115200 and
+9600, and sets 115200 baud, a 100 ms rate (10 Hz) and dynamic model 5 (Sea).
+It **reads** `/etc/default/gpsd` and never writes it, so step 3 is still
+required. Verify with `systemctl status configure-ublox-marine.service` and
+`gpspipe -r -n 5`.
+
+This is a third-party repository run by the HaLOS developer, not by this
+project and not by Debian. Skipping step 4 leaves the receiver at its factory
+defaults (9600 baud, 1 Hz), which Signal K reads fine.
+
+**5. Add the Signal K connection.** Admin UI → *Server* → *Connections* → *Add*,
+data type NMEA 0183, source `gpsd`, host `localhost`, port `2947`.
+
+## Troubleshooting
+
+**"Compute Module 5 detected but the HALPI2 controller did not answer at I2C
+0x6d" on a genuine HALPI2.** Most often the probe tool is missing rather than
+the controller silent: `apply` installs `i2c-tools` first, but `apt-get install
+-y -qq` exits 0 even when it resolves nothing from a stale index, so a failed
+install used to pass unnoticed and the probe then failed on the absent
+`i2ctransfer`. It now says so explicitly; `sudo apt-get update && sudo apt-get
+install i2c-tools`, then re-run.
+
+Otherwise the bus itself is not up yet. `apply` enables it live before probing
+(`dtparam i2c_arm=on`, which on a Pi also brings in `i2c-dev`), but where the
+firmware refuses that at runtime the bus stays off until the `config.txt` block
+is written and the box rebooted — and `halpid` is not installed at that point
+either, so neither detection rung can answer. Answering `y` there is the
+documented candidate path and is correct on real HALPI2 hardware: the reboot
+brings up both rungs and the next run confirms the board via `halpid`.
+
+**Asked for boat name, MMSI and credentials on every run.** Older installers
+prompted before the reboot gates, and neither answer is written to disk until
+much later in the run, so each reboot cycle discarded them. Nothing is wrong
+with the answers — the run never got far enough to save them. Re-running after
+the final reboot keeps whatever the last completed run stored.
+
 ## Out of scope
 
 - Flashing controller firmware from this helper (`halpi flash`); the package postinst owns that.
-- The optional MAX-M8Q GNSS HAT (`dtparam=uart0=on`, gpsd on `/dev/ttyAMA0`, `halos-ublox-config`).
 - CAN-FD data-phase bitrates; the MCP2518FD runs classical CAN at 250 kbit/s for NMEA 2000, same as `docs/socketcan.md`.
 - HALPI (first generation, Pi 4 + SH-RPi) and other CM5 carriers.
