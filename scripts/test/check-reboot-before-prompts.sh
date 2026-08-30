@@ -122,6 +122,7 @@ fi
 # 4. Behavioural: the prompt guards themselves are unchanged — identity is
 #    still skipped when the data dir already carries it. (The reordering must
 #    not have weakened the existing idempotency.)
+# shellcheck disable=SC2016  # literal install.sh source text, no expansion wanted
 if grep -qE '\$HOME/\.signalk/baseDeltas\.json.*\|\|.*\$HOME/\.signalk/defaults\.json' "$INSTALL_SH"; then
     ok "vessel prompt still guarded on baseDeltas.json / defaults.json"
 else
