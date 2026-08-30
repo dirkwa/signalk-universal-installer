@@ -58,10 +58,10 @@ else
     else
         miss "HALPI2 step at line $halpi2_line is NOT before the prompts"
     fi
-    if (( exit_line < vessel_line )); then
+    if (( exit_line < vessel_line && exit_line < admin_line )); then
         ok "the reboot exit (line $exit_line) is taken before anything is asked"
     else
-        miss "reboot exit at line $exit_line comes after the vessel prompt ($vessel_line)"
+        miss "reboot exit at line $exit_line comes after a prompt (vessel $vessel_line, admin $admin_line)"
     fi
     if (( pf_line < halpi2_line )); then
         ok "preflight precedes the HALPI2 step (so both can batch into one exit)"
