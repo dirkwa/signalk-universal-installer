@@ -36,7 +36,7 @@ jobs:
       # scripts/render-index.ts. Installed once at the repo root: the staging
       # step runs against detached worktrees of the tag and of master, and
       # neither carries node_modules, so both point RENDER_ROOT here.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
