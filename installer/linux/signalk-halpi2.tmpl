@@ -670,25 +670,28 @@ cmd_apply() {
         if (( ! have_probe )); then
             warn "controller probe could not run (i2ctransfer missing — see above);"
             warn "continuing because SIGNALK_HALPI2=yes"
+        elif [[ -n "$bus_note" ]]; then
+            # The node never appeared, so no transaction went out. Claiming the
+            # controller "did not answer" would be false either way.
+            warn "controller probe could not run (${bus_note});"
+            warn "continuing because SIGNALK_HALPI2=yes"
         else
             warn "controller did not answer at I2C 0x6d; continuing because SIGNALK_HALPI2=yes"
-            if [[ -n "$bus_note" ]]; then
-                warn "(${bus_note})"
-            fi
         fi
     else
-        if (( have_probe )); then
+        if (( have_probe )) && [[ -z "$bus_note" ]]; then
+            # Node present and the transfer got nothing: the controller really
+            # was asked and stayed quiet.
             warn "Compute Module 5 detected but the HALPI2 controller did not answer at I2C 0x6d"
-            if [[ -n "$bus_note" ]]; then
-                # The bus never came up, so the controller was never asked.
-                # Say which step fell short instead of implying the board
-                # stayed silent — before the config.txt block below is written
-                # and the box rebooted, I2C may simply not be enabled yet.
-                warn "(${bus_note})"
-            else
-                warn "(${HALPI2_I2C_DEV} is present, so this is a silent controller"
-                warn "or a different CM5 carrier.)"
-            fi
+            warn "(${HALPI2_I2C_DEV} is present, so this is a silent controller"
+            warn "or a different CM5 carrier.)"
+        elif (( have_probe )); then
+            # The bus never came up, so no transaction went out. Naming the
+            # step that fell short beats implying the board stayed silent —
+            # before the config.txt block below is written and the box
+            # rebooted, I2C may simply not be enabled yet.
+            warn "Compute Module 5 detected but the controller probe could not run"
+            warn "(${bus_note})"
         else
             warn "Compute Module 5 detected but the controller probe could not run"
             warn "(i2ctransfer missing — see above). This says nothing about the board."

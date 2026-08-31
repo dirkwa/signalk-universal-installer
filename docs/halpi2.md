@@ -202,10 +202,10 @@ situations produce it:
 
 A third cause is possible but has not been observed in the field: `apply`
 installs `i2c-tools` for the probe, and `apt-get install -y -qq` exits 0 even
-when it resolves nothing from a stale index. A silent no-op there would leave
-`i2ctransfer` absent; the installer now checks for the binary and reports that
-separately rather than blaming the board. Fix with `sudo apt-get update &&
-sudo apt-get install i2c-tools`, then re-run.
+when it resolves nothing from a stale index. A silent no-op there leaves
+`i2ctransfer` absent, and the run says so rather than blaming the board —
+`controller probe could not run (i2ctransfer missing — see above)`. Fix with
+`sudo apt-get update && sudo apt-get install i2c-tools`, then re-run.
 
 **Asked for boat name, MMSI and credentials on every run.** Older installers
 prompted before the reboot gates, and neither answer is written to disk until

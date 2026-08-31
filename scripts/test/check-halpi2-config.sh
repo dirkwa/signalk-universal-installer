@@ -56,6 +56,16 @@ STATE="$root/state"; mkdir -p "$STATE"
 : >"$STATE/installed"           # dpkg-query answers "installed" for names in here
 
 shim() { printf '#!/usr/bin/env bash\n%s\n' "$2" >"$bin/$1"; chmod +x "$bin/$1"; }
+
+# Coreutils the template calls, symlinked into a private dir so a hermetic run
+# keeps working shell built-ins without inheriting the host's $PATH (and any
+# real i2ctransfer on it).
+HERMETIC_BIN="$root/hermetic-bin"; mkdir -p "$HERMETIC_BIN"
+for _u in bash sh cat cp mv rm ls grep sed awk tr head tail sort wc mkdir \
+          chmod chown install date mktemp printf id tee diff stat find dirname \
+          basename readlink uname; do
+    _p=$(command -v "$_u" 2>/dev/null) && ln -sf "$_p" "$HERMETIC_BIN/$_u"
+done
 # shellcheck disable=SC2016  # shim bodies are literal scripts; $vars expand when the shim runs
 {
 shim sudo       'exec "$@"'
@@ -95,8 +105,15 @@ EOF
 # run_apply <extra env assignments...>  → prints rc, output in $root/out
 run_apply() {
     set +e
+    local _path="$bin:$PATH"
+    # HERMETIC_PATH=1: $bin plus a private dir of symlinks to the coreutils the
+    # script needs, and nothing else. Used by cases asserting a tool is ABSENT:
+    # the default "$bin:$PATH" would let a host i2ctransfer satisfy `command -v`
+    # once the shim is hidden, silently testing the wrong branch on any box
+    # that really has i2c-tools.
+    [[ "${HERMETIC_PATH:-0}" = "1" ]] && _path="$bin:$HERMETIC_BIN"
     # shellcheck disable=SC2016  # the -c body is sourced later, not expanded here
-    env -i HOME="$root" PATH="$bin:$PATH" USER=tester \
+    env -i HOME="$root" PATH="$_path" USER=tester \
         DT_MODEL_FILE="$root/model-cm5" HALPI2_CONFIG_TXT="$root/config.txt" \
         HALPI2_ETC="$root" HALPI2_I2C_DEV="$root/i2c-1" HALPI2_RS485_DEV="$root/ttyAMA4" \
         HALPI2_OS_RELEASE="$root/os-release" HALPI2_TTY_IN=/nonexistent HALPI2_TTY_OUT=/nonexistent \
@@ -225,10 +242,11 @@ rc=$(run_apply SHIM_I2C=fail)
 mv "$root/dtparam.hidden" "$bin/dtparam"
 # shellcheck disable=SC2016  # shim body is a literal script; $vars expand when it runs
 shim modprobe 'echo "$*" >>"$LOG/modprobe"'
-if grep -q "still absent after" "$root/out"; then
-    ok "failed bus bring-up names the step, not just the board"
+if grep -q "still absent after" "$root/out" \
+    && ! grep -q "did not answer at I2C 0x6d" "$root/out"; then
+    ok "failed bus bring-up names the step and does not claim the board was asked"
 else
-    miss "no diagnostic for a bus that never came up: $(grep -i '0x6d' "$root/out" | head -2)"
+    miss "bus never came up but the run blamed the controller: $(grep -i '0x6d\|absent after' "$root/out" | head -2)"
 fi
 if grep -qE "dtparam absent|modprobe i2c-dev failed" "$root/out"; then
     ok "the diagnostic identifies which call fell short"
@@ -276,8 +294,13 @@ fi
 # controller, so saying it "did not answer" sends the operator after the board
 # for a missing package. The interactive branch already distinguishes these.
 reset_fs
+# Shadow rather than remove: run_apply appends the host PATH, so on a box that
+# really has i2c-tools (a HALPI2, or CI with it installed) deleting the shim
+# would fall through to the real binary and quietly test the wrong branch.
+# `command -v` must find nothing, so the shim has to be gone from $bin AND
+# unreachable on the host path — use a PATH with no host directories.
 mv "$bin/i2ctransfer" "$root/i2ctransfer.hidden"
-rc=$(run_apply SIGNALK_HALPI2=yes)
+rc=$(HERMETIC_PATH=1 run_apply SIGNALK_HALPI2=yes)
 mv "$root/i2ctransfer.hidden" "$bin/i2ctransfer"
 if grep -q "probe could not run" "$root/out" \
     && ! grep -q "controller did not answer at I2C 0x6d" "$root/out"; then
@@ -369,7 +392,8 @@ if [[ -f "$DOC" ]]; then
     # spaces — otherwise a quoted phrase split across two lines reads as absent.
     doc_flat=$(tr '\n' ' ' <"$DOC" | tr -s ' ')
     for phrase in "still absent after" "dtparam i2c_arm=on failed" \
-                  "did not answer at I2C 0x6d"; do
+                  "did not answer at I2C 0x6d" "probe could not run" \
+                  "i2ctransfer missing"; do
         if grep -qF "$phrase" "$TMPL" && printf '%s' "$doc_flat" | grep -qF "$phrase"; then
             ok "docs quote the live diagnostic: \"$phrase\""
         elif grep -qF "$phrase" "$TMPL"; then
