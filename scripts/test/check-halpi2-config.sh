@@ -57,14 +57,23 @@ STATE="$root/state"; mkdir -p "$STATE"
 
 shim() { printf '#!/usr/bin/env bash\n%s\n' "$2" >"$bin/$1"; chmod +x "$bin/$1"; }
 
-# Coreutils the template calls, symlinked into a private dir so a hermetic run
-# keeps working shell built-ins without inheriting the host's $PATH (and any
-# real i2ctransfer on it).
+# A PATH for cases that assert a tool is ABSENT. Mirrors the host's standard
+# bin dirs by symlink, MINUS the binaries under test — so the template still
+# has its coreutils (env, getent, findmnt, tee …) while `command -v
+# i2ctransfer` genuinely finds nothing. Hand-listing what to include drifts:
+# the first version omitted `env`, which ensure_i2c_tools calls, so its
+# apt-get invocations failed with "env: command not found" and the test
+# reached the right branch by the wrong route.
 HERMETIC_BIN="$root/hermetic-bin"; mkdir -p "$HERMETIC_BIN"
-for _u in bash sh cat cp mv rm ls grep sed awk tr head tail sort wc mkdir \
-          chmod chown install date mktemp printf id tee diff stat find dirname \
-          basename readlink uname; do
-    _p=$(command -v "$_u" 2>/dev/null) && ln -sf "$_p" "$HERMETIC_BIN/$_u"
+HERMETIC_EXCLUDE="i2ctransfer dtparam modprobe udevadm"
+for _d in /usr/local/bin /usr/local/sbin /usr/bin /usr/sbin /bin /sbin; do
+    [[ -d "$_d" ]] || continue
+    for _p in "$_d"/*; do
+        [[ -x "$_p" && ! -d "$_p" ]] || continue
+        _n=${_p##*/}
+        case " $HERMETIC_EXCLUDE " in *" $_n "*) continue ;; esac
+        [[ -e "$HERMETIC_BIN/$_n" ]] || ln -sf "$_p" "$HERMETIC_BIN/$_n"
+    done
 done
 # shellcheck disable=SC2016  # shim bodies are literal scripts; $vars expand when the shim runs
 {
@@ -392,7 +401,7 @@ if [[ -f "$DOC" ]]; then
     # spaces — otherwise a quoted phrase split across two lines reads as absent.
     doc_flat=$(tr '\n' ' ' <"$DOC" | tr -s ' ')
     for phrase in "still absent after" "dtparam i2c_arm=on failed" \
-                  "did not answer at I2C 0x6d" "probe could not run" \
+                  "probe at I2C 0x6d failed" "probe could not run" \
                   "i2ctransfer missing"; do
         if grep -qF "$phrase" "$TMPL" && printf '%s' "$doc_flat" | grep -qF "$phrase"; then
             ok "docs quote the live diagnostic: \"$phrase\""

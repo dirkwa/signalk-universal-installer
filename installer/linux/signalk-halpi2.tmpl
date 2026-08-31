@@ -676,15 +676,18 @@ cmd_apply() {
             warn "controller probe could not run (${bus_note});"
             warn "continuing because SIGNALK_HALPI2=yes"
         else
-            warn "controller did not answer at I2C 0x6d; continuing because SIGNALK_HALPI2=yes"
+            warn "controller probe at I2C 0x6d failed; continuing because SIGNALK_HALPI2=yes"
         fi
     else
         if (( have_probe )) && [[ -z "$bus_note" ]]; then
-            # Node present and the transfer got nothing: the controller really
-            # was asked and stayed quiet.
-            warn "Compute Module 5 detected but the HALPI2 controller did not answer at I2C 0x6d"
-            warn "(${HALPI2_I2C_DEV} is present, so this is a silent controller"
-            warn "or a different CM5 carrier.)"
+            # The node exists and i2ctransfer ran, so something was asked. What
+            # came back is not distinguishable here: halpi2_i2c_version returns
+            # 1 for an unreadable node, a transfer error and a malformed reply
+            # alike, so name the observable state and stop short of declaring
+            # the controller silent.
+            warn "Compute Module 5 detected but the HALPI2 controller probe at I2C 0x6d failed"
+            warn "(${HALPI2_I2C_DEV} is present, so the bus is up: an unresponsive"
+            warn "controller, a wiring fault, or a different CM5 carrier.)"
         elif (( have_probe )); then
             # The bus never came up, so no transaction went out. Naming the
             # step that fell short beats implying the board stayed silent —

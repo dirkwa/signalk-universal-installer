@@ -196,9 +196,12 @@ situations produce it:
   i2c-dev`), and now reports whether that worked — e.g. `/dev/i2c-1 still
   absent after: dtparam i2c_arm=on failed`. `halpid` is not installed at this
   point either, so neither detection rung can answer.
-- **The bus is up and the controller stayed silent** — `/dev/i2c-1` exists and
-  the transfer got nothing. That is a genuinely unresponsive controller or a
-  different CM5 carrier, and the message says so.
+- **The bus is up and the probe failed** — `controller probe at I2C 0x6d
+  failed`, with `/dev/i2c-1` present. Something was asked and the reply was
+  not a valid four-byte version, but the installer cannot tell an unresponsive
+  controller from a wiring fault or a different CM5 carrier: the probe returns
+  the same result for all three. Check `sudo i2ctransfer -y 1 w1@0x6d 0x04 r4`
+  by hand.
 
 A third cause is possible but has not been observed in the field: `apply`
 installs `i2c-tools` for the probe, and `apt-get install -y -qq` exits 0 even
