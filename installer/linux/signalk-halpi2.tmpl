@@ -680,14 +680,15 @@ cmd_apply() {
         fi
     else
         if (( have_probe )) && [[ -z "$bus_note" ]]; then
-            # The node exists and i2ctransfer ran, so something was asked. What
-            # came back is not distinguishable here: halpi2_i2c_version returns
-            # 1 for an unreadable node, a transfer error and a malformed reply
-            # alike, so name the observable state and stop short of declaring
-            # the controller silent.
+            # The node exists, so the bus is up — that is the only thing
+            # established here. halpi2_i2c_version returns 1 for an unreadable
+            # node, an i2ctransfer that failed before emitting anything, and a
+            # reply that is not four fields, so no claim can be made about
+            # whether the controller was reached, let alone that it stayed
+            # silent. Name the observable state and stop.
             warn "Compute Module 5 detected but the HALPI2 controller probe at I2C 0x6d failed"
-            warn "(${HALPI2_I2C_DEV} is present, so the bus is up: an unresponsive"
-            warn "controller, a wiring fault, or a different CM5 carrier.)"
+            warn "(${HALPI2_I2C_DEV} is present, so the bus is up. Run"
+            warn "'sudo i2ctransfer -y ${HALPI2_I2C_DEV##*i2c-} w1@0x6d 0x04 r4' to see the error.)"
         elif (( have_probe )); then
             # The bus never came up, so no transaction went out. Naming the
             # step that fell short beats implying the board stayed silent —
