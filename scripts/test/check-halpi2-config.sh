@@ -56,6 +56,25 @@ STATE="$root/state"; mkdir -p "$STATE"
 : >"$STATE/installed"           # dpkg-query answers "installed" for names in here
 
 shim() { printf '#!/usr/bin/env bash\n%s\n' "$2" >"$bin/$1"; chmod +x "$bin/$1"; }
+
+# A PATH for cases that assert a tool is ABSENT. Mirrors the host's standard
+# bin dirs by symlink, MINUS the binaries under test — so the template still
+# has its coreutils (env, getent, findmnt, tee …) while `command -v
+# i2ctransfer` genuinely finds nothing. Hand-listing what to include drifts:
+# the first version omitted `env`, which ensure_i2c_tools calls, so its
+# apt-get invocations failed with "env: command not found" and the test
+# reached the right branch by the wrong route.
+HERMETIC_BIN="$root/hermetic-bin"; mkdir -p "$HERMETIC_BIN"
+HERMETIC_EXCLUDE="i2ctransfer dtparam modprobe udevadm"
+for _d in /usr/local/bin /usr/local/sbin /usr/bin /usr/sbin /bin /sbin; do
+    [[ -d "$_d" ]] || continue
+    for _p in "$_d"/*; do
+        [[ -x "$_p" && ! -d "$_p" ]] || continue
+        _n=${_p##*/}
+        case " $HERMETIC_EXCLUDE " in *" $_n "*) continue ;; esac
+        [[ -e "$HERMETIC_BIN/$_n" ]] || ln -sf "$_p" "$HERMETIC_BIN/$_n"
+    done
+done
 # shellcheck disable=SC2016  # shim bodies are literal scripts; $vars expand when the shim runs
 {
 shim sudo       'exec "$@"'
@@ -65,7 +84,9 @@ shim systemctl  'echo "$*" >>"$LOG/systemctl"; case "$*" in "is-active --quiet h
 shim usermod    'echo "$*" >>"$LOG/usermod"'
 shim findmnt    'echo "${SHIM_ROOTDEV:-/dev/nvme0n1p2}"'
 shim i2ctransfer 'echo "$*" >>"$LOG/i2ctransfer"; [[ "${SHIM_I2C:-ok}" == ok ]] || exit 1; case "$4" in 0x04) echo "0x03 0x03 0x01 0xff";; 0x03) echo "0x02 0x00 0x00 0xff";; esac'
+# shellcheck disable=SC2016  # shim bodies are literal scripts; $vars expand when they run
 shim dtparam    'echo "$*" >>"$LOG/dtparam"'
+# shellcheck disable=SC2016
 shim modprobe   'echo "$*" >>"$LOG/modprobe"'
 shim curl       '[[ "${SHIM_CURL_FAIL:-0}" == 1 ]] && exit 22; echo "-----BEGIN PGP PUBLIC KEY BLOCK-----FAKE-----END PGP PUBLIC KEY BLOCK-----"'
 }
@@ -93,8 +114,15 @@ EOF
 # run_apply <extra env assignments...>  → prints rc, output in $root/out
 run_apply() {
     set +e
+    local _path="$bin:$PATH"
+    # HERMETIC_PATH=1: $bin plus a private dir of symlinks to the coreutils the
+    # script needs, and nothing else. Used by cases asserting a tool is ABSENT:
+    # the default "$bin:$PATH" would let a host i2ctransfer satisfy `command -v`
+    # once the shim is hidden, silently testing the wrong branch on any box
+    # that really has i2c-tools.
+    [[ "${HERMETIC_PATH:-0}" = "1" ]] && _path="$bin:$HERMETIC_BIN"
     # shellcheck disable=SC2016  # the -c body is sourced later, not expanded here
-    env -i HOME="$root" PATH="$bin:$PATH" USER=tester \
+    env -i HOME="$root" PATH="$_path" USER=tester \
         DT_MODEL_FILE="$root/model-cm5" HALPI2_CONFIG_TXT="$root/config.txt" \
         HALPI2_ETC="$root" HALPI2_I2C_DEV="$root/i2c-1" HALPI2_RS485_DEV="$root/ttyAMA4" \
         HALPI2_OS_RELEASE="$root/os-release" HALPI2_TTY_IN=/nonexistent HALPI2_TTY_OUT=/nonexistent \
@@ -207,6 +235,89 @@ else
     miss "apt no-op: no warning that i2ctransfer is absent"
 fi
 
+# 5b-ter. When the bus cannot be brought up, the warning must name the step
+# that fell short. Every call in the live-enable path is best-effort
+# (`2>/dev/null || true`), which made a failed enable indistinguishable from a
+# silent controller: a board with i2c-tools already present still reached
+# "did not answer at 0x6d" with nothing saying whether /dev/i2c-1 ever
+# appeared — the ambiguity that made the 2026-08 field report undiagnosable.
+reset_fs
+rm -f "$root/i2c-1"
+mv "$bin/dtparam" "$root/dtparam.hidden"
+printf '#!/usr/bin/env bash
+exit 1
+' >"$bin/modprobe"   # node never appears
+rc=$(run_apply SHIM_I2C=fail)
+mv "$root/dtparam.hidden" "$bin/dtparam"
+# shellcheck disable=SC2016  # shim body is a literal script; $vars expand when it runs
+shim modprobe 'echo "$*" >>"$LOG/modprobe"'
+if grep -q "still absent after" "$root/out" \
+    && ! grep -q "did not answer at I2C 0x6d" "$root/out"; then
+    ok "failed bus bring-up names the step and does not claim the board was asked"
+else
+    miss "bus never came up but the run blamed the controller: $(grep -i '0x6d\|absent after' "$root/out" | head -2)"
+fi
+if grep -qE "dtparam absent|modprobe i2c-dev failed" "$root/out"; then
+    ok "the diagnostic identifies which call fell short"
+else
+    miss "diagnostic present but does not say which step failed"
+fi
+
+# 5b-quater. dtparam present but FAILING is a different branch from dtparam
+# absent, and it is the likelier one on a stock HALPI2: the binary ships with
+# Raspberry Pi OS, and i2c_arm only reaches config.txt via the block `apply`
+# itself writes.
+reset_fs
+rm -f "$root/i2c-1"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/dtparam"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/modprobe"
+rc=$(run_apply SHIM_I2C=fail)
+# shellcheck disable=SC2016  # shim bodies are literal scripts; $vars expand when they run
+shim dtparam  'echo "$*" >>"$LOG/dtparam"'
+# shellcheck disable=SC2016
+shim modprobe 'echo "$*" >>"$LOG/modprobe"'
+if grep -q "dtparam i2c_arm=on failed" "$root/out"; then
+    ok "a failing dtparam is reported as failed, not as absent"
+else
+    miss "dtparam failure not distinguished: $(grep -i 'absent after' "$root/out" | head -1)"
+fi
+
+# 5b-quinquies. SIGNALK_HALPI2=yes takes its own branch, and unattended runs
+# are where the diagnostic matters most — nobody is watching.
+reset_fs
+rm -f "$root/i2c-1"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/dtparam"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/modprobe"
+rc=$(run_apply SHIM_I2C=fail SIGNALK_HALPI2=yes)
+# shellcheck disable=SC2016  # shim bodies are literal scripts; $vars expand when they run
+shim dtparam  'echo "$*" >>"$LOG/dtparam"'
+# shellcheck disable=SC2016
+shim modprobe 'echo "$*" >>"$LOG/modprobe"'
+if grep -q "still absent after" "$root/out"; then
+    ok "SIGNALK_HALPI2=yes keeps the bus diagnostic"
+else
+    miss "unattended mode lost the diagnostic: $(grep -i '0x6d' "$root/out" | head -1)"
+fi
+
+# 5b-sexies. Unattended mode with no probe tool: nothing was ever asked of the
+# controller, so saying it "did not answer" sends the operator after the board
+# for a missing package. The interactive branch already distinguishes these.
+reset_fs
+# Shadow rather than remove: run_apply appends the host PATH, so on a box that
+# really has i2c-tools (a HALPI2, or CI with it installed) deleting the shim
+# would fall through to the real binary and quietly test the wrong branch.
+# `command -v` must find nothing, so the shim has to be gone from $bin AND
+# unreachable on the host path — use a PATH with no host directories.
+mv "$bin/i2ctransfer" "$root/i2ctransfer.hidden"
+rc=$(HERMETIC_PATH=1 run_apply SIGNALK_HALPI2=yes)
+mv "$root/i2ctransfer.hidden" "$bin/i2ctransfer"
+if grep -q "probe could not run" "$root/out" \
+    && ! grep -q "controller did not answer at I2C 0x6d" "$root/out"; then
+    ok "unattended + no i2ctransfer: reports the missing tool, not a silent board"
+else
+    miss "unattended run blamed the controller for a missing tool: $(grep -i '0x6d\|probe could not' "$root/out" | head -2)"
+fi
+
 # 5c. the i2c node already exists → no module load needed, and no dtparam call
 reset_fs
 touch "$root/i2c-1"
@@ -282,6 +393,24 @@ if [[ -f "$DOC" ]]; then
     # shellcheck disable=SC2016  # the -c body is sourced later, not expanded here
     real_lines=$(env -i HOME="$root" PATH="$bin:$PATH" bash -c '. "$1"; render_block' _ "$funcs" | grep -E '^(\[all\]|dt(param|overlay)=)' | sort)
     if [[ -n "$doc_lines" && "$doc_lines" == "$real_lines" ]]; then ok "docs/halpi2.md block matches render_block"; else miss "docs/halpi2.md block drifted from render_block"; diff <(echo "$doc_lines") <(echo "$real_lines") || true; fi
+
+    # The troubleshooting entry quotes the diagnostics verbatim so an operator
+    # can match the string their terminal printed. That only helps while the
+    # two agree, so pin it: any reword in the template must reach the docs.
+    # Markdown wraps prose, so compare against the doc with newlines folded to
+    # spaces — otherwise a quoted phrase split across two lines reads as absent.
+    doc_flat=$(tr '\n' ' ' <"$DOC" | tr -s ' ')
+    for phrase in "still absent after" "dtparam i2c_arm=on failed" \
+                  "probe at I2C 0x6d failed" "probe could not run" \
+                  "i2ctransfer missing"; do
+        if grep -qF "$phrase" "$TMPL" && printf '%s' "$doc_flat" | grep -qF "$phrase"; then
+            ok "docs quote the live diagnostic: \"$phrase\""
+        elif grep -qF "$phrase" "$TMPL"; then
+            miss "\"$phrase\" is emitted by $TMPL but missing from $DOC"
+        else
+            miss "\"$phrase\" no longer emitted by $TMPL — docs now describe a dead string"
+        fi
+    done
 fi
 
 # 9. SIGNALK_HALPI2=no
