@@ -210,6 +210,48 @@ else
     fail=1
 fi
 
+# --- docs/installation.md must not drift from the implementation ----------
+# The installation guide repeats three values owned by preflight.sh: the
+# required size, the drop-in filename the remedy writes, and the podman key
+# it sets. A reader following a stale figure configures the wrong thing, so
+# assert the doc agrees with the code rather than trusting them to be edited
+# together.
+DOCS=${DOCS:-docs/installation.md}
+if [[ -f "$DOCS" ]]; then
+    # The default, as preflight.sh defines it — not the value this test may
+    # have overridden per-case above.
+    # shellcheck disable=SC2016  # literal preflight.sh source text, no expansion wanted
+    doc_required=$(sed -n 's/^STAGING_REQUIRED_MB=${STAGING_REQUIRED_MB:-\([0-9]*\)}.*/\1/p' "$PREFLIGHT")
+    if [[ -n "$doc_required" ]] && grep -q "${doc_required} MB" "$DOCS"; then
+        echo "[ OK ] docs quote the STAGING_REQUIRED_MB default (${doc_required} MB)"
+    else
+        echo "[FAIL] docs do not quote preflight's STAGING_REQUIRED_MB default (${doc_required:-unset})" >&2
+        fail=1
+    fi
+
+    # The drop-in filename and the podman key must match the printed remedy.
+    for token in '99-signalk-image-copy-tmp-dir.conf' 'containers.conf.d' 'image_copy_tmp_dir'; do
+        if grep -qF "$token" "$PREFLIGHT" && grep -qF "$token" "$DOCS"; then
+            echo "[ OK ] docs and preflight agree on '$token'"
+        else
+            echo "[FAIL] '$token' missing from preflight or docs (they must agree)" >&2
+            fail=1
+        fi
+    done
+
+    # The old advice must not survive anywhere: it named the wrong mechanism
+    # (shrinking a tmpfs cap) for this failure.
+    if grep -qE 'tmp\.mount\.d|TMPFS_RECOMMEND_PCT|TMPFS_WARN_MAX_RAM_MB' "$DOCS"; then
+        echo "[FAIL] docs still carry the superseded tmpfs-cap advice" >&2
+        fail=1
+    else
+        echo "[ OK ] docs carry no leftover tmpfs-cap advice"
+    fi
+else
+    echo "[FAIL] $DOCS not found (run from repo root)" >&2
+    fail=1
+fi
+
 if (( fail )); then
     echo "[ERR] check_image_staging_space decision table has regressions" >&2
     exit 1

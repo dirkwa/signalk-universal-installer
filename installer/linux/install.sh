@@ -529,7 +529,34 @@ fi
 # Creating it is deferred to step 9 — preflight's check walks up to the
 # nearest existing ancestor, so the filesystem it measures is the same one
 # either way, and a failed preflight leaves no stray directory behind.
-SK_STAGING_DIR="${HOME}/.local/share/containers/tmp"
+#
+# Sited next to the container store rather than at a fixed path under $HOME:
+# the point is to share a filesystem with the store, so that a store with
+# room for the image has room to unpack it. Ask podman for its GraphRoot,
+# which reports the effective store — it follows storage.conf's
+# rootless_storage_path (the only key that moves a rootless store; see
+# scripts/test/check-unwedge-podman.sh) and XDG_DATA_HOME, neither of which a
+# fixed ~/.local/share path would honour. On a host that moved its store to a
+# roomy disk, a fixed path could fail preflight for lack of space on a
+# filesystem the pull was never going to touch.
+#
+# Falls back to podman's own default layout when podman can't answer. That is
+# the normal case on a fresh host: this runs before section "Podman" installs
+# it, so the query returns nothing and the fallback applies — and it resolves
+# to the same $XDG_DATA_HOME/containers parent that podman will then use for
+# its own default graphroot, so the two agree. It matches the XDG_DATA_HOME
+# convention podman_storage_root() already uses in preflight.sh. On a re-run
+# over an existing install podman does answer, and a moved store is followed.
+# SK_STAGING_DIR may also be set in the environment to override both.
+if [[ -z "${SK_STAGING_DIR:-}" ]]; then
+    SK_GRAPHROOT=$(timeout 15 podman info --format '{{.Store.GraphRoot}}' 2>/dev/null || true)
+    if [[ -n "$SK_GRAPHROOT" ]]; then
+        # GraphRoot is …/containers/storage; stage in a sibling …/containers/tmp.
+        SK_STAGING_DIR="$(dirname "$SK_GRAPHROOT")/tmp"
+    else
+        SK_STAGING_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/containers/tmp"
+    fi
+fi
 
 # 2. Pre-flight
 section "Pre-flight"

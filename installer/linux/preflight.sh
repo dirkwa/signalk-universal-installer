@@ -23,7 +23,7 @@ REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
 # each blob into a container_images_storage* dir under its staging path
 # before committing the layer to the store, deleting each one as it goes —
 # so this bounds the PEAK, not the sum of the image sizes. Measured
-# 2026-09-14 pulling into a clean store: ghcr.io/dirkwa/signalk-server:dirkwa
+# 2026-09-13 pulling into a clean store: ghcr.io/dirkwa/signalk-server:dirkwa
 # (1.4 GB image) peaked at 435.6 MB, signalk-doctor-server (297 MB image) at
 # 96 MB. Both are rolling tags, so those are the rationale for this threshold
 # when it was set, not standing facts about the images — re-measure before
