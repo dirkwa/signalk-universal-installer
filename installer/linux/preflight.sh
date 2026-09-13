@@ -172,6 +172,15 @@ _staging_dir() {
 # and `df` on a missing path errors instead of reporting its parent.
 _dir_avail_mb() {
     local d=$1
+    [[ -n "$d" ]] || return 0
+    # Anchor a relative path before walking up. STAGING_DIR_HINT comes from
+    # install.sh's SK_STAGING_DIR, which an operator can set to anything; on a
+    # relative value the walk below strips to a single bare segment and then
+    # stops (${d%/*} of "cache" is "cache"), returning empty. That reads as
+    # "could not measure" and skips the check, while install.sh goes on to
+    # create and pull into that very path — the shortfall this exists to catch
+    # would then surface mid-pull.
+    [[ "$d" == /* ]] || d="$PWD/$d"
     while [[ -n "$d" && ! -d "$d" ]]; do
         local parent=${d%/*}
         [[ "$parent" == "$d" ]] && break

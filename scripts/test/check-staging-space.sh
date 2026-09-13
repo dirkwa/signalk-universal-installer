@@ -53,6 +53,7 @@ fail() { echo "PREFLIGHT_FAIL: $*"; return 1; }
 # preflight.sh. Save them now so the _staging_dir assertions at the end
 # exercise the shipped implementation, not a leftover stub.
 eval "real_staging_dir() $(declare -f _staging_dir | tail -n +2)"
+eval "real_dir_avail_mb() $(declare -f _dir_avail_mb | tail -n +2)"
 
 # Drive one case: stub the two host reads, capture output, assert verdict.
 #   expect = "ok" | "fail" | "warn"
@@ -210,6 +211,20 @@ else
     fail=1
 fi
 
+# A relative staging path must still be measured. SK_STAGING_DIR is settable
+# from the environment, and a relative value made the ancestor walk stop on a
+# bare segment and return empty — which reads as "could not measure" and skips
+# the check, while install.sh creates and pulls into that same path. Empty
+# input stays empty: there is genuinely nothing to measure.
+rel_avail=$(real_dir_avail_mb "cache/podman" 2>/dev/null || true)
+empty_avail=$(real_dir_avail_mb "" 2>/dev/null || true)
+if [[ "$rel_avail" =~ ^[0-9]+$ ]] && [[ -z "$empty_avail" ]]; then
+    echo "[ OK ] a relative staging path is measured, an empty one is not"
+else
+    echo "[FAIL] relative path handling wrong -> relative='${rel_avail:-<empty>}' empty='${empty_avail:-<empty>}'" >&2
+    fail=1
+fi
+
 # --- the store resolver must follow a relocated store ---------------------
 # The images land on the container store's filesystem, which storage.conf's
 # rootless_storage_path can move off $HOME's disk. podman_storage_root must
@@ -336,15 +351,39 @@ if [[ -f "$DOCS" ]]; then
         fail=1
     fi
 
-    # The drop-in filename and the podman key must match the printed remedy.
-    for token in '99-signalk-image-copy-tmp-dir.conf' 'containers.conf.d' 'image_copy_tmp_dir'; do
-        if grep -qF "$token" "$PREFLIGHT" && grep -qF "$token" "$DOCS"; then
-            echo "[ OK ] docs and preflight agree on '$token'"
-        else
-            echo "[FAIL] '$token' missing from preflight or docs (they must agree)" >&2
-            fail=1
-        fi
-    done
+    # Compare the whole remedy, not a few tokens: the doc block and the
+    # printed remedy are the same four commands, and a token check would
+    # miss a changed redirect, a renamed key, or a reordered step — exactly
+    # the semantic drift that leaves a reader running a command that no
+    # longer matches what the installer does.
+    #
+    # Normalise both sides to bare command lines: strip the doc's fence and
+    # indentation, strip preflight's `err "` wrapper and its indentation, and
+    # expand the $HOME preflight interpolates so the two are comparable.
+    # shellcheck disable=SC2016  # literal sed patterns, no expansion wanted
+    doc_cmds=$(sed -n '/^   ```sh$/,/^   ```$/p' "$DOCS" \
+        | sed -e '1d' -e '$d' -e 's/^   //' -e 's/[[:space:]]*#.*$//' \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d')
+    pf_cmds=$(sed -n 's/^[[:space:]]*err "[[:space:]]*\(.*\)"$/\1/p' "$PREFLIGHT" \
+        | sed -e 's/\\\\n/\\n/g' -e 's/\\"/"/g' -e 's/\\\\$/\\/' \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d')
+
+    # Keep only the lines of the remedy block: from the mkdir to the verify.
+    doc_block=$(sed -n '/^mkdir -p/,$p' <<<"$doc_cmds")
+    # preflight prefixes the last line with "Verify:"; strip that before
+    # taking the range, so both sides end on the same command.
+    # shellcheck disable=SC2001  # sed is the pipeline stage here, not a substring swap
+    pf_block=$(sed 's/^Verify:[[:space:]]*//' <<<"$pf_cmds" \
+        | sed -n '/^mkdir -p/,/^podman info/p')
+
+    if [[ -n "$doc_block" ]] && [[ "$doc_block" == "$pf_block" ]]; then
+        echo "[ OK ] docs remedy matches preflight's printed remedy verbatim"
+    else
+        echo "[FAIL] docs remedy has drifted from preflight's printed remedy" >&2
+        echo "--- docs ---" >&2; printf '%s\n' "$doc_block" >&2
+        echo "--- preflight ---" >&2; printf '%s\n' "$pf_block" >&2
+        fail=1
+    fi
 
     # The old advice must not survive anywhere: it named the wrong mechanism
     # (shrinking a tmpfs cap) for this failure.
