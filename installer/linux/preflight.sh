@@ -19,18 +19,15 @@ detect_os
 
 REQUIRED_RAM_MB=${REQUIRED_RAM_MB:-2048}
 REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
-# Above this much RAM, a tmpfs /tmp isn't worth mentioning — there's
-# headroom for both the RAM-backed /tmp and the container stack. At or
-# below it (the 4 GB / 8 GB Pi4/Pi5 fleet) check_tmp_on_tmpfs prints a
-# purely informational heads-up (no problem has been reported; it's a
-# "you might want to know" note, not a warning). Overridable.
-TMPFS_WARN_MAX_RAM_MB=${TMPFS_WARN_MAX_RAM_MB:-8192}
-# Percentage of RAM the heads-up suggests capping a tmpfs /tmp at (the OS
-# default is 50%). Shrinking the cap keeps /tmp in RAM — no SSD/SD-card
-# write wear, unlike moving it to disk — while bounding how much RAM a
-# runaway /tmp can ever consume. 20% of 8 GB is ~1.6 GB, ample for the
-# installer's tempfiles while leaving the rest for the containers.
-TMPFS_RECOMMEND_PCT=${TMPFS_RECOMMEND_PCT:-20}
+# Free space the image-staging directory needs. `podman pull` decompresses
+# each blob into a container_images_storage* dir under its staging path
+# before committing the layer to the store, deleting each one as it goes —
+# so this bounds the PEAK, not the sum of the image sizes. Measured on
+# ghcr.io/dirkwa/signalk-server:dirkwa (1.4 GB image) pulling into a clean
+# store: 435.6 MB peak. signalk-doctor-server (297 MB image) peaked at
+# 96 MB. 768 MB leaves margin above the measured worst case without
+# demanding more than a small box can give.
+STAGING_REQUIRED_MB=${STAGING_REQUIRED_MB:-768}
 # signalk-server's HTTP port (and HTTPS, once TLS is enabled) is chosen
 # by install.sh and exported as SK_HTTP_PORT / SK_HTTPS_PORT. Default to
 # the standard web ports when run standalone. The HTTPS port is only
@@ -99,74 +96,101 @@ check_disk() {
     fi
 }
 
-# Filesystem type backing /tmp ("tmpfs", "ext4", …), or empty if it can't
-# be determined. Split out as its own helper so check_tmp_on_tmpfs's
-# branching logic can be unit-tested by stubbing this and _total_ram_mb
-# (see scripts/test/check-tmpfs-warn.sh).
-_tmp_fstype() {
-    if command -v findmnt >/dev/null 2>&1; then
-        # -T resolves to whatever mount /tmp actually falls under (the
-        # /tmp mount itself, or its parent when /tmp isn't a separate
-        # mount). Empty/error => caller treats as not-tmpfs and stays quiet.
-        findmnt -nro FSTYPE -T /tmp 2>/dev/null || true
-    else
-        # Fallback for the (rare) host without util-linux findmnt: an
-        # exact-path match in /proc/mounts only catches /tmp when it IS a
-        # separate mount, which is exactly the tmpfs case we care about.
-        awk '$2 == "/tmp" {print $3; exit}' /proc/mounts 2>/dev/null || true
-    fi
-}
-
-# Total RAM in MB. Own helper for the same testability reason as _tmp_fstype.
-_total_ram_mb() {
-    awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo
-}
-
-# Debian 13 / trixie (and Raspberry Pi OS trixie+) mount /tmp on tmpfs by
-# default — earlier releases kept it on disk. tmpfs is RAM-backed, so on a
-# small-RAM Pi a process that fills /tmp (a big build, a runaway log, a
-# large download) could use memory the container stack wants. No user has
-# actually hit this, so this is an informational heads-up (info, not warn,
-# non-blocking) — not a problem the installer found. Shown only on machines
-# small enough for it to matter (RAM <= TMPFS_WARN_MAX_RAM_MB).
+# Where `podman pull` stages decompressed blobs before committing them to
+# the store. Resolution order, per containers.conf(5): the TMPDIR
+# environment variable wins if set, otherwise engine.image_copy_tmp_dir,
+# whose shipped default is /var/tmp. Verified on podman 5.4.2:
+# `TMPDIR=/run/user/1000 podman info` reports /run/user/1000 against a
+# /var/tmp baseline. Ask podman rather than reimplementing that order —
+# a wrong guess here checks free space on a directory the pull never uses.
 #
-# The suggested tweak SHRINKS the tmpfs cap (size=20%) rather than moving
-# /tmp back to disk: keeping it in RAM avoids the SSD/SD-card write wear that
-# disk-backed /tmp churn would add, while still bounding the RAM a runaway
-# /tmp can consume. A systemd drop-in overrides just the mount Options,
-# leaving the vendor unit untouched and surviving OS updates.
-check_tmp_on_tmpfs() {
-    local fstype
-    fstype=$(_tmp_fstype)
-
-    if [[ "$fstype" != "tmpfs" ]]; then
-        ok "/tmp is on disk (${fstype:-unknown} fs)"
+# Split out as its own helper, alongside _dir_avail_mb, so
+# check_image_staging_space's branching can be unit-tested by stubbing
+# both (see scripts/test/check-staging-space.sh).
+_staging_dir() {
+    # install.sh points the pull at its own disk-backed dir under the
+    # container store (SK_STAGING_DIR there, exported as STAGING_DIR_HINT
+    # for this check). When that is where the pull will stage, it is the
+    # directory whose free space decides the outcome — asking podman would
+    # measure a path the pull never touches.
+    if [[ -n "${STAGING_DIR_HINT:-}" ]]; then
+        printf '%s\n' "$STAGING_DIR_HINT"
         return 0
     fi
 
-    local ram_mb cap_mb
-    ram_mb=$(_total_ram_mb)
-    # tmpfs /tmp size cap in MB (the OS default is 50% of RAM). Best-effort;
-    # used only to make the warning concrete, never to gate it.
-    cap_mb=$(df -BM --output=size /tmp 2>/dev/null | tail -1 | tr -dc 0-9)
+    local d=""
+    if command -v podman >/dev/null 2>&1 && (( ! PODMAN_WEDGED )); then
+        d=$(podman_guarded info --format '{{.Store.ImageCopyTmpDir}}' 2>/dev/null || true)
+    fi
+    # Podman too old to expose the field, absent, or wedged: fall back to
+    # the same order it documents so the check still has something to
+    # measure rather than silently passing.
+    if [[ -z "$d" ]]; then
+        d="${TMPDIR:-/var/tmp}"
+    fi
+    printf '%s\n' "$d"
+}
 
-    if (( ram_mb > TMPFS_WARN_MAX_RAM_MB )); then
-        ok "/tmp is on tmpfs (cap ${cap_mb:-?}MB; ${ram_mb}MB RAM — headroom OK)"
+# Free space in MB on the filesystem backing $1, or empty if it can't be
+# read. Walks up to the nearest existing ancestor: the staging dir is
+# created on demand by podman, so it may not exist yet at preflight time,
+# and `df` on a missing path errors instead of reporting its parent.
+_dir_avail_mb() {
+    local d=$1
+    while [[ -n "$d" && ! -d "$d" ]]; do
+        local parent=${d%/*}
+        [[ "$parent" == "$d" ]] && break
+        d=${parent:-/}
+    done
+    [[ -d "$d" ]] || return 0
+    df -BM --output=avail "$d" 2>/dev/null | tail -1 | tr -dc 0-9
+}
+
+# `podman pull` decompresses each blob into the staging directory before
+# committing the layer, so a staging dir smaller than the largest working
+# set fails the pull outright. On a RAM-backed /tmp or /var/tmp that
+# ceiling is the tmpfs cap, which on a 4 GB CM4 with a 512 MB /tmp is
+# below the 435.6 MB this stack's signalk-server image was measured to
+# peak at.
+#
+# This fails rather than warns: the pull at install.sh's "Image pulls"
+# step cannot succeed without the space, so continuing only moves the
+# failure somewhere less legible. install.sh points TMPDIR at a
+# disk-backed dir under the container store before pulling, which is why
+# the remedy below is a fallback for a host that overrides TMPDIR itself.
+check_image_staging_space() {
+    local dir avail
+    dir=$(_staging_dir)
+    avail=$(_dir_avail_mb "$dir")
+
+    if [[ -z "$avail" ]]; then
+        warn "Could not read free space on image staging dir ${dir} — skipping check"
         return 0
     fi
 
-    # Mirror trixie's vendor tmp.mount Options, swapping only the size= so
-    # the drop-in changes the cap and nothing else.
-    local opts="mode=1777,strictatime,nosuid,nodev,size=${TMPFS_RECOMMEND_PCT}%,nr_inodes=1m"
-    info "/tmp is on tmpfs (RAM-backed): cap ${cap_mb:-?}MB on ${ram_mb}MB RAM."
-    info "  This is the Debian 13 / trixie default, not set by this installer,"
-    info "  and is fine as-is — just a heads-up: if something fills /tmp it"
-    info "  uses RAM the containers could otherwise have. If you'd rather cap"
-    info "  that, shrink the tmpfs to ${TMPFS_RECOMMEND_PCT}% of RAM (stays in RAM, no SSD wear):"
-    info "    sudo mkdir -p /etc/systemd/system/tmp.mount.d"
-    info "    printf '[Mount]\\nOptions=${opts}\\n' \\"
-    info "      | sudo tee /etc/systemd/system/tmp.mount.d/size.conf"
-    info "    sudo systemctl daemon-reload && sudo reboot"
+    if (( avail >= STAGING_REQUIRED_MB )); then
+        ok "Image staging space ${avail}MB free on ${dir}"
+        return 0
+    fi
+
+    local fstype=""
+    if command -v findmnt >/dev/null 2>&1; then
+        fstype=$(findmnt -nro FSTYPE -T "$dir" 2>/dev/null || true)
+    fi
+
+    err "Image staging dir ${dir} has ${avail}MB free, below ${STAGING_REQUIRED_MB}MB."
+    if [[ "$fstype" == "tmpfs" ]]; then
+        err "  It is on tmpfs (RAM-backed), so its size cap — not the disk — is the limit."
+    fi
+    err "  podman unpacks each image layer here before committing it to the store;"
+    err "  signalk-server peaks at ~436MB of staging. The pull fails without it."
+    err "  Point podman at a disk-backed directory:"
+    err "    mkdir -p ~/.local/share/containers/tmp ~/.config/containers"
+    err "    printf '[engine]\\nimage_copy_tmp_dir = \"%s/.local/share/containers/tmp\"\\n' \"$HOME\" \\"
+    err "      >> ~/.config/containers/containers.conf"
+    err "    systemctl --user restart podman.socket"
+    err "  Verify:  podman info --format '{{.Store.ImageCopyTmpDir}}'"
+    fail "Insufficient image staging space — the image pull would fail"
 }
 
 # `bootstrappedAt` in ~/.signalk-doctor/last-good.json is written by
@@ -731,10 +755,12 @@ main() {
     fi
     check_ram
     check_disk
-    check_tmp_on_tmpfs
     # Before check_ports, which is the first check that touches container
     # storage and therefore the first that can hang.
     check_podman_responsive
+    # After check_podman_responsive: it asks podman where it stages image
+    # blobs, so it needs the wedged-podman verdict already established.
+    check_image_staging_space
     check_ports
     check_cgroups_v2
     check_user_slice_delegation

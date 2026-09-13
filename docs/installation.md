@@ -16,7 +16,17 @@ The installer:
 
 1. Detects host (OS, arch, distro family) and runs pre-flight: RAM ≥ 2 GB, disk ≥ 5 GB, the signalk-server ports (80 + 443, or 3000 + 3443 if you decline standard ports) and 3003 / 3004 free, cgroups v2 with memory + pids delegation to the user slice (autofixed when possible), Podman ≥ 5.3.
 
-   On small-RAM hosts preflight also prints an **informational heads-up** — non-blocking, not a warning — if `/tmp` is on tmpfs, the Debian 13 / trixie default: a RAM-backed `/tmp` shares memory with the containers, so if something fills it the box has less RAM for the stack. No one has reported this biting in practice; it's just a "you might want to know." If you'd rather cap it, the note suggests **shrinking the tmpfs cap** via a `tmp.mount.d` drop-in — this keeps `/tmp` in RAM (no extra SSD/SD-card write wear, unlike moving it to disk) while bounding how much RAM a runaway `/tmp` can take, and prints the exact `sudo` commands. The RAM threshold below which it shows the note, and the suggested cap percentage, are `TMPFS_WARN_MAX_RAM_MB` and `TMPFS_RECOMMEND_PCT` (see their definitions in `installer/linux/preflight.sh` for the current defaults).
+   Preflight also checks free space in the directory `podman pull` stages into. Podman decompresses each image layer there before committing it to the store, so the directory has to hold the largest working set at once — measured against a clean store, `signalk-server` peaks at about **436 MB** (the 297 MB `signalk-doctor-server` peaks at 96 MB). The requirement is 768 MB, overridable via `STAGING_REQUIRED_MB`. This check **blocks** the install rather than warning: the pull cannot succeed without the space.
+
+   This bites on hosts where that directory is RAM-backed. Podman stages in `TMPDIR` if it is set, otherwise `engine.image_copy_tmp_dir` (default `/var/tmp`) — so on a box where either lands on a tmpfs, the tmpfs size cap, not the disk, is the ceiling. A 4 GB CM4 with a 512 MB RAM-backed `/tmp` cannot pull `signalk-server` at all. The installer avoids this for its own pulls by pointing `TMPDIR` at `~/.local/share/containers/tmp`, on the same filesystem as the container store, for the duration of the pull only. If you hit the shortfall anyway — a host that sets `TMPDIR` itself, or `podman pull` run by hand — preflight prints the fix, which redirects podman permanently:
+
+   ```sh
+   mkdir -p ~/.local/share/containers/tmp ~/.config/containers
+   printf '[engine]\nimage_copy_tmp_dir = "%s/.local/share/containers/tmp"\n' "$HOME" \
+     >> ~/.config/containers/containers.conf
+   systemctl --user restart podman.socket
+   podman info --format '{{.Store.ImageCopyTmpDir}}'   # verify
+   ```
 
    Before preflight, the installer also asks for the **vessel identity** — boat name, MMSI (9 digits), VHF call sign. Every field is optional (Enter skips). The answers are seeded into `~/.signalk/baseDeltas.json` just before signalk-server's first start, so the admin UI's Server → Settings page comes up pre-filled. With an MMSI the vessel's self identity becomes `urn:mrn:imo:mmsi:…`; without one the installer mints a `urn:mrn:signalk:uuid:…` identity instead (the server only auto-generates a UUID when `baseDeltas.json` is absent entirely). For unattended runs set `SIGNALK_VESSEL_NAME`, `SIGNALK_VESSEL_MMSI`, `SIGNALK_VESSEL_CALLSIGN` in the environment (any non-empty value suppresses the prompts); with no TTY and no non-empty env values the step is skipped. The seed is written only when the data dir has no vessel identity yet (no `baseDeltas.json`, no legacy `defaults.json`) — re-runs never prompt again and never overwrite what you changed in the admin UI.
 

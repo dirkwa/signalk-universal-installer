@@ -523,6 +523,14 @@ if [[ -f "${DOCTOR_DATA}/last-good.json" ]] \
     info "what was already healthy, what got fixed, and what still needs attention."
 fi
 
+# Where the image pulls in step 9 will stage decompressed layers. Defined
+# here, above preflight, so preflight can check free space on the directory
+# the pull will actually use rather than the one podman is configured with.
+# Creating it is deferred to step 9 — preflight's check walks up to the
+# nearest existing ancestor, so the filesystem it measures is the same one
+# either way, and a failed preflight leaves no stray directory behind.
+SK_STAGING_DIR="${HOME}/.local/share/containers/tmp"
+
 # 2. Pre-flight
 section "Pre-flight"
 # Preflight may apply a kernel-cmdline patch that requires a reboot
@@ -539,7 +547,7 @@ section "Pre-flight"
 REBOOT_PENDING=0
 REBOOT_REASONS=()
 set +e
-PREFLIGHT_DEFER_REBOOT_NOTICE=1 bash "$HERE/preflight.sh"
+PREFLIGHT_DEFER_REBOOT_NOTICE=1 STAGING_DIR_HINT="$SK_STAGING_DIR" bash "$HERE/preflight.sh"
 PREFLIGHT_RC=$?
 set -e
 if (( PREFLIGHT_RC == 2 )); then
@@ -1360,6 +1368,36 @@ if [[ -n "$(podman images -f dangling=true -q 2>/dev/null)" ]]; then
     info "reclaiming dangling image layers from prior installs"
     podman image prune -f >/dev/null 2>&1 || true
 fi
+# Stage decompressed blobs on disk, not in RAM. `podman pull` unpacks each
+# layer into a container_images_storage* dir under its staging path before
+# committing it to the store; the path is TMPDIR if set, else
+# engine.image_copy_tmp_dir (default /var/tmp). On a box where either
+# resolves to a RAM-backed tmpfs — a 4 GB CM4 with a 512 MB /tmp, reported
+# in the field — the pull fails, because signalk-server peaks at ~436MB of
+# staging against that cap.
+#
+# Set per-pull rather than exported for the rest of the script: TMPDIR is
+# also what bare `mktemp` honours, and NPM_LOG and TMP_LG below expect the
+# system temp dir, not a directory inside the container store that a later
+# `podman system reset` would take with it. Overriding the pull alone keeps
+# the blast radius to the thing that needs it, and edits nothing in the
+# user's containers.conf — the installer's writes to their config stay
+# narrow, and nothing about their system outlives this run. The cost is
+# ~436MB of transient SD-card writes per install, bounded and occasional,
+# unlike the continuous churn that moving /tmp to disk would add.
+#
+# Under the container store so it shares that filesystem: if the store has
+# room for the image, its staging dir has room to unpack it. If the mkdir
+# fails, SK_STAGING_DIR stays empty and the pulls below run with podman's
+# configured staging dir — preflight has already reported whether that
+# directory has room. SK_STAGING_DIR itself was defined above preflight,
+# which has already checked free space on the filesystem it lands on.
+if mkdir -p "$SK_STAGING_DIR" 2>/dev/null; then
+    info "staging image layers in $SK_STAGING_DIR"
+else
+    warn "could not create $SK_STAGING_DIR — leaving podman's staging dir as configured"
+    SK_STAGING_DIR=""
+fi
 # Bound each pull. A stalled pull (slow store, registry hiccup, network path)
 # otherwise hangs the installer forever — the bare `podman pull` had no timeout,
 # unlike the `timeout 900 podman run` plugin install below. `timeout` exits 124
@@ -1368,7 +1406,8 @@ fi
 for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
     info "pulling $img"
     pull_rc=0
-    timeout 900 podman pull --retry 3 --retry-delay 5s "$img" || pull_rc=$?
+    TMPDIR="${SK_STAGING_DIR:-${TMPDIR:-/var/tmp}}" \
+        timeout 900 podman pull --retry 3 --retry-delay 5s "$img" || pull_rc=$?
     if [[ "$pull_rc" -eq 124 ]]; then
         # `timeout` fired: the pull was still running at 900s, not a clean error.
         err "pulling $img did not finish within 900s."
