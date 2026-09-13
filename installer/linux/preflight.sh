@@ -115,7 +115,11 @@ check_ram() {
 # the staging one; on a moved store they are measured separately.
 check_disk() {
     local target="${HOME}" gb
-    gb=$(df -BG --output=avail "$target" 2>/dev/null | tail -1 | tr -dc 0-9)
+    # `|| true` on every df pipeline here, for the reason _dir_avail_mb
+    # documents: under `set -euo pipefail` a df that exits non-zero fails the
+    # pipeline, and a plain assignment then aborts the whole preflight under
+    # set -e — silently, before the empty-value branch below can report it.
+    gb=$(df -BG --output=avail "$target" 2>/dev/null | tail -1 | tr -dc 0-9 || true)
     if [[ -z "$gb" ]]; then
         warn "Could not read free disk on ${target} — skipping check"
         return 0
@@ -130,11 +134,11 @@ check_disk() {
     local store store_dev home_dev store_gb
     store=$(podman_storage_root)
     [[ -n "$store" && "$store" != "$target" ]] || return 0
-    store_dev=$(df --output=source "$store" 2>/dev/null | tail -1)
-    home_dev=$(df --output=source "$target" 2>/dev/null | tail -1)
+    store_dev=$(df --output=source "$store" 2>/dev/null | tail -1 || true)
+    home_dev=$(df --output=source "$target" 2>/dev/null | tail -1 || true)
     [[ -n "$store_dev" && "$store_dev" != "$home_dev" ]] || return 0
 
-    store_gb=$(df -BG --output=avail "$store" 2>/dev/null | tail -1 | tr -dc 0-9)
+    store_gb=$(df -BG --output=avail "$store" 2>/dev/null | tail -1 | tr -dc 0-9 || true)
     if [[ -z "$store_gb" ]]; then
         warn "Could not read free disk on the container store (${store})"
         return 0

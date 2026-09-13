@@ -42,6 +42,16 @@ fi
 
 fail=0
 
+# Every mktemp path this script creates, removed from one EXIT trap. The
+# explicit rm calls below stay — they keep each probe's scope obvious — but a
+# command failing between mktemp and its rm would otherwise leave the path in
+# /tmp. Registering is cheap and removing twice is harmless.
+SCRATCH=()
+scratch() { SCRATCH+=("$1"); printf '%s\n' "$1"; }
+cleanup_scratch() { (( ${#SCRATCH[@]} )) && rm -rf -- "${SCRATCH[@]}"; return 0; }
+trap cleanup_scratch EXIT
+
+
 # `fail` in preflight.sh marks the run failed and returns non-zero rather
 # than exiting, so the check returns non-zero here too. Stub it to a plain
 # marker so this test sees the verdict without preflight's global state.
@@ -74,7 +84,7 @@ run() {
     _dir_avail_mb() { printf '%s\n' "$STUB_AVAIL"; }
 
     local out err rc
-    err=$(mktemp)
+    err=$(scratch "$(mktemp)")
     out=$(STAGING_REQUIRED_MB="$required" check_image_staging_space 2>"$err") && rc=0 || rc=$?
     local stderr_out; stderr_out=$(cat "$err"); rm -f "$err"
 
@@ -180,7 +190,7 @@ fi
 # Run in a separate bash process rather than a $(…) subshell here: `set -e` is
 # not inherited into command substitution in this harness, so a subshell would
 # report SURVIVED either way and the assertion would pass against the bug.
-df_probe=$(mktemp)
+df_probe=$(scratch "$(mktemp)")
 cat >"$df_probe" <<'PROBE'
 set -euo pipefail
 # shellcheck source=/dev/null
@@ -254,7 +264,7 @@ done
 # test's own arithmetic and could not catch the resolver reading the wrong
 # source. Skipped when podman is unavailable — there is nothing to resolve.
 if command -v podman >/dev/null 2>&1; then
-    store_tmp=$(mktemp -d)
+    store_tmp=$(scratch "$(mktemp -d)")
     moved="$store_tmp/moved-store"
     mkdir -p "$moved"
     printf '[storage]\ndriver = "overlay"\nrootless_storage_path = "%s"\n' \
@@ -300,7 +310,7 @@ fi
 # --- check_disk must measure the store's filesystem, not just $HOME -------
 # With the resolver correct, check_disk has to actually consult it and fail
 # when that filesystem is short. $HOME ample, store short, different devices.
-disk_probe=$(mktemp)
+disk_probe=$(scratch "$(mktemp)")
 cat >"$disk_probe" <<'PROBE'
 set -euo pipefail
 # shellcheck source=/dev/null
@@ -330,9 +340,33 @@ else
     fail=1
 fi
 
+# check_disk's own df pipelines must degrade to the warn path too — the same
+# pipefail hazard _dir_avail_mb guards. A plain assignment from a failing df
+# aborts the whole preflight under set -e, before the empty-value branch can
+# report anything. Separate bash process for the reason noted above.
+cd_probe=$(scratch "$(mktemp)")
+cat >"$cd_probe" <<'PROBE'
+set -euo pipefail
+# shellcheck source=/dev/null
+. "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1
+fail() { echo "PREFLIGHT_FAIL: $*"; return 1; }
+df() { return 1; }
+check_disk
+echo "SURVIVED"
+PROBE
+cd_out=$(PREFLIGHT="$PREFLIGHT" bash "$cd_probe" 2>&1 || true)
+rm -f "$cd_probe"
+if grep -q 'SURVIVED' <<<"$cd_out" && grep -qi 'Could not read free disk' <<<"$cd_out"; then
+    echo "[ OK ] check_disk warns and continues when df fails"
+else
+    echo "[FAIL] check_disk aborted preflight instead of warning on a failing df" >&2
+    printf '%s\n' "$cd_out" >&2
+    fail=1
+fi
+
 # On a default host the store shares $HOME's filesystem: report once, not
 # twice, and do not fail for a disk already checked.
-same_probe=$(mktemp)
+same_probe=$(scratch "$(mktemp)")
 cat >"$same_probe" <<'PROBE'
 set -euo pipefail
 # shellcheck source=/dev/null
