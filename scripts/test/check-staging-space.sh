@@ -260,7 +260,7 @@ if command -v podman >/dev/null 2>&1; then
     printf '[storage]\ndriver = "overlay"\nrootless_storage_path = "%s"\n' \
         "$moved" >"$store_tmp/storage.conf"
 
-    resolved=$(CONTAINERS_STORAGE_CONF="$store_tmp/storage.conf" \
+    resolved=$(CONTAINERS_STORAGE_CONF="$store_tmp/storage.conf" PREFLIGHT="$PREFLIGHT" \
         bash -c '. "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1; podman_storage_root' \
         2>/dev/null || true)
 
@@ -275,9 +275,17 @@ if command -v podman >/dev/null 2>&1; then
     # Wedged podman must not be probed: podman_guarded would burn its timeout
     # on a host check_podman_responsive has already diagnosed. Falls back to
     # the default layout instead.
-    wedged=$(bash -c '. "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1
+    #
+    # Pin XDG_DATA_HOME at a directory this test creates, rather than letting
+    # the fallback walk the ambient home: podman_storage_root climbs to the
+    # nearest existing ancestor, so on a host that has never run rootless
+    # podman it would return ~/.local/share or $HOME and fail for host
+    # reasons rather than a code defect.
+    mkdir -p "$store_tmp/xdg/containers/storage"
+    wedged=$(PREFLIGHT="$PREFLIGHT" XDG_DATA_HOME="$store_tmp/xdg" \
+        bash -c '. "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1
         PODMAN_WEDGED=1 podman_storage_root' 2>/dev/null || true)
-    if [[ "$wedged" == *"containers"* && "$wedged" != "$moved" ]]; then
+    if [[ "$wedged" == "$store_tmp/xdg/containers/storage" ]]; then
         echo "[ OK ] podman_storage_root falls back when podman is wedged"
     else
         echo "[FAIL] wedged fallback wrong -> '${wedged:-<empty>}'" >&2
@@ -358,25 +366,31 @@ fi
 # with both shapes, using /dev/shm as a real mount point whose parent (/dev) is
 # a different filesystem.
 INSTALL_SH=${INSTALL_SH:-installer/linux/install.sh}
-if [[ -f "$INSTALL_SH" ]] && grep -q 'SK_STAGING_SIBLING' "$INSTALL_SH"; then
+
+# Run install.sh's own lines, not a copy of them: a re-implementation here
+# would keep passing while install.sh changed the device comparison or the
+# fallback target — the drift class this file already guards for
+# docs/installation.md. Cut the block between the sibling assignment and the
+# fi that closes its if, and feed it to bash with SK_GRAPHROOT preset.
+staging_branch=$(sed -n '/^ *SK_STAGING_SIBLING=/,/^ *fi$/p' "$INSTALL_SH")
+
+if [[ -z "$staging_branch" ]]; then
+    echo "[FAIL] could not extract the staging derivation from $INSTALL_SH" >&2
+    fail=1
+else
     derive_staging() {
-        SK_GRAPHROOT=$1 bash -c '
-            SK_STAGING_SIBLING="$(dirname "$SK_GRAPHROOT")/tmp"
-            SK_GR_DEV=$(stat -c "%d" "$SK_GRAPHROOT" 2>/dev/null || echo "")
-            SK_SIB_DEV=$(stat -c "%d" "$(dirname "$SK_STAGING_SIBLING")" 2>/dev/null || echo "")
-            if [[ -n "$SK_GR_DEV" && -n "$SK_SIB_DEV" && "$SK_GR_DEV" != "$SK_SIB_DEV" ]]; then
-                printf "%s\n" "$SK_GRAPHROOT/tmp"
-            else
-                printf "%s\n" "$SK_STAGING_SIBLING"
-            fi'
+        SK_GRAPHROOT=$1 bash -c "
+            set -u
+            $staging_branch
+            printf '%s\n' \"\$SK_STAGING_DIR\""
     }
 
     normal_store="$HOME/.local/share/containers/storage"
-    got_normal=$(derive_staging "$normal_store")
+    got_normal=$(derive_staging "$normal_store" 2>/dev/null || true)
     if [[ "$got_normal" == "$(dirname "$normal_store")/tmp" ]]; then
         echo "[ OK ] normal GraphRoot stages in the sibling containers/tmp"
     else
-        echo "[FAIL] normal GraphRoot derivation wrong -> '$got_normal'" >&2
+        echo "[FAIL] normal GraphRoot derivation wrong -> '${got_normal:-<empty>}'" >&2
         fail=1
     fi
 
@@ -385,19 +399,16 @@ if [[ -f "$INSTALL_SH" ]] && grep -q 'SK_STAGING_SIBLING' "$INSTALL_SH"; then
     # blind sibling.
     if [[ -d /dev/shm ]] \
         && [[ "$(stat -c '%d' /dev/shm 2>/dev/null)" != "$(stat -c '%d' /dev 2>/dev/null)" ]]; then
-        got_mount=$(derive_staging /dev/shm)
+        got_mount=$(derive_staging /dev/shm 2>/dev/null || true)
         if [[ "$got_mount" == "/dev/shm/tmp" ]]; then
             echo "[ OK ] GraphRoot that is a mount point stages inside it"
         else
-            echo "[FAIL] mount-point GraphRoot escaped to another filesystem -> '$got_mount'" >&2
+            echo "[FAIL] mount-point GraphRoot escaped to another filesystem -> '${got_mount:-<empty>}'" >&2
             fail=1
         fi
     else
         echo "[SKIP] /dev/shm is not a separate filesystem here"
     fi
-else
-    echo "[FAIL] $INSTALL_SH has no SK_STAGING_SIBLING derivation to check" >&2
-    fail=1
 fi
 
 # --- docs/installation.md must not drift from the implementation ----------

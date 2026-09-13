@@ -840,8 +840,11 @@ main() {
         warn "Untested on ${DISTRO_PRETTY}; continuing"
     fi
     check_ram
-    # Before check_ports, which is the first check that touches container
-    # storage and therefore the first that can hang.
+    # Before every check that talks to podman. check_disk and
+    # check_image_staging_space ask it where the store and the staging dir
+    # really are, and check_ports queries container state — all three gate on
+    # the wedged verdict this establishes, and would otherwise each burn a
+    # timeout on a host whose storage lock is stuck.
     check_podman_responsive
     # Both ask podman where its store and staging dirs really are, so they
     # need the wedged-podman verdict already established. check_disk covers

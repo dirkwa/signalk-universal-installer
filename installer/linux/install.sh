@@ -1492,6 +1492,15 @@ if ! SK_STAGING_PROBE=$(mktemp "$SK_STAGING_DIR/.writable.XXXXXX" 2>/dev/null); 
 fi
 rm -f -- "$SK_STAGING_PROBE"
 info "staging image layers in $SK_STAGING_DIR"
+# Cover the window the explicit calls below cannot: a Ctrl+C or SIGTERM during
+# a pull exits without reaching them. Scoped to this step and cleared right
+# after the loop, so it never shadows the npm heartbeat traps installed later.
+# INT/TERM re-raise with the default handler after cleaning up — a
+# cleanup-only handler would swallow Ctrl+C and let the install run on, the
+# same pattern npm_hb_cleanup uses.
+trap sk_staging_cleanup EXIT
+trap 'sk_staging_cleanup; trap - INT; kill -INT $$' INT
+trap 'sk_staging_cleanup; trap - TERM; kill -TERM $$' TERM
 # Bound each pull. A stalled pull (slow store, registry hiccup, network path)
 # otherwise hangs the installer forever — the bare `podman pull` had no timeout,
 # unlike the `timeout 900 podman run` plugin install below. `timeout` exits 124
@@ -1521,6 +1530,7 @@ for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
         exit 1
     fi
 done
+trap - EXIT INT TERM
 sk_staging_cleanup
 ok "all images pulled"
 
