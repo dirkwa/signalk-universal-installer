@@ -508,6 +508,37 @@ if [[ -f "$DOCS" ]]; then
         fail=1
     fi
 
+    # Names the doc quotes that belong to the scripts. A rename in the code
+    # with the guide left behind sends a reader to a variable or a path that
+    # no longer exists, and the verbatim remedy comparison above does not
+    # reach these — they sit in the prose, not the command block.
+    for owned in 'SK_STAGING_DIR:installer/linux/install.sh' \
+                 'GraphRoot:installer/linux/install.sh' \
+                 'rootless_storage_path:installer/linux/preflight.sh' \
+                 'STAGING_REQUIRED_MB:installer/linux/preflight.sh'; do
+        owned_name=${owned%%:*}
+        owned_file=${owned#*:}
+        if ! grep -qF "$owned_name" "$owned_file"; then
+            echo "[FAIL] docs name '$owned_name' but $owned_file does not define it" >&2
+            fail=1
+        elif ! grep -qF "$owned_name" "$DOCS"; then
+            echo "[FAIL] $owned_file defines '$owned_name' but the docs no longer mention it" >&2
+            fail=1
+        else
+            echo "[ OK ] docs and $(basename "$owned_file") agree on '$owned_name'"
+        fi
+    done
+
+    # podman's default staging path. The docs state it as a fact about podman;
+    # preflight encodes it as the fallback when podman cannot be asked, so the
+    # two must not drift apart.
+    if grep -qF '/var/tmp' "$PREFLIGHT" && grep -qF '/var/tmp' "$DOCS"; then
+        echo "[ OK ] docs and preflight agree on podman's default staging path"
+    else
+        echo "[FAIL] the /var/tmp default is stated in only one of docs/preflight" >&2
+        fail=1
+    fi
+
     # The old advice must not survive anywhere: it named the wrong mechanism
     # (shrinking a tmpfs cap) for this failure.
     if grep -qE 'tmp\.mount\.d|TMPFS_RECOMMEND_PCT|TMPFS_WARN_MAX_RAM_MB' "$DOCS"; then
