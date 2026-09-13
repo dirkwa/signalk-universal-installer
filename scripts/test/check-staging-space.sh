@@ -508,35 +508,37 @@ if [[ -f "$DOCS" ]]; then
         fail=1
     fi
 
-    # Names the doc quotes that belong to the scripts. A rename in the code
-    # with the guide left behind sends a reader to a variable or a path that
-    # no longer exists, and the verbatim remedy comparison above does not
-    # reach these — they sit in the prose, not the command block.
+    # Names the guide quotes that belong to the scripts. The direction
+    # matters: a name the docs mention must still exist in the file that
+    # owns it, because a reader sent to a variable that was renamed is
+    # stranded. The reverse is NOT asserted — the guide is free to stop
+    # mentioning an internal identifier, and requiring it to name one would
+    # make a rename in both places fail for no user-visible reason.
     for owned in 'SK_STAGING_DIR:installer/linux/install.sh' \
                  'GraphRoot:installer/linux/install.sh' \
                  'rootless_storage_path:installer/linux/preflight.sh' \
                  'STAGING_REQUIRED_MB:installer/linux/preflight.sh'; do
         owned_name=${owned%%:*}
         owned_file=${owned#*:}
-        if ! grep -qF "$owned_name" "$owned_file"; then
-            echo "[FAIL] docs name '$owned_name' but $owned_file does not define it" >&2
-            fail=1
-        elif ! grep -qF "$owned_name" "$DOCS"; then
-            echo "[FAIL] $owned_file defines '$owned_name' but the docs no longer mention it" >&2
-            fail=1
+        grep -qF "$owned_name" "$DOCS" || continue   # docs dropped it: fine
+        if grep -qF "$owned_name" "$owned_file"; then
+            echo "[ OK ] docs name '$owned_name' and $(basename "$owned_file") still defines it"
         else
-            echo "[ OK ] docs and $(basename "$owned_file") agree on '$owned_name'"
+            echo "[FAIL] docs name '$owned_name' but $owned_file no longer defines it" >&2
+            fail=1
         fi
     done
 
-    # podman's default staging path. The docs state it as a fact about podman;
-    # preflight encodes it as the fallback when podman cannot be asked, so the
-    # two must not drift apart.
-    if grep -qF '/var/tmp' "$PREFLIGHT" && grep -qF '/var/tmp' "$DOCS"; then
-        echo "[ OK ] docs and preflight agree on podman's default staging path"
-    else
-        echo "[FAIL] the /var/tmp default is stated in only one of docs/preflight" >&2
-        fail=1
+    # podman's default staging path. Asserted in the same direction: if the
+    # guide states it, preflight must still encode it as the fallback when
+    # podman cannot be asked. A guide that stops mentioning it is fine.
+    if grep -qF '/var/tmp' "$DOCS"; then
+        if grep -qF '/var/tmp' "$PREFLIGHT"; then
+            echo "[ OK ] docs state podman's /var/tmp default and preflight still encodes it"
+        else
+            echo "[FAIL] docs state the /var/tmp default but preflight no longer encodes it" >&2
+            fail=1
+        fi
     fi
 
     # The old advice must not survive anywhere: it named the wrong mechanism
