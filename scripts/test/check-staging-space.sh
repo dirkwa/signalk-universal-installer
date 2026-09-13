@@ -7,8 +7,9 @@
 # layer to the store. Measured against a clean store, signalk-server:dirkwa
 # (1.4 GB image) peaked at 435.6 MB of staging and signalk-doctor-server
 # (297 MB image) at 96 MB. A staging dir smaller than that peak — a
-# RAM-backed /tmp or /var/tmp capped at 512 MB on a 4 GB CM4 — fails the
-# pull outright, which is what a user reported from the field.
+# RAM-backed /var/tmp (podman's default staging path) or /tmp — fails the
+# pull outright. Reported from a 4 GB CM4 whose /var/tmp was tmpfs at
+# size=262144k, 256 MB, against a 435.6 MB staging peak.
 #
 # The check reads two host facts: where podman stages (_staging_dir) and how
 # much is free there (_dir_avail_mb). Both are their own helpers so this test
@@ -166,11 +167,12 @@ run() {
 run ok   /var/tmp     4096   768  "ample space on /var/tmp -> ok"
 run ok   /var/tmp     768    768  "exactly at requirement -> ok (boundary)"
 run fail /var/tmp     767    768  "one MB short -> FAIL (boundary)"
-run fail /tmp         200    768  "512MB tmpfs /tmp, 200MB free -> FAIL"
+run fail /tmp         200    768  "tmpfs /tmp, 200MB free -> FAIL"
 run fail /tmp         0      768  "staging dir full -> FAIL"
-# The reported CM4: 512 MB RAM-backed /tmp cannot hold signalk-server's
-# 435.6 MB peak once anything else is using it.
-run fail /tmp         430    768  "CM4 512MB tmpfs, 430MB free -> FAIL"
+# The reported CM4: /var/tmp on tmpfs at 256 MB. Podman stages there by
+# default, so signalk-server's 435.6 MB peak never fits — measured free
+# space is the whole cap, and it is still short.
+run fail /var/tmp     256    768  "CM4 256MB tmpfs /var/tmp -> FAIL"
 # Unreadable free space is not a verdict: warn, don't block a host whose
 # df output we couldn't parse.
 run warn /var/tmp     ""     768  "free space unreadable -> warn, non-blocking"

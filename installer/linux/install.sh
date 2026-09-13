@@ -1422,9 +1422,10 @@ fi
 # layer into a container_images_storage* dir under its staging path before
 # committing it to the store; the path is TMPDIR if set, else
 # engine.image_copy_tmp_dir (default /var/tmp). On a box where either
-# resolves to a RAM-backed tmpfs — a 4 GB CM4 with a 512 MB /tmp, reported
-# in the field — the pull fails, because signalk-server peaks at ~436MB of
-# staging against that cap.
+# resolves to a RAM-backed tmpfs the pull fails, because signalk-server peaks
+# at ~436MB of staging against that cap. Reported from a 4 GB CM4 whose
+# /var/tmp — podman's default, not /tmp — was tmpfs at size=262144k (256 MB),
+# so the largest image could not be staged at any point.
 #
 # Set per-pull rather than exported for the rest of the script: TMPDIR is
 # also what bare `mktemp` honours, and NPM_LOG and TMP_LG below expect the

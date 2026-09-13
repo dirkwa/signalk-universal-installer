@@ -218,7 +218,8 @@ _dir_avail_mb() {
 # `podman pull` decompresses each blob into the staging directory before
 # committing the layer, so a staging dir smaller than the largest working
 # set fails the pull outright. On a RAM-backed /tmp or /var/tmp that
-# ceiling is the tmpfs cap, which on a 4 GB CM4 with a 512 MB /tmp is
+# ceiling is the tmpfs cap. Reported from a 4 GB CM4 whose /var/tmp —
+# podman's default staging path, not /tmp — was tmpfs at 256 MB, well
 # below the 435.6 MB this stack's signalk-server image was measured to
 # peak at.
 #
