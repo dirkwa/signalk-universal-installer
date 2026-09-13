@@ -46,8 +46,16 @@ fail=0
 # explicit rm calls below stay — they keep each probe's scope obvious — but a
 # command failing between mktemp and its rm would otherwise leave the path in
 # /tmp. Registering is cheap and removing twice is harmless.
+# scratch() must assign in the PARENT shell: a `p=$(scratch ...)` form runs the
+# function in a subshell, where the array append is discarded when the
+# substitution ends — leaving the trap with nothing to remove. Take the
+# variable name instead and assign through it.
 SCRATCH=()
-scratch() { SCRATCH+=("$1"); printf '%s\n' "$1"; }
+scratch() {
+    local -n _dest=$1
+    _dest=$(mktemp "${@:2}")
+    SCRATCH+=("$_dest")
+}
 cleanup_scratch() { (( ${#SCRATCH[@]} )) && rm -rf -- "${SCRATCH[@]}"; return 0; }
 trap cleanup_scratch EXIT
 
@@ -84,7 +92,7 @@ run() {
     _dir_avail_mb() { printf '%s\n' "$STUB_AVAIL"; }
 
     local out err rc
-    err=$(scratch "$(mktemp)")
+    scratch err
     out=$(STAGING_REQUIRED_MB="$required" check_image_staging_space 2>"$err") && rc=0 || rc=$?
     local stderr_out; stderr_out=$(cat "$err"); rm -f "$err"
 
@@ -190,7 +198,7 @@ fi
 # Run in a separate bash process rather than a $(…) subshell here: `set -e` is
 # not inherited into command substitution in this harness, so a subshell would
 # report SURVIVED either way and the assertion would pass against the bug.
-df_probe=$(scratch "$(mktemp)")
+df_probe=""; scratch df_probe
 cat >"$df_probe" <<'PROBE'
 set -euo pipefail
 # shellcheck source=/dev/null
@@ -264,7 +272,7 @@ done
 # test's own arithmetic and could not catch the resolver reading the wrong
 # source. Skipped when podman is unavailable — there is nothing to resolve.
 if command -v podman >/dev/null 2>&1; then
-    store_tmp=$(scratch "$(mktemp -d)")
+    store_tmp=""; scratch store_tmp -d
     moved="$store_tmp/moved-store"
     mkdir -p "$moved"
     printf '[storage]\ndriver = "overlay"\nrootless_storage_path = "%s"\n' \
@@ -310,7 +318,7 @@ fi
 # --- check_disk must measure the store's filesystem, not just $HOME -------
 # With the resolver correct, check_disk has to actually consult it and fail
 # when that filesystem is short. $HOME ample, store short, different devices.
-disk_probe=$(scratch "$(mktemp)")
+disk_probe=""; scratch disk_probe
 cat >"$disk_probe" <<'PROBE'
 set -euo pipefail
 # shellcheck source=/dev/null
@@ -344,7 +352,7 @@ fi
 # pipefail hazard _dir_avail_mb guards. A plain assignment from a failing df
 # aborts the whole preflight under set -e, before the empty-value branch can
 # report anything. Separate bash process for the reason noted above.
-cd_probe=$(scratch "$(mktemp)")
+cd_probe=""; scratch cd_probe
 cat >"$cd_probe" <<'PROBE'
 set -euo pipefail
 # shellcheck source=/dev/null
@@ -366,7 +374,7 @@ fi
 
 # On a default host the store shares $HOME's filesystem: report once, not
 # twice, and do not fail for a disk already checked.
-same_probe=$(scratch "$(mktemp)")
+same_probe=""; scratch same_probe
 cat >"$same_probe" <<'PROBE'
 set -euo pipefail
 # shellcheck source=/dev/null
