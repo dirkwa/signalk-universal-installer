@@ -523,6 +523,64 @@ if [[ -f "${DOCTOR_DATA}/last-good.json" ]] \
     info "what was already healthy, what got fixed, and what still needs attention."
 fi
 
+# Where the image pulls in step 9 will stage decompressed layers. Defined
+# here, above preflight, so preflight can check free space on the directory
+# the pull will actually use rather than the one podman is configured with.
+# Creating it is deferred to step 9 — preflight's check walks up to the
+# nearest existing ancestor, so the filesystem it measures is the same one
+# either way, and a failed preflight leaves no stray directory behind.
+#
+# Sited next to the container store rather than at a fixed path under $HOME:
+# the point is to share a filesystem with the store, so that a store with
+# room for the image has room to unpack it. Ask podman for its GraphRoot,
+# which reports the effective store — it follows storage.conf's
+# rootless_storage_path (the only key that moves a rootless store; see
+# scripts/test/check-unwedge-podman.sh) and XDG_DATA_HOME, neither of which a
+# fixed ~/.local/share path would honour. On a host that moved its store to a
+# roomy disk, a fixed path could fail preflight for lack of space on a
+# filesystem the pull was never going to touch.
+#
+# Falls back to podman's own default layout when podman can't answer. That is
+# the normal case on a fresh host: this runs before section "Podman" installs
+# it, so the query returns nothing and the fallback applies — and it resolves
+# to the same $XDG_DATA_HOME/containers parent that podman will then use for
+# its own default graphroot, so the two agree. It matches the XDG_DATA_HOME
+# convention podman_storage_root() already uses in preflight.sh. On a re-run
+# over an existing install podman does answer, and a moved store is followed.
+# SK_STAGING_DIR may also be set in the environment to override both.
+if [[ -z "${SK_STAGING_DIR:-}" ]]; then
+    # -k 5: a wedged podman that ignores SIGTERM would otherwise keep this
+    # running past the deadline, and this probe sits ahead of preflight's
+    # check_podman_responsive — the step that diagnoses exactly that state.
+    # Same bounded-termination pattern as podman_guarded() in preflight.sh.
+    SK_GRAPHROOT=$(timeout -k 5 15 podman info --format '{{.Store.GraphRoot}}' 2>/dev/null || true)
+    if [[ -n "$SK_GRAPHROOT" ]]; then
+        # GraphRoot is normally …/containers/storage, so a sibling
+        # …/containers/tmp shares its filesystem and sits outside the store —
+        # `podman system reset` wipes the store directory, and staging inside
+        # it would go with it.
+        #
+        # But GraphRoot can itself be a mount point (rootless_storage_path
+        # pointed at a dedicated disk), and then the sibling is on the PARENT
+        # filesystem — a different disk, which defeats the whole point of
+        # siting staging next to the store. /dev/shm vs /dev is the same
+        # relationship: mount point and parent are different filesystems.
+        # Compare the two device ids and fall back to a directory inside
+        # GraphRoot when they differ; sharing the filesystem matters more than
+        # surviving a reset, since a reset means re-pulling anyway.
+        SK_STAGING_SIBLING="$(dirname "$SK_GRAPHROOT")/tmp"
+        SK_GR_DEV=$(stat -c '%d' "$SK_GRAPHROOT" 2>/dev/null || echo "")
+        SK_SIB_DEV=$(stat -c '%d' "$(dirname "$SK_STAGING_SIBLING")" 2>/dev/null || echo "")
+        if [[ -n "$SK_GR_DEV" && -n "$SK_SIB_DEV" && "$SK_GR_DEV" != "$SK_SIB_DEV" ]]; then
+            SK_STAGING_DIR="$SK_GRAPHROOT/tmp"
+        else
+            SK_STAGING_DIR="$SK_STAGING_SIBLING"
+        fi
+    else
+        SK_STAGING_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/containers/tmp"
+    fi
+fi
+
 # 2. Pre-flight
 section "Pre-flight"
 # Preflight may apply a kernel-cmdline patch that requires a reboot
@@ -539,7 +597,7 @@ section "Pre-flight"
 REBOOT_PENDING=0
 REBOOT_REASONS=()
 set +e
-PREFLIGHT_DEFER_REBOOT_NOTICE=1 bash "$HERE/preflight.sh"
+PREFLIGHT_DEFER_REBOOT_NOTICE=1 STAGING_DIR_HINT="$SK_STAGING_DIR" bash "$HERE/preflight.sh"
 PREFLIGHT_RC=$?
 set -e
 if (( PREFLIGHT_RC == 2 )); then
@@ -1360,6 +1418,89 @@ if [[ -n "$(podman images -f dangling=true -q 2>/dev/null)" ]]; then
     info "reclaiming dangling image layers from prior installs"
     podman image prune -f >/dev/null 2>&1 || true
 fi
+# Stage decompressed blobs on disk, not in RAM. `podman pull` unpacks each
+# layer into a container_images_storage* dir under its staging path before
+# committing it to the store; the path is TMPDIR if set, else
+# engine.image_copy_tmp_dir (default /var/tmp). On a box where either
+# resolves to a RAM-backed tmpfs — a 4 GB CM4 with a 512 MB /tmp, reported
+# in the field — the pull fails, because signalk-server peaks at ~436MB of
+# staging against that cap.
+#
+# Set per-pull rather than exported for the rest of the script: TMPDIR is
+# also what bare `mktemp` honours, and NPM_LOG and TMP_LG below expect the
+# system temp dir, not a directory inside the container store that a later
+# `podman system reset` would take with it. Overriding the pull alone keeps
+# the blast radius to the thing that needs it, and edits nothing in the
+# user's containers.conf — the installer's writes to their config stay
+# narrow, and nothing about their system outlives this run. The cost is
+# ~436MB of transient SD-card writes per install, bounded and occasional,
+# unlike the continuous churn that moving /tmp to disk would add.
+#
+# Under the container store so it shares that filesystem: if the store has
+# room for the image, its staging dir has room to unpack it. SK_STAGING_DIR
+# was defined above preflight, which checked free space on the filesystem it
+# lands on — so falling back to podman's configured staging dir when this
+# directory is unusable would pull into a path whose capacity nothing
+# checked, re-introducing the failure this step exists to prevent. Abort
+# instead.
+#
+# `mkdir -p` alone is not enough: it succeeds on an existing directory the
+# user cannot write to. Probe with an actual create, which is what podman
+# will do.
+#
+# Note whether the directory was already there. AGENTS.md's filesystem
+# invariant says this installer holds no state beyond ~/.config/containers/systemd/
+# and ~/.signalk-{updater,doctor}/ — staging is scratch space for the pulls
+# and nothing configures podman to keep using it, so a directory created here
+# is removed again on the way out. One an operator already had (or supplied
+# via SK_STAGING_DIR) is left alone.
+SK_STAGING_PREEXISTING=0
+[[ -d "$SK_STAGING_DIR" ]] && SK_STAGING_PREEXISTING=1
+
+# Remove the staging directory if this run created it. `rmdir` never touches
+# a non-empty directory, so a stray file left by an interrupted pull keeps it
+# (and says so) rather than being deleted blind. Podman empties the directory
+# itself after a successful pull — verified against podman 5.4.2, which leaves
+# nothing behind once the layers are committed.
+sk_staging_cleanup() {
+    (( SK_STAGING_PREEXISTING )) && return 0
+    [[ -d "$SK_STAGING_DIR" ]] || return 0
+    rmdir -- "$SK_STAGING_DIR" 2>/dev/null \
+        || info "left $SK_STAGING_DIR in place (not empty)"
+}
+
+if ! mkdir -p "$SK_STAGING_DIR" 2>/dev/null; then
+    err "could not create the image staging directory $SK_STAGING_DIR."
+    err "  podman unpacks each image layer there during the pull. Preflight"
+    err "  checked that path for free space; falling back elsewhere would pull"
+    err "  into a directory nothing verified."
+    err "  Check ownership and permissions on ~/.local/share/containers, then"
+    err "  re-run this installer."
+    exit 1
+fi
+# mktemp, not a fixed name: SK_STAGING_DIR can be pointed at an existing
+# directory by the operator, and a fixed probe name would delete a file of
+# that name already there.
+if ! SK_STAGING_PROBE=$(mktemp "$SK_STAGING_DIR/.writable.XXXXXX" 2>/dev/null); then
+    err "image staging directory $SK_STAGING_DIR is not writable."
+    err "  It exists, but this user cannot create files in it — podman's pull"
+    err "  would fail partway through unpacking a layer."
+    err "  Fix its ownership/permissions, then re-run this installer:"
+    err "    ls -ld $SK_STAGING_DIR"
+    sk_staging_cleanup
+    exit 1
+fi
+rm -f -- "$SK_STAGING_PROBE"
+info "staging image layers in $SK_STAGING_DIR"
+# Cover the window the explicit calls below cannot: a Ctrl+C or SIGTERM during
+# a pull exits without reaching them. Scoped to this step and cleared right
+# after the loop, so it never shadows the npm heartbeat traps installed later.
+# INT/TERM re-raise with the default handler after cleaning up — a
+# cleanup-only handler would swallow Ctrl+C and let the install run on, the
+# same pattern npm_hb_cleanup uses.
+trap sk_staging_cleanup EXIT
+trap 'sk_staging_cleanup; trap - INT; kill -INT $$' INT
+trap 'sk_staging_cleanup; trap - TERM; kill -TERM $$' TERM
 # Bound each pull. A stalled pull (slow store, registry hiccup, network path)
 # otherwise hangs the installer forever — the bare `podman pull` had no timeout,
 # unlike the `timeout 900 podman run` plugin install below. `timeout` exits 124
@@ -1368,7 +1509,8 @@ fi
 for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
     info "pulling $img"
     pull_rc=0
-    timeout 900 podman pull --retry 3 --retry-delay 5s "$img" || pull_rc=$?
+    TMPDIR="$SK_STAGING_DIR" \
+        timeout 900 podman pull --retry 3 --retry-delay 5s "$img" || pull_rc=$?
     if [[ "$pull_rc" -eq 124 ]]; then
         # `timeout` fired: the pull was still running at 900s, not a clean error.
         err "pulling $img did not finish within 900s."
@@ -1378,14 +1520,18 @@ for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
         err "    podman image prune -a -f   # then re-run this installer"
         err "If the store is small, the registry path may be at fault — retry, or"
         err "    podman pull --log-level=debug $img   # to see where it stalls"
+        sk_staging_cleanup
         exit 1
     elif [[ "$pull_rc" -ne 0 ]]; then
         err "pulling $img failed (podman exit $pull_rc)."
         err "Inspect the error above; retry, or for detail:"
         err "    podman pull --log-level=debug $img"
+        sk_staging_cleanup
         exit 1
     fi
 done
+trap - EXIT INT TERM
+sk_staging_cleanup
 ok "all images pulled"
 
 # 10. Quadlet rendering

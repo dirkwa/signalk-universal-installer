@@ -138,9 +138,13 @@ else
 fi
 
 # install.sh must actually SET the flag on the preflight invocation — an
-# assignment prefixing the command, not merely a mention.
+# assignment prefixing the command, not merely a mention. Other assignments
+# may sit between it and `bash` (STAGING_DIR_HINT passes the image-staging
+# directory the same way), so the pattern allows further VAR=value prefixes
+# without letting an unrelated line match: it still has to be this flag,
+# prefixing this command.
 # shellcheck disable=SC2016  # literal install.sh source text, no expansion wanted
-if grep -qE '^\s*PREFLIGHT_DEFER_REBOOT_NOTICE=1 bash "\$HERE/preflight\.sh"' "$INSTALL_SH"; then
+if grep -qE '^\s*PREFLIGHT_DEFER_REBOOT_NOTICE=1 ([A-Za-z_][A-Za-z0-9_]*=[^ ]* )*bash "\$HERE/preflight\.sh"' "$INSTALL_SH"; then
     ok "install.sh sets the defer flag on the preflight invocation"
 else
     miss "install.sh does not set PREFLIGHT_DEFER_REBOOT_NOTICE on the preflight call"

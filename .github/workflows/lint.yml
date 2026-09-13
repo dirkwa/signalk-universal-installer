@@ -149,8 +149,8 @@ jobs:
       - name: supported-distro matrix
         run: bash scripts/test/check-supported-distro.sh
 
-      - name: tmpfs /tmp warning decision table
-        run: bash scripts/test/check-tmpfs-warn.sh
+      - name: image staging space decision table
+        run: bash scripts/test/check-staging-space.sh
 
       - name: dbus-auth-proxy image pin sync
         run: bash scripts/test/check-proxy-image-sync.sh
