@@ -1428,6 +1428,28 @@ fi
 # `mkdir -p` alone is not enough: it succeeds on an existing directory the
 # user cannot write to. Probe with an actual create, which is what podman
 # will do.
+#
+# Note whether the directory was already there. AGENTS.md's filesystem
+# invariant says this installer holds no state beyond ~/.config/containers/systemd/
+# and ~/.signalk-{updater,doctor}/ — staging is scratch space for the pulls
+# and nothing configures podman to keep using it, so a directory created here
+# is removed again on the way out. One an operator already had (or supplied
+# via SK_STAGING_DIR) is left alone.
+SK_STAGING_PREEXISTING=0
+[[ -d "$SK_STAGING_DIR" ]] && SK_STAGING_PREEXISTING=1
+
+# Remove the staging directory if this run created it. `rmdir` never touches
+# a non-empty directory, so a stray file left by an interrupted pull keeps it
+# (and says so) rather than being deleted blind. Podman empties the directory
+# itself after a successful pull — verified against podman 5.4.2, which leaves
+# nothing behind once the layers are committed.
+sk_staging_cleanup() {
+    (( SK_STAGING_PREEXISTING )) && return 0
+    [[ -d "$SK_STAGING_DIR" ]] || return 0
+    rmdir -- "$SK_STAGING_DIR" 2>/dev/null \
+        || info "left $SK_STAGING_DIR in place (not empty)"
+}
+
 if ! mkdir -p "$SK_STAGING_DIR" 2>/dev/null; then
     err "could not create the image staging directory $SK_STAGING_DIR."
     err "  podman unpacks each image layer there during the pull. Preflight"
@@ -1446,6 +1468,7 @@ if ! SK_STAGING_PROBE=$(mktemp "$SK_STAGING_DIR/.writable.XXXXXX" 2>/dev/null); 
     err "  would fail partway through unpacking a layer."
     err "  Fix its ownership/permissions, then re-run this installer:"
     err "    ls -ld $SK_STAGING_DIR"
+    sk_staging_cleanup
     exit 1
 fi
 rm -f -- "$SK_STAGING_PROBE"
@@ -1469,14 +1492,17 @@ for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
         err "    podman image prune -a -f   # then re-run this installer"
         err "If the store is small, the registry path may be at fault — retry, or"
         err "    podman pull --log-level=debug $img   # to see where it stalls"
+        sk_staging_cleanup
         exit 1
     elif [[ "$pull_rc" -ne 0 ]]; then
         err "pulling $img failed (podman exit $pull_rc)."
         err "Inspect the error above; retry, or for detail:"
         err "    podman pull --log-level=debug $img"
+        sk_staging_cleanup
         exit 1
     fi
 done
+sk_staging_cleanup
 ok "all images pulled"
 
 # 10. Quadlet rendering

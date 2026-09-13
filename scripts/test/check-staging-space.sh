@@ -210,6 +210,70 @@ else
     fail=1
 fi
 
+# --- check_disk must cover the container store's filesystem ---------------
+# The images land on the store's filesystem, which a storage.conf
+# rootless_storage_path (or XDG_DATA_HOME) can move off $HOME's disk. Checking
+# only $HOME would pass a host whose store filesystem is full, and
+# check_image_staging_space alone would not catch it: 768 MB of staging room
+# says nothing about room for the committed image.
+disk_probe=$(mktemp)
+cat >"$disk_probe" <<'PROBE'
+set -euo pipefail
+# shellcheck source=/dev/null
+. "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1
+fail() { echo "PREFLIGHT_FAIL: $*"; return 1; }
+podman_storage_root() { printf '%s\n' /mnt/moved-store; }
+# $HOME ample (500G), store short (2G), and on a different device so the
+# second check is reached at all.
+df() {
+    local last="${!#}"
+    case "$last" in
+        /mnt/moved-store*)
+            if [[ "$*" == *--output=source* ]]; then printf 'Filesystem\ntmpfs\n'
+            else printf 'Avail\n2G\n'; fi ;;
+        *)
+            if [[ "$*" == *--output=source* ]]; then printf 'Filesystem\n/dev/sda2\n'
+            else printf 'Avail\n500G\n'; fi ;;
+    esac
+}
+REQUIRED_DISK_GB=5 check_disk
+PROBE
+disk_out=$(PREFLIGHT="$PREFLIGHT" bash "$disk_probe" 2>&1 || true)
+rm -f "$disk_probe"
+if grep -q 'PREFLIGHT_FAIL' <<<"$disk_out" && grep -q 'container store' <<<"$disk_out"; then
+    echo "[ OK ] check_disk fails when the moved container store is short"
+else
+    echo "[FAIL] check_disk missed a short container store on another filesystem" >&2
+    printf '%s\n' "$disk_out" >&2
+    fail=1
+fi
+
+# On a default host the store shares $HOME's filesystem: report once, not
+# twice, and do not fail for a store that is the same disk already checked.
+same_probe=$(mktemp)
+cat >"$same_probe" <<'PROBE'
+set -euo pipefail
+# shellcheck source=/dev/null
+. "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1
+fail() { echo "PREFLIGHT_FAIL: $*"; return 1; }
+podman_storage_root() { printf '%s\n' "$HOME/.local/share/containers"; }
+df() {
+    if [[ "$*" == *--output=source* ]]; then printf 'Filesystem\n/dev/sda2\n'
+    else printf 'Avail\n500G\n'; fi
+}
+REQUIRED_DISK_GB=5 check_disk
+PROBE
+same_out=$(PREFLIGHT="$PREFLIGHT" bash "$same_probe" 2>&1 || true)
+rm -f "$same_probe"
+if [[ "$(grep -c 'Free disk' <<<"$same_out")" == "1" ]] \
+    && ! grep -q 'PREFLIGHT_FAIL' <<<"$same_out"; then
+    echo "[ OK ] check_disk reports once when the store shares \$HOME's filesystem"
+else
+    echo "[FAIL] check_disk double-reported or failed on a single-filesystem host" >&2
+    printf '%s\n' "$same_out" >&2
+    fail=1
+fi
+
 # --- docs/installation.md must not drift from the implementation ----------
 # The installation guide repeats three values owned by preflight.sh: the
 # required size, the drop-in filename the remedy writes, and the podman key

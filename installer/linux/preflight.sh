@@ -87,15 +87,48 @@ check_ram() {
     fi
 }
 
+# Free disk for the images themselves. Checks the container store's own
+# filesystem, not just $HOME: those are the same on a default install, but a
+# store moved via storage.conf's rootless_storage_path (or XDG_DATA_HOME) can
+# sit on a different disk entirely — and that disk, not $HOME's, is where the
+# images land. Checking only $HOME would pass a host whose store filesystem is
+# full. Both are reported when they differ, and either one short fails.
+#
+# This is the committed-image requirement; check_image_staging_space covers
+# the transient space a pull needs on top of it to unpack each layer. On a
+# default host the two land on one filesystem and this larger figure subsumes
+# the staging one; on a moved store they are measured separately.
 check_disk() {
-    local target="${HOME}"
-    local gb
-    gb=$(df -BG --output=avail "$target" | tail -1 | tr -dc 0-9)
+    local target="${HOME}" gb
+    gb=$(df -BG --output=avail "$target" 2>/dev/null | tail -1 | tr -dc 0-9)
+    if [[ -z "$gb" ]]; then
+        warn "Could not read free disk on ${target} — skipping check"
+        return 0
+    fi
     if (( gb < REQUIRED_DISK_GB )); then
         fail "Free disk on ${target}: ${gb}GB < required ${REQUIRED_DISK_GB}GB"
-    else
-        ok "Free disk ${gb}GB on ${target}"
+        return
     fi
+    ok "Free disk ${gb}GB on ${target}"
+
+    # The store's filesystem, when it is a different one.
+    local store store_dev home_dev store_gb
+    store=$(podman_storage_root)
+    [[ -n "$store" && "$store" != "$target" ]] || return 0
+    store_dev=$(df --output=source "$store" 2>/dev/null | tail -1)
+    home_dev=$(df --output=source "$target" 2>/dev/null | tail -1)
+    [[ -n "$store_dev" && "$store_dev" != "$home_dev" ]] || return 0
+
+    store_gb=$(df -BG --output=avail "$store" 2>/dev/null | tail -1 | tr -dc 0-9)
+    if [[ -z "$store_gb" ]]; then
+        warn "Could not read free disk on the container store (${store})"
+        return 0
+    fi
+    if (( store_gb < REQUIRED_DISK_GB )); then
+        fail "Free disk on the container store ${store}: ${store_gb}GB < required ${REQUIRED_DISK_GB}GB"
+        return
+    fi
+    ok "Free disk ${store_gb}GB on the container store (${store})"
 }
 
 # Where `podman pull` stages decompressed blobs before committing them to
