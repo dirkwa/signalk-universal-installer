@@ -549,7 +549,11 @@ fi
 # over an existing install podman does answer, and a moved store is followed.
 # SK_STAGING_DIR may also be set in the environment to override both.
 if [[ -z "${SK_STAGING_DIR:-}" ]]; then
-    SK_GRAPHROOT=$(timeout 15 podman info --format '{{.Store.GraphRoot}}' 2>/dev/null || true)
+    # -k 5: a wedged podman that ignores SIGTERM would otherwise keep this
+    # running past the deadline, and this probe sits ahead of preflight's
+    # check_podman_responsive — the step that diagnoses exactly that state.
+    # Same bounded-termination pattern as podman_guarded() in preflight.sh.
+    SK_GRAPHROOT=$(timeout -k 5 15 podman info --format '{{.Store.GraphRoot}}' 2>/dev/null || true)
     if [[ -n "$SK_GRAPHROOT" ]]; then
         # GraphRoot is …/containers/storage; stage in a sibling …/containers/tmp.
         SK_STAGING_DIR="$(dirname "$SK_GRAPHROOT")/tmp"
@@ -1433,7 +1437,10 @@ if ! mkdir -p "$SK_STAGING_DIR" 2>/dev/null; then
     err "  re-run this installer."
     exit 1
 fi
-if ! touch "$SK_STAGING_DIR/.writable" 2>/dev/null; then
+# mktemp, not a fixed name: SK_STAGING_DIR can be pointed at an existing
+# directory by the operator, and a fixed probe name would delete a file of
+# that name already there.
+if ! SK_STAGING_PROBE=$(mktemp "$SK_STAGING_DIR/.writable.XXXXXX" 2>/dev/null); then
     err "image staging directory $SK_STAGING_DIR is not writable."
     err "  It exists, but this user cannot create files in it — podman's pull"
     err "  would fail partway through unpacking a layer."
@@ -1441,7 +1448,7 @@ if ! touch "$SK_STAGING_DIR/.writable" 2>/dev/null; then
     err "    ls -ld $SK_STAGING_DIR"
     exit 1
 fi
-rm -f "$SK_STAGING_DIR/.writable"
+rm -f -- "$SK_STAGING_PROBE"
 info "staging image layers in $SK_STAGING_DIR"
 # Bound each pull. A stalled pull (slow store, registry hiccup, network path)
 # otherwise hangs the installer forever — the bare `podman pull` had no timeout,
