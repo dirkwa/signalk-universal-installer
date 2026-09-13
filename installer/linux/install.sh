@@ -1387,17 +1387,35 @@ fi
 # unlike the continuous churn that moving /tmp to disk would add.
 #
 # Under the container store so it shares that filesystem: if the store has
-# room for the image, its staging dir has room to unpack it. If the mkdir
-# fails, SK_STAGING_DIR stays empty and the pulls below run with podman's
-# configured staging dir — preflight has already reported whether that
-# directory has room. SK_STAGING_DIR itself was defined above preflight,
-# which has already checked free space on the filesystem it lands on.
-if mkdir -p "$SK_STAGING_DIR" 2>/dev/null; then
-    info "staging image layers in $SK_STAGING_DIR"
-else
-    warn "could not create $SK_STAGING_DIR — leaving podman's staging dir as configured"
-    SK_STAGING_DIR=""
+# room for the image, its staging dir has room to unpack it. SK_STAGING_DIR
+# was defined above preflight, which checked free space on the filesystem it
+# lands on — so falling back to podman's configured staging dir when this
+# directory is unusable would pull into a path whose capacity nothing
+# checked, re-introducing the failure this step exists to prevent. Abort
+# instead.
+#
+# `mkdir -p` alone is not enough: it succeeds on an existing directory the
+# user cannot write to. Probe with an actual create, which is what podman
+# will do.
+if ! mkdir -p "$SK_STAGING_DIR" 2>/dev/null; then
+    err "could not create the image staging directory $SK_STAGING_DIR."
+    err "  podman unpacks each image layer there during the pull. Preflight"
+    err "  checked that path for free space; falling back elsewhere would pull"
+    err "  into a directory nothing verified."
+    err "  Check ownership and permissions on ~/.local/share/containers, then"
+    err "  re-run this installer."
+    exit 1
 fi
+if ! touch "$SK_STAGING_DIR/.writable" 2>/dev/null; then
+    err "image staging directory $SK_STAGING_DIR is not writable."
+    err "  It exists, but this user cannot create files in it — podman's pull"
+    err "  would fail partway through unpacking a layer."
+    err "  Fix its ownership/permissions, then re-run this installer:"
+    err "    ls -ld $SK_STAGING_DIR"
+    exit 1
+fi
+rm -f "$SK_STAGING_DIR/.writable"
+info "staging image layers in $SK_STAGING_DIR"
 # Bound each pull. A stalled pull (slow store, registry hiccup, network path)
 # otherwise hangs the installer forever — the bare `podman pull` had no timeout,
 # unlike the `timeout 900 podman run` plugin install below. `timeout` exits 124
@@ -1406,7 +1424,7 @@ fi
 for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
     info "pulling $img"
     pull_rc=0
-    TMPDIR="${SK_STAGING_DIR:-${TMPDIR:-/var/tmp}}" \
+    TMPDIR="$SK_STAGING_DIR" \
         timeout 900 podman pull --retry 3 --retry-delay 5s "$img" || pull_rc=$?
     if [[ "$pull_rc" -eq 124 ]]; then
         # `timeout` fired: the pull was still running at 900s, not a clean error.

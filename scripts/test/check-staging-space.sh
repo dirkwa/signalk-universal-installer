@@ -110,6 +110,21 @@ run() {
             fail=1
             return
         fi
+        # The remedy must write a containers.conf.d drop-in, never append to
+        # containers.conf: a second [engine] table in one file is a TOML
+        # duplicate-key error ("Key 'engine' has already been defined") that
+        # stops podman loading its config at all, breaking every podman
+        # command rather than just the pull.
+        if ! grep -q 'containers.conf.d' <<<"$all"; then
+            echo "[FAIL] $label -> remedy does not use a containers.conf.d drop-in" >&2
+            fail=1
+            return
+        fi
+        if grep -qE '>>[[:space:]]*~?/?[^ ]*containers\.conf$' <<<"$all"; then
+            echo "[FAIL] $label -> remedy appends to containers.conf (duplicate [engine])" >&2
+            fail=1
+            return
+        fi
         if grep -q 'tmp.mount.d\|mask tmp.mount' <<<"$all"; then
             echo "[FAIL] $label -> revived the tmpfs-cap advice (wrong mechanism)" >&2
             fail=1

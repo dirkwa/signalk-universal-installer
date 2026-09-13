@@ -21,12 +21,14 @@ The installer:
    This bites on hosts where that directory is RAM-backed. Podman stages in `TMPDIR` if it is set, otherwise `engine.image_copy_tmp_dir` (default `/var/tmp`) — so on a box where either lands on a tmpfs, the tmpfs size cap, not the disk, is the ceiling. A 4 GB CM4 with a 512 MB RAM-backed `/tmp` cannot pull `signalk-server` at all. The installer avoids this for its own pulls by pointing `TMPDIR` at `~/.local/share/containers/tmp`, on the same filesystem as the container store, for the duration of the pull only. If you hit the shortfall anyway — a host that sets `TMPDIR` itself, or `podman pull` run by hand — preflight prints the fix, which redirects podman permanently:
 
    ```sh
-   mkdir -p ~/.local/share/containers/tmp ~/.config/containers
+   mkdir -p ~/.local/share/containers/tmp ~/.config/containers/containers.conf.d
    printf '[engine]\nimage_copy_tmp_dir = "%s/.local/share/containers/tmp"\n' "$HOME" \
-     >> ~/.config/containers/containers.conf
+     > ~/.config/containers/containers.conf.d/99-signalk-image-copy-tmp-dir.conf
    systemctl --user restart podman.socket
    podman info --format '{{.Store.ImageCopyTmpDir}}'   # verify
    ```
+
+   This goes in `containers.conf.d/` rather than appending to `containers.conf`: podman loads `~/.config/containers/containers.conf.d/*.conf` in alphanumeric order after the main file, and appending a second `[engine]` table to a file that already has one is a TOML duplicate-key error — podman then refuses to load its configuration at all (`Key 'engine' has already been defined`), which breaks every podman command, not just the pull.
 
    Before preflight, the installer also asks for the **vessel identity** — boat name, MMSI (9 digits), VHF call sign. Every field is optional (Enter skips). The answers are seeded into `~/.signalk/baseDeltas.json` just before signalk-server's first start, so the admin UI's Server → Settings page comes up pre-filled. With an MMSI the vessel's self identity becomes `urn:mrn:imo:mmsi:…`; without one the installer mints a `urn:mrn:signalk:uuid:…` identity instead (the server only auto-generates a UUID when `baseDeltas.json` is absent entirely). For unattended runs set `SIGNALK_VESSEL_NAME`, `SIGNALK_VESSEL_MMSI`, `SIGNALK_VESSEL_CALLSIGN` in the environment (any non-empty value suppresses the prompts); with no TTY and no non-empty env values the step is skipped. The seed is written only when the data dir has no vessel identity yet (no `baseDeltas.json`, no legacy `defaults.json`) — re-runs never prompt again and never overwrite what you changed in the admin UI.
 
