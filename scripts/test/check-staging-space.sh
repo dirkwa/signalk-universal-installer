@@ -508,38 +508,48 @@ if [[ -f "$DOCS" ]]; then
         fail=1
     fi
 
-    # Names the guide quotes that belong to the scripts. The direction
-    # matters: a name the docs mention must still exist in the file that
-    # owns it, because a reader sent to a variable that was renamed is
+    # Names the guide quotes that belong to the scripts. Each is matched
+    # against the EXPRESSION that implements it, not the bare name: a plain
+    # substring search is satisfied by a leftover comment, so deleting the
+    # implementation and leaving the prose behind would pass.
+    # rootless_storage_path in particular appears only in comments — the
+    # behaviour is carried by the GraphRoot query, which is what to check.
+    #
+    # The direction matters: a name the guide mentions must still be
+    # implemented, because a reader sent to a variable that was renamed is
     # stranded. The reverse is NOT asserted — the guide is free to stop
     # mentioning an internal identifier, and requiring it to name one would
     # make a rename in both places fail for no user-visible reason.
-    for owned in 'SK_STAGING_DIR:installer/linux/install.sh' \
-                 'GraphRoot:installer/linux/install.sh' \
-                 'rootless_storage_path:installer/linux/preflight.sh' \
-                 'STAGING_REQUIRED_MB:installer/linux/preflight.sh'; do
-        owned_name=${owned%%:*}
-        owned_file=${owned#*:}
-        grep -qF "$owned_name" "$DOCS" || continue   # docs dropped it: fine
-        if grep -qF "$owned_name" "$owned_file"; then
-            echo "[ OK ] docs name '$owned_name' and $(basename "$owned_file") still defines it"
+    check_contract() {
+        local doc_name=$1 file=$2 pattern=$3
+        grep -qF "$doc_name" "$DOCS" || return 0   # docs dropped it: fine
+        if grep -qE "$pattern" "$file"; then
+            echo "[ OK ] docs name '$doc_name'; $(basename "$file") still implements it"
         else
-            echo "[FAIL] docs name '$owned_name' but $owned_file no longer defines it" >&2
+            echo "[FAIL] docs name '$doc_name' but $file no longer implements it" >&2
+            echo "       (looked for: $pattern)" >&2
             fail=1
         fi
-    done
+    }
 
-    # podman's default staging path. Asserted in the same direction: if the
-    # guide states it, preflight must still encode it as the fallback when
-    # podman cannot be asked. A guide that stops mentioning it is fine.
-    if grep -qF '/var/tmp' "$DOCS"; then
-        if grep -qF '/var/tmp' "$PREFLIGHT"; then
-            echo "[ OK ] docs state podman's /var/tmp default and preflight still encodes it"
-        else
-            echo "[FAIL] docs state the /var/tmp default but preflight no longer encodes it" >&2
-            fail=1
-        fi
-    fi
+    # shellcheck disable=SC2016  # literal grep -E patterns, no expansion wanted
+    # The staging dir install.sh hands to the pull.
+    check_contract 'SK_STAGING_DIR' installer/linux/install.sh \
+        'TMPDIR="\$SK_STAGING_DIR"'
+    # GraphRoot is read through podman's formatted query.
+    check_contract 'GraphRoot' installer/linux/install.sh \
+        "podman info --format '\{\{\.Store\.GraphRoot\}\}'"
+    # A relocated store is followed by asking podman, not by parsing
+    # storage.conf — so the contract for rootless_storage_path is that same
+    # query in preflight's resolver.
+    check_contract 'rootless_storage_path' installer/linux/preflight.sh \
+        "podman_guarded info --format '\{\{\.Store\.GraphRoot\}\}'"
+    # The threshold the guide quotes.
+    check_contract 'STAGING_REQUIRED_MB' installer/linux/preflight.sh \
+        '^STAGING_REQUIRED_MB=\$\{STAGING_REQUIRED_MB:-[0-9]+\}'
+    # podman's default staging path, as preflight's fallback expression.
+    check_contract '/var/tmp' installer/linux/preflight.sh \
+        'd="\$\{TMPDIR:-/var/tmp\}"'
 
     # The old advice must not survive anywhere: it named the wrong mechanism
     # (shrinking a tmpfs cap) for this failure.
