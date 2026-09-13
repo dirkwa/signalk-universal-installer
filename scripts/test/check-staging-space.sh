@@ -225,6 +225,22 @@ else
     fail=1
 fi
 
+# A malformed numeric override must be rejected by name. These are documented
+# settings, so a typo reaches them; under `set -u` a non-numeric value dies
+# inside the first (( … )) with bash's own "unbound variable" and no clue
+# which setting was wrong.
+for bad_case in "STAGING_REQUIRED_MB=foo" "REQUIRED_DISK_GB=-5" "REQUIRED_RAM_MB=1.5"; do
+    bad_name=${bad_case%%=*}
+    bad_out=$(env "$bad_case" bash "$PREFLIGHT" 2>&1 | head -3 || true)
+    if grep -q "$bad_name must be a whole number" <<<"$bad_out"; then
+        echo "[ OK ] $bad_case rejected by name"
+    else
+        echo "[FAIL] $bad_case not rejected cleanly" >&2
+        printf '%s\n' "$bad_out" >&2
+        fail=1
+    fi
+done
+
 # --- the store resolver must follow a relocated store ---------------------
 # The images land on the container store's filesystem, which storage.conf's
 # rootless_storage_path can move off $HOME's disk. podman_storage_root must
@@ -329,6 +345,58 @@ if [[ "$(grep -c 'Free disk' <<<"$same_out")" == "1" ]] \
 else
     echo "[FAIL] check_disk double-reported or failed on a single-filesystem host" >&2
     printf '%s\n' "$same_out" >&2
+    fail=1
+fi
+
+# --- staging must land on the store's own filesystem ----------------------
+# install.sh derives the staging dir from GraphRoot. The normal shape is
+# …/containers/storage, where a sibling …/containers/tmp shares the
+# filesystem and sits outside the store (podman system reset wipes the store
+# directory). But GraphRoot can itself be a mount point — rootless_storage_path
+# aimed at a dedicated disk — and then the sibling is on the PARENT filesystem,
+# defeating the colocation. Extract the derivation from install.sh and drive it
+# with both shapes, using /dev/shm as a real mount point whose parent (/dev) is
+# a different filesystem.
+INSTALL_SH=${INSTALL_SH:-installer/linux/install.sh}
+if [[ -f "$INSTALL_SH" ]] && grep -q 'SK_STAGING_SIBLING' "$INSTALL_SH"; then
+    derive_staging() {
+        SK_GRAPHROOT=$1 bash -c '
+            SK_STAGING_SIBLING="$(dirname "$SK_GRAPHROOT")/tmp"
+            SK_GR_DEV=$(stat -c "%d" "$SK_GRAPHROOT" 2>/dev/null || echo "")
+            SK_SIB_DEV=$(stat -c "%d" "$(dirname "$SK_STAGING_SIBLING")" 2>/dev/null || echo "")
+            if [[ -n "$SK_GR_DEV" && -n "$SK_SIB_DEV" && "$SK_GR_DEV" != "$SK_SIB_DEV" ]]; then
+                printf "%s\n" "$SK_GRAPHROOT/tmp"
+            else
+                printf "%s\n" "$SK_STAGING_SIBLING"
+            fi'
+    }
+
+    normal_store="$HOME/.local/share/containers/storage"
+    got_normal=$(derive_staging "$normal_store")
+    if [[ "$got_normal" == "$(dirname "$normal_store")/tmp" ]]; then
+        echo "[ OK ] normal GraphRoot stages in the sibling containers/tmp"
+    else
+        echo "[FAIL] normal GraphRoot derivation wrong -> '$got_normal'" >&2
+        fail=1
+    fi
+
+    # /dev/shm is a mount point on every Linux host running this installer,
+    # and /dev is a different filesystem — the exact shape that breaks a
+    # blind sibling.
+    if [[ -d /dev/shm ]] \
+        && [[ "$(stat -c '%d' /dev/shm 2>/dev/null)" != "$(stat -c '%d' /dev 2>/dev/null)" ]]; then
+        got_mount=$(derive_staging /dev/shm)
+        if [[ "$got_mount" == "/dev/shm/tmp" ]]; then
+            echo "[ OK ] GraphRoot that is a mount point stages inside it"
+        else
+            echo "[FAIL] mount-point GraphRoot escaped to another filesystem -> '$got_mount'" >&2
+            fail=1
+        fi
+    else
+        echo "[SKIP] /dev/shm is not a separate filesystem here"
+    fi
+else
+    echo "[FAIL] $INSTALL_SH has no SK_STAGING_SIBLING derivation to check" >&2
     fail=1
 fi
 

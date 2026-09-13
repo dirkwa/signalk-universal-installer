@@ -30,6 +30,21 @@ REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
 # changing it. 768 MB leaves margin above that worst case without demanding
 # more than a small box can give.
 STAGING_REQUIRED_MB=${STAGING_REQUIRED_MB:-768}
+
+# The three numeric thresholds above are documented overrides, so a operator
+# typo reaches them. Under `set -u` a non-numeric value dies inside the first
+# (( … )) with bash's own "foo: unbound variable" and no indication of which
+# setting was wrong — validate here instead, where the message can name it.
+for _threshold in REQUIRED_RAM_MB REQUIRED_DISK_GB STAGING_REQUIRED_MB; do
+    if [[ ! "${!_threshold}" =~ ^[0-9]+$ ]]; then
+        printf '[ERR] %s must be a whole number of %s, got "%s"\n' \
+            "$_threshold" \
+            "$([[ "$_threshold" == REQUIRED_DISK_GB ]] && echo GB || echo MB)" \
+            "${!_threshold}" >&2
+        exit 1
+    fi
+done
+unset _threshold
 # signalk-server's HTTP port (and HTTPS, once TLS is enabled) is chosen
 # by install.sh and exported as SK_HTTP_PORT / SK_HTTPS_PORT. Default to
 # the standard web ports when run standalone. The HTTPS port is only

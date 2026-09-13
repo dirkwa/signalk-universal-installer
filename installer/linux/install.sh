@@ -555,8 +555,27 @@ if [[ -z "${SK_STAGING_DIR:-}" ]]; then
     # Same bounded-termination pattern as podman_guarded() in preflight.sh.
     SK_GRAPHROOT=$(timeout -k 5 15 podman info --format '{{.Store.GraphRoot}}' 2>/dev/null || true)
     if [[ -n "$SK_GRAPHROOT" ]]; then
-        # GraphRoot is …/containers/storage; stage in a sibling …/containers/tmp.
-        SK_STAGING_DIR="$(dirname "$SK_GRAPHROOT")/tmp"
+        # GraphRoot is normally …/containers/storage, so a sibling
+        # …/containers/tmp shares its filesystem and sits outside the store —
+        # `podman system reset` wipes the store directory, and staging inside
+        # it would go with it.
+        #
+        # But GraphRoot can itself be a mount point (rootless_storage_path
+        # pointed at a dedicated disk), and then the sibling is on the PARENT
+        # filesystem — a different disk, which defeats the whole point of
+        # siting staging next to the store. /dev/shm vs /dev is the same
+        # relationship: mount point and parent are different filesystems.
+        # Compare the two device ids and fall back to a directory inside
+        # GraphRoot when they differ; sharing the filesystem matters more than
+        # surviving a reset, since a reset means re-pulling anyway.
+        SK_STAGING_SIBLING="$(dirname "$SK_GRAPHROOT")/tmp"
+        SK_GR_DEV=$(stat -c '%d' "$SK_GRAPHROOT" 2>/dev/null || echo "")
+        SK_SIB_DEV=$(stat -c '%d' "$(dirname "$SK_STAGING_SIBLING")" 2>/dev/null || echo "")
+        if [[ -n "$SK_GR_DEV" && -n "$SK_SIB_DEV" && "$SK_GR_DEV" != "$SK_SIB_DEV" ]]; then
+            SK_STAGING_DIR="$SK_GRAPHROOT/tmp"
+        else
+            SK_STAGING_DIR="$SK_STAGING_SIBLING"
+        fi
     else
         SK_STAGING_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/containers/tmp"
     fi
