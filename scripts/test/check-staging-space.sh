@@ -210,12 +210,57 @@ else
     fail=1
 fi
 
-# --- check_disk must cover the container store's filesystem ---------------
-# The images land on the store's filesystem, which a storage.conf
-# rootless_storage_path (or XDG_DATA_HOME) can move off $HOME's disk. Checking
-# only $HOME would pass a host whose store filesystem is full, and
-# check_image_staging_space alone would not catch it: 768 MB of staging room
-# says nothing about room for the committed image.
+# --- the store resolver must follow a relocated store ---------------------
+# The images land on the container store's filesystem, which storage.conf's
+# rootless_storage_path can move off $HOME's disk. podman_storage_root must
+# report where podman will ACTUALLY put the store, not a hand-derived XDG
+# default — deriving it by hand reports the wrong filesystem on such a host,
+# so check_disk would measure a disk the images never touch and pass a host
+# whose real store is full.
+#
+# Exercise the shipped resolver against a real podman with a pinned
+# CONTAINERS_STORAGE_CONF, rather than stubbing it: a stub would assert the
+# test's own arithmetic and could not catch the resolver reading the wrong
+# source. Skipped when podman is unavailable — there is nothing to resolve.
+if command -v podman >/dev/null 2>&1; then
+    store_tmp=$(mktemp -d)
+    moved="$store_tmp/moved-store"
+    mkdir -p "$moved"
+    printf '[storage]\ndriver = "overlay"\nrootless_storage_path = "%s"\n' \
+        "$moved" >"$store_tmp/storage.conf"
+
+    resolved=$(CONTAINERS_STORAGE_CONF="$store_tmp/storage.conf" \
+        bash -c '. "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1; podman_storage_root' \
+        2>/dev/null || true)
+
+    if [[ "$resolved" == "$moved" ]]; then
+        echo "[ OK ] podman_storage_root follows rootless_storage_path"
+    else
+        echo "[FAIL] podman_storage_root ignored rootless_storage_path" >&2
+        echo "       expected '$moved', got '${resolved:-<empty>}'" >&2
+        fail=1
+    fi
+
+    # Wedged podman must not be probed: podman_guarded would burn its timeout
+    # on a host check_podman_responsive has already diagnosed. Falls back to
+    # the default layout instead.
+    wedged=$(bash -c '. "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1
+        PODMAN_WEDGED=1 podman_storage_root' 2>/dev/null || true)
+    if [[ "$wedged" == *"containers"* && "$wedged" != "$moved" ]]; then
+        echo "[ OK ] podman_storage_root falls back when podman is wedged"
+    else
+        echo "[FAIL] wedged fallback wrong -> '${wedged:-<empty>}'" >&2
+        fail=1
+    fi
+
+    rm -rf "$store_tmp"
+else
+    echo "[SKIP] podman not installed — store resolver not exercised"
+fi
+
+# --- check_disk must measure the store's filesystem, not just $HOME -------
+# With the resolver correct, check_disk has to actually consult it and fail
+# when that filesystem is short. $HOME ample, store short, different devices.
 disk_probe=$(mktemp)
 cat >"$disk_probe" <<'PROBE'
 set -euo pipefail
@@ -223,8 +268,6 @@ set -euo pipefail
 . "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1
 fail() { echo "PREFLIGHT_FAIL: $*"; return 1; }
 podman_storage_root() { printf '%s\n' /mnt/moved-store; }
-# $HOME ample (500G), store short (2G), and on a different device so the
-# second check is reached at all.
 df() {
     local last="${!#}"
     case "$last" in
@@ -241,7 +284,7 @@ PROBE
 disk_out=$(PREFLIGHT="$PREFLIGHT" bash "$disk_probe" 2>&1 || true)
 rm -f "$disk_probe"
 if grep -q 'PREFLIGHT_FAIL' <<<"$disk_out" && grep -q 'container store' <<<"$disk_out"; then
-    echo "[ OK ] check_disk fails when the moved container store is short"
+    echo "[ OK ] check_disk fails when the store's filesystem is short"
 else
     echo "[FAIL] check_disk missed a short container store on another filesystem" >&2
     printf '%s\n' "$disk_out" >&2
@@ -249,7 +292,7 @@ else
 fi
 
 # On a default host the store shares $HOME's filesystem: report once, not
-# twice, and do not fail for a store that is the same disk already checked.
+# twice, and do not fail for a disk already checked.
 same_probe=$(mktemp)
 cat >"$same_probe" <<'PROBE'
 set -euo pipefail

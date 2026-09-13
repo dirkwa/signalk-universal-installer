@@ -642,7 +642,26 @@ check_linger() {
 # may not exist yet on a fresh host; we walk up to the nearest existing
 # parent so `stat -f` always has something to work with.
 podman_storage_root() {
-    local root="${XDG_DATA_HOME:-$HOME/.local/share}/containers/storage"
+    # Ask podman for the store it will actually use. storage.conf's
+    # rootless_storage_path moves a rootless store (the only key that does —
+    # see scripts/test/check-unwedge-podman.sh), and deriving the XDG default
+    # by hand cannot see it: on a host with that key set, the default path and
+    # the real GraphRoot are different filesystems, so a caller measuring the
+    # derived one measures the wrong disk.
+    #
+    # Skipped when podman is absent (a fresh host, before the Podman section
+    # installs it) or wedged — podman_guarded would just burn its timeout, and
+    # check_podman_responsive has already established that verdict for any
+    # caller running after it.
+    local root=""
+    if command -v podman >/dev/null 2>&1 && (( ! PODMAN_WEDGED )); then
+        root=$(podman_guarded info --format '{{.Store.GraphRoot}}' 2>/dev/null || true)
+    fi
+    # Fall back to podman's own default layout, which is what it will create.
+    [[ -n "$root" ]] || root="${XDG_DATA_HOME:-$HOME/.local/share}/containers/storage"
+
+    # The path may not exist yet on a fresh host; walk up to the nearest
+    # existing parent so `df`/`stat -f` always have something to work with.
     local probe="$root"
     while [[ -n "$probe" && ! -e "$probe" ]]; do
         probe="${probe%/*}"
@@ -797,12 +816,14 @@ main() {
         warn "Untested on ${DISTRO_PRETTY}; continuing"
     fi
     check_ram
-    check_disk
     # Before check_ports, which is the first check that touches container
     # storage and therefore the first that can hang.
     check_podman_responsive
-    # After check_podman_responsive: it asks podman where it stages image
-    # blobs, so it needs the wedged-podman verdict already established.
+    # Both ask podman where its store and staging dirs really are, so they
+    # need the wedged-podman verdict already established. check_disk covers
+    # the committed images; check_image_staging_space the transient space a
+    # pull needs on top of them.
+    check_disk
     check_image_staging_space
     check_ports
     check_cgroups_v2
