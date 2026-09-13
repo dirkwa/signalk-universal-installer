@@ -521,7 +521,7 @@ if [[ -f "$DOCS" ]]; then
     # mentioning an internal identifier, and requiring it to name one would
     # make a rename in both places fail for no user-visible reason.
     check_contract() {
-        local doc_name=$1 file=$2 pattern=$3
+        local doc_name="$1" file="$2" pattern="$3"
         grep -qF "$doc_name" "$DOCS" || return 0   # docs dropped it: fine
         if grep -qE "$pattern" "$file"; then
             echo "[ OK ] docs name '$doc_name'; $(basename "$file") still implements it"
@@ -533,10 +533,8 @@ if [[ -f "$DOCS" ]]; then
     }
 
     # shellcheck disable=SC2016  # literal grep -E patterns, no expansion wanted
-    # The staging dir install.sh hands to the pull.
     check_contract 'SK_STAGING_DIR' installer/linux/install.sh \
         'TMPDIR="\$SK_STAGING_DIR"'
-    # GraphRoot is read through podman's formatted query.
     check_contract 'GraphRoot' installer/linux/install.sh \
         "podman info --format '\{\{\.Store\.GraphRoot\}\}'"
     # A relocated store is followed by asking podman, not by parsing
@@ -544,10 +542,8 @@ if [[ -f "$DOCS" ]]; then
     # query in preflight's resolver.
     check_contract 'rootless_storage_path' installer/linux/preflight.sh \
         "podman_guarded info --format '\{\{\.Store\.GraphRoot\}\}'"
-    # The threshold the guide quotes.
     check_contract 'STAGING_REQUIRED_MB' installer/linux/preflight.sh \
         '^STAGING_REQUIRED_MB=\$\{STAGING_REQUIRED_MB:-[0-9]+\}'
-    # podman's default staging path, as preflight's fallback expression.
     check_contract '/var/tmp' installer/linux/preflight.sh \
         'd="\$\{TMPDIR:-/var/tmp\}"'
 
