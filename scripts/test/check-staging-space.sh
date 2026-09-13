@@ -538,10 +538,15 @@ if [[ -f "$DOCS" ]]; then
     check_contract 'GraphRoot' installer/linux/install.sh \
         "podman info --format '\{\{\.Store\.GraphRoot\}\}'"
     # A relocated store is followed by asking podman, not by parsing
-    # storage.conf — so the contract for rootless_storage_path is that same
-    # query in preflight's resolver.
+    # storage.conf, so the contract for rootless_storage_path is the GraphRoot
+    # query. The guide claims it twice — for the disk check and for where
+    # staging lands — and those are two different resolvers, so assert both:
+    # preflight's would still pass if install.sh stopped resolving, and vice
+    # versa, leaving half the documented behaviour unguarded.
     check_contract 'rootless_storage_path' installer/linux/preflight.sh \
         "podman_guarded info --format '\{\{\.Store\.GraphRoot\}\}'"
+    check_contract 'rootless_storage_path' installer/linux/install.sh \
+        "podman info --format '\{\{\.Store\.GraphRoot\}\}'"
     check_contract 'STAGING_REQUIRED_MB' installer/linux/preflight.sh \
         '^STAGING_REQUIRED_MB=\$\{STAGING_REQUIRED_MB:-[0-9]+\}'
     check_contract '/var/tmp' installer/linux/preflight.sh \
