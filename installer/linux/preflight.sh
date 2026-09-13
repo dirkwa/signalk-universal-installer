@@ -22,11 +22,13 @@ REQUIRED_DISK_GB=${REQUIRED_DISK_GB:-5}
 # Free space the image-staging directory needs. `podman pull` decompresses
 # each blob into a container_images_storage* dir under its staging path
 # before committing the layer to the store, deleting each one as it goes —
-# so this bounds the PEAK, not the sum of the image sizes. Measured on
-# ghcr.io/dirkwa/signalk-server:dirkwa (1.4 GB image) pulling into a clean
-# store: 435.6 MB peak. signalk-doctor-server (297 MB image) peaked at
-# 96 MB. 768 MB leaves margin above the measured worst case without
-# demanding more than a small box can give.
+# so this bounds the PEAK, not the sum of the image sizes. Measured
+# 2026-09-14 pulling into a clean store: ghcr.io/dirkwa/signalk-server:dirkwa
+# (1.4 GB image) peaked at 435.6 MB, signalk-doctor-server (297 MB image) at
+# 96 MB. Both are rolling tags, so those are the rationale for this threshold
+# when it was set, not standing facts about the images — re-measure before
+# changing it. 768 MB leaves margin above that worst case without demanding
+# more than a small box can give.
 STAGING_REQUIRED_MB=${STAGING_REQUIRED_MB:-768}
 # signalk-server's HTTP port (and HTTPS, once TLS is enabled) is chosen
 # by install.sh and exported as SK_HTTP_PORT / SK_HTTPS_PORT. Default to
@@ -143,7 +145,13 @@ _dir_avail_mb() {
         d=${parent:-/}
     done
     [[ -d "$d" ]] || return 0
-    df -BM --output=avail "$d" 2>/dev/null | tail -1 | tr -dc 0-9
+    # `|| true`: preflight runs under `set -euo pipefail`, so a df that exits
+    # non-zero (an unreadable mount, a path that vanished between the -d test
+    # and here) would fail the pipeline, and the unguarded `avail=$(…)` in the
+    # caller would abort the whole preflight under set -e — silently, before
+    # reaching the warn branch that exists for exactly this case. Returning
+    # empty lets the caller report "could not read free space" and continue.
+    df -BM --output=avail "$d" 2>/dev/null | tail -1 | tr -dc 0-9 || true
 }
 
 # `podman pull` decompresses each blob into the staging directory before

@@ -169,6 +169,37 @@ else
     fail=1
 fi
 
+# A failing `df` must degrade to the warn path, not abort preflight. The
+# stubbed cases above pass an empty string through _dir_avail_mb, which does
+# not exercise the pipeline itself: preflight runs under `set -euo pipefail`,
+# so a df that exits non-zero fails the pipeline, and the unguarded
+# `avail=$(_dir_avail_mb "$dir")` in the caller would kill the whole preflight
+# under set -e — before reaching the warn branch written for this case.
+#
+# Run in a separate bash process rather than a $(…) subshell here: `set -e` is
+# not inherited into command substitution in this harness, so a subshell would
+# report SURVIVED either way and the assertion would pass against the bug.
+df_probe=$(mktemp)
+cat >"$df_probe" <<'PROBE'
+set -euo pipefail
+# shellcheck source=/dev/null
+. "${PREFLIGHT:-installer/linux/preflight.sh}" >/dev/null 2>&1
+fail() { echo "PREFLIGHT_FAIL: $*"; return 1; }
+_staging_dir() { printf '%s\n' /var/tmp; }
+df() { return 1; }
+check_image_staging_space
+echo "SURVIVED"
+PROBE
+df_out=$(PREFLIGHT="$PREFLIGHT" bash "$df_probe" 2>&1 || true)
+rm -f "$df_probe"
+if grep -q 'SURVIVED' <<<"$df_out" && grep -qi 'Could not read free space' <<<"$df_out"; then
+    echo "[ OK ] a failing df warns and continues (does not abort preflight)"
+else
+    echo "[FAIL] a failing df aborted the check instead of warning" >&2
+    printf '%s\n' "$df_out" >&2
+    fail=1
+fi
+
 # Without the hint it falls back to TMPDIR, matching containers.conf(5)'s
 # documented order (TMPDIR wins over engine.image_copy_tmp_dir).
 env_got=$(STAGING_DIR_HINT="" TMPDIR=/some/tmpdir PODMAN_WEDGED=1 real_staging_dir)
