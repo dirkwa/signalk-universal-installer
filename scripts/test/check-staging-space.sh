@@ -7,8 +7,9 @@
 # layer to the store. Measured against a clean store, signalk-server:dirkwa
 # (1.4 GB image) peaked at 435.6 MB of staging and signalk-doctor-server
 # (297 MB image) at 96 MB. A staging dir smaller than that peak — a
-# RAM-backed /tmp or /var/tmp capped at 512 MB on a 4 GB CM4 — fails the
-# pull outright, which is what a user reported from the field.
+# RAM-backed /var/tmp (podman's default staging path) or /tmp — fails the
+# pull outright. Reported from a 4 GB CM4 whose /var/tmp was tmpfs at
+# size=262144k, 256 MB, against a 435.6 MB staging peak.
 #
 # The check reads two host facts: where podman stages (_staging_dir) and how
 # much is free there (_dir_avail_mb). Both are their own helpers so this test
@@ -166,11 +167,12 @@ run() {
 run ok   /var/tmp     4096   768  "ample space on /var/tmp -> ok"
 run ok   /var/tmp     768    768  "exactly at requirement -> ok (boundary)"
 run fail /var/tmp     767    768  "one MB short -> FAIL (boundary)"
-run fail /tmp         200    768  "512MB tmpfs /tmp, 200MB free -> FAIL"
+run fail /tmp         200    768  "tmpfs /tmp, 200MB free -> FAIL"
 run fail /tmp         0      768  "staging dir full -> FAIL"
-# The reported CM4: 512 MB RAM-backed /tmp cannot hold signalk-server's
-# 435.6 MB peak once anything else is using it.
-run fail /tmp         430    768  "CM4 512MB tmpfs, 430MB free -> FAIL"
+# The reported CM4: /var/tmp on tmpfs at 256 MB. Podman stages there by
+# default, so signalk-server's 435.6 MB peak never fits — measured free
+# space is the whole cap, and it is still short.
+run fail /var/tmp     256    768  "CM4 256MB tmpfs /var/tmp -> FAIL"
 # Unreadable free space is not a verdict: warn, don't block a host whose
 # df output we couldn't parse.
 run warn /var/tmp     ""     768  "free space unreadable -> warn, non-blocking"
@@ -505,6 +507,50 @@ if [[ -f "$DOCS" ]]; then
         echo "--- preflight ---" >&2; printf '%s\n' "$pf_block" >&2
         fail=1
     fi
+
+    # Names the guide quotes that belong to the scripts. Each is matched
+    # against the EXPRESSION that implements it, not the bare name: a plain
+    # substring search is satisfied by a leftover comment, so deleting the
+    # implementation and leaving the prose behind would pass.
+    # rootless_storage_path in particular appears only in comments — the
+    # behaviour is carried by the GraphRoot query, which is what to check.
+    #
+    # The direction matters: a name the guide mentions must still be
+    # implemented, because a reader sent to a variable that was renamed is
+    # stranded. The reverse is NOT asserted — the guide is free to stop
+    # mentioning an internal identifier, and requiring it to name one would
+    # make a rename in both places fail for no user-visible reason.
+    check_contract() {
+        local doc_name="$1" file="$2" pattern="$3"
+        grep -qF "$doc_name" "$DOCS" || return 0   # docs dropped it: fine
+        if grep -qE "$pattern" "$file"; then
+            echo "[ OK ] docs name '$doc_name'; $(basename "$file") still implements it"
+        else
+            echo "[FAIL] docs name '$doc_name' but $file no longer implements it" >&2
+            echo "       (looked for: $pattern)" >&2
+            fail=1
+        fi
+    }
+
+    # shellcheck disable=SC2016  # literal grep -E patterns, no expansion wanted
+    check_contract 'SK_STAGING_DIR' installer/linux/install.sh \
+        'TMPDIR="\$SK_STAGING_DIR"'
+    check_contract 'GraphRoot' installer/linux/install.sh \
+        "podman info --format '\{\{\.Store\.GraphRoot\}\}'"
+    # A relocated store is followed by asking podman, not by parsing
+    # storage.conf, so the contract for rootless_storage_path is the GraphRoot
+    # query. The guide claims it twice — for the disk check and for where
+    # staging lands — and those are two different resolvers, so assert both:
+    # preflight's would still pass if install.sh stopped resolving, and vice
+    # versa, leaving half the documented behaviour unguarded.
+    check_contract 'rootless_storage_path' installer/linux/preflight.sh \
+        "podman_guarded info --format '\{\{\.Store\.GraphRoot\}\}'"
+    check_contract 'rootless_storage_path' installer/linux/install.sh \
+        "podman info --format '\{\{\.Store\.GraphRoot\}\}'"
+    check_contract 'STAGING_REQUIRED_MB' installer/linux/preflight.sh \
+        '^STAGING_REQUIRED_MB=\$\{STAGING_REQUIRED_MB:-[0-9]+\}'
+    check_contract '/var/tmp' installer/linux/preflight.sh \
+        'd="\$\{TMPDIR:-/var/tmp\}"'
 
     # The old advice must not survive anywhere: it named the wrong mechanism
     # (shrinking a tmpfs cap) for this failure.
