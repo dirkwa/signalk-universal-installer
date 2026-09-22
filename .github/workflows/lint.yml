@@ -125,6 +125,9 @@ jobs:
       - name: HALPI2 Signal K connections
         run: bash scripts/test/check-halpi2-connections.sh
 
+      - name: SocketCAN recipe (bitrate, BUS-OFF recovery)
+        run: bash scripts/test/check-socketcan-recipe.sh
+
       - name: timesync restart gating
         run: bash scripts/test/check-timesync-restart.sh
 

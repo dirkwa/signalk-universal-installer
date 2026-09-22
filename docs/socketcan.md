@@ -53,6 +53,7 @@ The interactive flow:
 
      [CAN]
      BitRate=250000
+     RestartSec=100ms
      EOF
 
      sudo systemctl enable --now systemd-networkd
@@ -62,6 +63,10 @@ The interactive flow:
      ip -br link show type can
      candump can0
 ```
+
+> **Why `RestartSec=100ms`.** It sets the controller's `restart-ms`, which the kernel leaves at **0** — meaning "never restart" — by default. A burst of bus errors (a device powered off mid-frame, a marginal terminator, a loose connector) puts the controller into **BUS-OFF**, and at `restart-ms 0` it stays there: `ip -br link show can0` reports `DOWN` with `NO-CARRIER`, every NMEA 2000 reader on the host goes silent, and only a manual `ip link set can0 down && ip link set can0 up` brings it back. On a boat that can go unnoticed for days. With `RestartSec` the controller rejoins on its own.
+>
+> Note that this makes recovery automatic, not the fault harmless: a bus that goes BUS-OFF repeatedly has a physical cause worth finding. Check `ip -d -s link show can0` for the `bus-off` counter.
 
 > **Heads-up: interrupt pins.** Waveshare's factory solder default is **INT_0 = GPIO23, INT_1 = GPIO25**. The earliest `signalk socketcan` release used `25/24` (a Copperhill PiCAN-dual convention) by mistake. If your `can0` looks `UP` but `candump` shows no frames, this is the symptom — re-edit config.txt with the correct pins above and reboot. Users who reworked the 0-ohm jumpers on the HAT can override via menu option 7 (custom dtoverlay).
 >
@@ -91,6 +96,7 @@ The CAN **FD** sibling of option 1. It carries two **MCP2518FD** controllers (`m
 
      [CAN]
      BitRate=250000
+     RestartSec=100ms
      EOF
 
      sudo systemctl enable --now systemd-networkd
