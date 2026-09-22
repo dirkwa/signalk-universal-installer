@@ -45,16 +45,9 @@ The interactive flow:
 
 2. sudo reboot
 
-3. Persist the NMEA 2000 bitrate (systemd-networkd):
-
-     sudo tee /etc/systemd/network/80-signalk-can0.network > /dev/null <<'EOF'
-     [Match]
-     Name=can0
-
-     [CAN]
-     BitRate=250000
-     RestartSec=100ms
-     EOF
+3. Persist the bitrate and BUS-OFF recovery via systemd-networkd.
+   `signalk socketcan` prints the exact `/etc/systemd/network/80-signalk-can0.network`
+   contents for your adapter — paste that, then:
 
      sudo systemctl enable --now systemd-networkd
 
@@ -86,16 +79,9 @@ The CAN **FD** sibling of option 1. It carries two **MCP2518FD** controllers (`m
 
 2. sudo reboot
 
-3. Persist the NMEA 2000 bitrate (systemd-networkd):
-
-     sudo tee /etc/systemd/network/80-signalk-can0.network > /dev/null <<'EOF'
-     [Match]
-     Name=can0
-
-     [CAN]
-     BitRate=250000
-     RestartSec=100ms
-     EOF
+3. Persist the bitrate and BUS-OFF recovery via systemd-networkd.
+   `signalk socketcan` prints the exact `/etc/systemd/network/80-signalk-can0.network`
+   contents for your adapter — paste that, then:
 
      sudo systemctl enable --now systemd-networkd
 
