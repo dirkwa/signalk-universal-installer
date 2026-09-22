@@ -44,10 +44,13 @@ else
     exit 1
 fi
 
-if printf '%s' "$recipe" | grep -qE '^ *RestartSec='; then
-    ok "recipe sets RestartSec (BUS-OFF recovery)"
+# The exact value, not just the key: a regression to a multi-second
+# delay would still "set RestartSec" while leaving CAN down long enough
+# to drop data, and the HALPI2 path this mirrors writes 100ms.
+if printf '%s' "$recipe" | grep -qE '^ *RestartSec=100ms *$'; then
+    ok "recipe sets RestartSec=100ms (BUS-OFF recovery)"
 else
-    miss "recipe omits RestartSec: a BUS-OFF controller would never rejoin the bus"
+    miss "recipe does not set RestartSec=100ms: a BUS-OFF controller would not rejoin promptly"
 fi
 
 if printf '%s' "$recipe" | grep -qE '^ *BitRate=250000'; then
