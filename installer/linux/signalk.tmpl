@@ -332,11 +332,10 @@ cmd_health() {
             # BEFORE reading exit codes — a CLEAN stop also records
             # ExecMainStatus=137/Result=exit-code, and reading that as an OOM
             # kill would misdiagnose every 'signalk stop'. The container's
-            # PID 1 is signalk-server itself, which registers no SIGTERM
-            # handler, and the kernel discards an unhandled signal for PID 1
-            # rather than applying its default disposition. SIGTERM therefore
-            # does nothing and podman's follow-up SIGKILL after StopTimeout
-            # ends every stop (verified against systemd 257; see
+            # PID 1 is signalk-server itself, which installs no
+            # application-level SIGTERM handler, and as PID 1 it does not stop
+            # on SIGTERM — so podman's follow-up SIGKILL after StopTimeout ends
+            # every stop (verified against systemd 257; see
             # quadlets/signalk-server.container.template for the timings).
             echo
             echo "  signalk-server is durably stopped (via 'signalk stop'). Start it"
