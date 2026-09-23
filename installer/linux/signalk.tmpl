@@ -330,11 +330,13 @@ cmd_health() {
             # [Install] WantedBy= line out with its #SK-PAUSED# marker
             # (signalk-updater-server src/quadlet/rewriter.ts). Check this
             # BEFORE reading exit codes — a CLEAN stop also records
-            # ExecMainStatus=137/Result=exit-code (the in-container PID 1
-            # ignores untrapped SIGTERM, so podman's follow-up SIGKILL after
-            # StopTimeout is how every stop ends; verified against systemd
-            # 257), and reading that as an OOM kill would misdiagnose every
-            # 'signalk stop'.
+            # ExecMainStatus=137/Result=exit-code, and reading that as an OOM
+            # kill would misdiagnose every 'signalk stop'. signalk-server
+            # registers no SIGTERM handler, so Node's default applies: the
+            # signal does terminate it, but only once the event loop drains,
+            # which on a full plugin set measures ~24s. podman's follow-up
+            # SIGKILL after StopTimeout=5 therefore ends every stop (verified
+            # against systemd 257).
             echo
             echo "  signalk-server is durably stopped (via 'signalk stop'). Start it"
             echo "  again with:  signalk start"
