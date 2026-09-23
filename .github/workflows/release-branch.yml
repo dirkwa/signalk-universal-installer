@@ -16,6 +16,11 @@ on:
       tag:
         description: 'Existing version tag (vX.Y.Z) to point the release branch at'
         required: true
+      redeploy-pages:
+        description: 'Also redeploy Pages from master (release-please sets this; leave false for a rollback)'
+        required: false
+        type: boolean
+        default: false
 
 # Serialize updates: each run force-pushes, so an older run finishing
 # last must not overwrite a newer release. Queued, never cancelled —
@@ -96,11 +101,14 @@ jobs:
   # bakes the clean X.Y.Z, past it the honest describe label.
   # GITHUB_TOKEN can fire this because workflow_dispatch is exempt
   # from the no-cascade rule.
-  # Push-gated: a manual rollback dispatch repoints the release branch
-  # at an old tag and must not redeploy current master in its name.
+  # Not run for a manual rollback dispatch: that repoints the release branch
+  # at an old tag and must not redeploy current master in its name. A push
+  # (a hand-cut tag) always qualifies; a dispatch only when it opts in, which
+  # release-please does — its tag reaches here by dispatch, never by push,
+  # because a GITHUB_TOKEN tag does not trigger workflows.
   redeploy-pages:
     needs: advance
-    if: github.event_name == 'push'
+    if: ${{ github.event_name == 'push' || inputs.redeploy-pages }}
     runs-on: ubuntu-latest
     # Bound the job so a wedged step fails in minutes rather than
     # holding a runner until the 6-hour default expires.
