@@ -374,6 +374,10 @@ cmd_health() {
         -p NRestarts --value 2>/dev/null || true)
     if [[ "$nrestarts" =~ ^[0-9]+$ ]] && (( nrestarts > 0 )); then
         stamp="${XDG_RUNTIME_DIR:-$HOME/.cache}/signalk-health-restarts"
+        # $XDG_RUNTIME_DIR always exists when set; $HOME/.cache may not on a
+        # minimal box. Without it the write below fails, no baseline is ever
+        # recorded, and the climb can never be detected.
+        mkdir -p "${stamp%/*}" 2>/dev/null || true
         now=$(date +%s)
         prev_n=""; prev_t=""
         # Tolerate a truncated or hand-edited stamp: unparseable halves stay
@@ -390,12 +394,27 @@ cmd_health() {
             delta_n=$(( nrestarts - prev_n ))
             delta_t=$(( now - prev_t ))
             (( delta_t < 1 )) && delta_t=1
-            echo "  [LOOP] signalk-server has restarted ${delta_n} time(s) in the last"
-            echo "         ${delta_t}s (${nrestarts} total). It is crash-looping, not idle —"
-            echo "         systemd brings it straight back, so the probe above can still"
-            echo "         read [OK]. A plugin throwing from a timer or socket callback is"
-            echo "         the usual cause. Find it with:"
-            echo "           signalk logs | grep -i 'uncaught exception'"
+            # A single restart is not a loop. Restart=always also brings the
+            # server back from the admin UI's Restart button, which is a clean
+            # exit(0) (see quadlets/signalk-server.container.template), so one
+            # increase since the last health run is ordinary operation. Only a
+            # sustained rate is evidence of a loop: RestartSec=10 caps a real
+            # one at ~6/minute, so require at least 2 restarts averaging no
+            # more than 120s apart.
+            if (( delta_n >= 2 && delta_t / delta_n <= 120 )); then
+                echo "  [LOOP] signalk-server has restarted ${delta_n} times in the last"
+                echo "         ${delta_t}s (${nrestarts} total). It is crash-looping, not idle —"
+                echo "         systemd brings it straight back, so the probe above can still"
+                echo "         read [OK]. A plugin throwing from a timer or socket callback is"
+                echo "         the usual cause. Find it with:"
+                echo "           signalk logs | grep -i 'uncaught exception'"
+            else
+                # Report the change without calling it a loop: one Restart-button
+                # press, or restarts too far apart to be a loop, land here.
+                echo "  signalk-server restarted ${delta_n} time(s) in the last ${delta_t}s"
+                echo "  (${nrestarts} total). Expected after a restart; if the count keeps"
+                echo "  climbing on each 'signalk health', it is crash-looping."
+            fi
         else
             # First run, or no growth since the last one. Still worth naming:
             # the total is otherwise invisible without reading journals.

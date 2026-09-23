@@ -41,8 +41,9 @@ ok "cmd_health extracted"
 # Drive cmd_health with every external it touches stubbed.
 #   $1 label | $2 NRestarts now | $3 pre-seeded stamp ("" = none)
 #   $4 grep -E pattern the output must match
+#   $5 optional grep -E pattern the output must NOT match
 run_case() {
-    local label="$1" n="$2" seed="$3" want="$4"
+    local label="$1" n="$2" seed="$3" want="$4" forbid="${5:-}"
     local out rc=0 home="$tmp/home"
     rm -rf "$home"; mkdir -p "$home/.cache"
     [[ -n "$seed" ]] && printf '%s\n' "$seed" >"$home/.cache/signalk-health-restarts"
@@ -85,18 +86,25 @@ run_case() {
         miss "$label: cmd_health exited rc=$rc (out: $(tr '\n' '|' <<<"$out"))"
         return
     fi
-    if grep -qE "$want" <<<"$out"; then
-        ok "$label"
-    else
+    if ! grep -qE "$want" <<<"$out"; then
         miss "$label: output did not match /$want/"
         printf '         %s\n' "$(tr '\n' '|' <<<"$out")" >&2
+        return
     fi
+    # A presence-only assertion would pass even if the output ALSO cried
+    # [LOOP], which is the false positive the no-growth cases exist to catch.
+    if [[ -n "$forbid" ]] && grep -qE "$forbid" <<<"$out"; then
+        miss "$label: output unexpectedly matched /$forbid/"
+        printf '         %s\n' "$(tr '\n' '|' <<<"$out")" >&2
+        return
+    fi
+    ok "$label"
 }
 
 # The regression case: server answers HTTP fine, but the count has climbed
 # since the last run. Must report [LOOP] despite the probe reading [OK].
 run_case "climbing count while HTTP is OK -> [LOOP]" \
-    47 "42 $(( $(date +%s) - 30 ))" '\[LOOP\] signalk-server has restarted 5 time\(s\)'
+    47 "42 $(( $(date +%s) - 30 ))" '\[LOOP\] signalk-server has restarted 5 times'
 
 # The probe really is reporting OK in that case — i.e. the detection does not
 # depend on the server being down. Asserted explicitly so a future change that
@@ -107,11 +115,11 @@ run_case "loop is reported even though the probe says [OK]" \
 # No prior stamp: nothing to compare against yet, so report the total and ask
 # for a second look rather than crying loop on a long-uptime host.
 run_case "first run (no stamp) -> total only, no [LOOP]" \
-    9 "" 'restart count: 9'
+    9 "" 'restart count: 9' '\[LOOP\]'
 
 # Steady count: restarts happened once, long ago. Not a loop.
 run_case "unchanged count -> no [LOOP]" \
-    9 "9 $(( $(date +%s) - 300 ))" 'restart count: 9'
+    9 "9 $(( $(date +%s) - 300 ))" 'restart count: 9' '\[LOOP\]'
 
 # A fresh unit that has never restarted must stay silent entirely. Asserted as
 # a true absence: run_case only matches presence, so this is checked inline.
@@ -155,11 +163,22 @@ run_zero_case
 
 # Corrupt stamp must not crash or produce a bogus delta.
 run_case "unparseable stamp -> falls back to total, no crash" \
-    9 "garbage" 'restart count: 9'
+    9 "garbage" 'restart count: 9' '\[LOOP\]'
 
-# The stamp is written so the NEXT run has a baseline.
+# A single restart is ordinary operation: the admin UI's Restart button is a
+# clean exit(0) that Restart=always brings back. Reporting that as a crash
+# loop would make [LOOP] untrustworthy, so it must report the change plainly.
+run_case "one restart (Restart button) -> reported, NOT a loop" \
+    10 "9 $(( $(date +%s) - 30 ))" 'restarted 1 time\(s\) in the last' '\[LOOP\]'
+
+# Two restarts spread over an hour average well past the rate threshold.
+run_case "two restarts an hour apart -> not a loop" \
+    11 "9 $(( $(date +%s) - 3600 ))" 'restarted 2 time\(s\) in the last' '\[LOOP\]'
+
+# The stamp is written so the NEXT run has a baseline. Reads the value left by
+# the last run_case above, so it tracks whatever that case used.
 stampdir="$tmp/home/.cache/signalk-health-restarts"
-if [[ -s "$stampdir" ]] && [[ "$(cut -d' ' -f1 <"$stampdir")" == "9" ]]; then
+if [[ -s "$stampdir" ]] && [[ "$(cut -d' ' -f1 <"$stampdir")" == "11" ]]; then
     ok "stamp file records the current count for the next run"
 else
     miss "stamp file not written with the current count"
