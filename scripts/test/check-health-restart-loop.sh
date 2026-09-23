@@ -175,13 +175,29 @@ run_case "one restart (Restart button) -> reported, NOT a loop" \
 run_case "two restarts an hour apart -> not a loop" \
     11 "9 $(( $(date +%s) - 3600 ))" 'restarted 2 time\(s\) in the last' '\[LOOP\]'
 
-# The stamp is written so the NEXT run has a baseline. Reads the value left by
-# the last run_case above, so it tracks whatever that case used.
-stampdir="$tmp/home/.cache/signalk-health-restarts"
-if [[ -s "$stampdir" ]] && [[ "$(cut -d' ' -f1 <"$stampdir")" == "11" ]]; then
+# `systemctl stop` resets NRestarts to 0 (verified on systemd 257), so the
+# counter can go DOWN between runs — after a `signalk stop; signalk start`, or
+# any restart that goes through a full stop. A decrease must not be read as a
+# delta, and the stamp is re-seeded from the current value so the next run
+# compares against a real baseline.
+run_case "counter reset (stop/start) -> no [LOOP], reports current total" \
+    3 "20 $(( $(date +%s) - 30 ))" 'restart count: 3' '\[LOOP\]'
+
+# A backward clock step (a boat with no RTC gets its time from NTP after boot)
+# makes now-prev_t negative. The clamp keeps the average positive so a genuine
+# loop is still reported rather than divided by a negative interval.
+run_case "backward clock step with a real loop -> still [LOOP]" \
+    8 "5 $(( $(date +%s) + 3600 ))" '\[LOOP\]'
+
+# The stamp is written so the NEXT run has a baseline. Driven by its own case
+# rather than inspecting whatever the last run_case happened to leave, so
+# adding or reordering cases above cannot silently invalidate this.
+run_case "stamp is written for the next run" 77 "" 'restart count: 77' '\[LOOP\]'
+stampfile="$tmp/home/.cache/signalk-health-restarts"
+if [[ -s "$stampfile" ]] && [[ "$(cut -d' ' -f1 <"$stampfile")" == "77" ]]; then
     ok "stamp file records the current count for the next run"
 else
-    miss "stamp file not written with the current count"
+    miss "stamp file not written with the current count (got: $(cat "$stampfile" 2>/dev/null))"
 fi
 
 if (( fail )); then

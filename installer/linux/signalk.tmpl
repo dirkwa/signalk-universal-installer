@@ -383,11 +383,17 @@ cmd_health() {
         # Tolerate a truncated or hand-edited stamp: unparseable halves stay
         # empty and fall through to the "recorded, no delta yet" path.
         if [[ -r "$stamp" ]]; then
-            read -r prev_n prev_t <"$stamp" 2>/dev/null || true
+            # The 2>/dev/null must wrap the whole group, not sit after the
+            # redirect: a redirect that fails to OPEN is reported by the shell
+            # itself, and a trailing 2>/dev/null is applied too late to catch
+            # it. Same for the write below — an unwritable stamp dir (a
+            # read-only /run, a root-owned ~/.cache) would otherwise print a
+            # raw permission-denied line in the middle of `signalk health`.
+            { read -r prev_n prev_t <"$stamp"; } 2>/dev/null || true
             [[ "$prev_n" =~ ^[0-9]+$ ]] || prev_n=""
             [[ "$prev_t" =~ ^[0-9]+$ ]] || prev_t=""
         fi
-        printf '%s %s\n' "$nrestarts" "$now" >"$stamp" 2>/dev/null || true
+        { printf '%s %s\n' "$nrestarts" "$now" >"$stamp"; } 2>/dev/null || true
 
         echo
         if [[ -n "$prev_n" && -n "$prev_t" ]] && (( nrestarts > prev_n )); then
