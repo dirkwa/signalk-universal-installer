@@ -46,11 +46,7 @@ else
 # `pull` fails; any inspect would succeed — so an identity line in the
 # output can only mean the helper ran on a failed pull.
 [[ "$1" == "pull" ]] && exit 1
-case "$5" in
-    *Digest*)   echo "sha256:ffff" ;;
-    *revision*) echo "0123456789abcdef0123456789abcdef01234567" ;;
-    *version*)  echo "9.9.9" ;;
-esac
+printf '%s\t%s\t%s\n' 'sha256:ffff' '9.9.9' '0123456789abcdef0123456789abcdef01234567'
 STUB
     chmod +x "$LOOP_STUB/podman"
     out=$(PATH="$LOOP_STUB:$PATH" bash -c "
@@ -90,17 +86,21 @@ trap 'rm -rf "$STUB_DIR"' EXIT
 # Stub podman: these cases must not depend on a real image store or a
 # network path. `podman image inspect <img> --format <fmt>` is the only
 # call shape the helper makes.
+# Emits the one tab-separated line the helper's single template produces,
+# and counts its own invocations so a regression back to several inspects
+# is caught. Args: digest, version, revision — "" for a field the image
+# does not carry (nil .Labels), "<no value>" for a present-but-missing key.
 write_stub() {
     cat >"$STUB_DIR/podman" <<STUB
 #!/usr/bin/env bash
-case "\$5" in
-    *Digest*)   printf '%s\n' '$1' ;;
-    *revision*) printf '%s\n' '$2' ;;
-    *version*)  printf '%s\n' '$3' ;;
-esac
+echo x >>"$STUB_DIR/calls"
+printf '%s\t%s\t%s\n' '$1' '$2' '$3'
 STUB
     chmod +x "$STUB_DIR/podman"
+    : >"$STUB_DIR/calls"
 }
+
+inspect_calls() { wc -l <"$STUB_DIR/calls" | tr -d ' '; }
 
 run_helper() {
     PATH="$STUB_DIR:$PATH" bash -c "
@@ -113,12 +113,23 @@ run_helper() {
 }
 
 # 1. Digest plus both labels: the version and a short revision.
-write_stub 'sha256:aaaa' '41c63156516151600bd4354ed4a189d1d99c944f' '2.31.1'
+write_stub 'sha256:aaaa' '2.31.1' '41c63156516151600bd4354ed4a189d1d99c944f'
 out=$(run_helper ghcr.io/x/img:dirkwa)
 if grep -q 'sha256:aaaa' <<<"$out" && grep -q '2\.31\.1' <<<"$out" && grep -q '41c6315' <<<"$out"; then
     echo "  [OK]   digest + version + revision logged"
 else
     echo "  [MISS] expected digest, version and revision, got: $out"
+    fail=1
+fi
+
+# All three fields come from ONE template. Three separate inspects would
+# triple what a wedged podman costs here — 60s per image instead of 20s,
+# against the 15s timeout plus its 5s kill grace.
+calls=$(inspect_calls)
+if [[ "$calls" == "1" ]]; then
+    echo "  [OK]   identity read in a single podman inspect"
+else
+    echo "  [MISS] expected 1 podman inspect, counted $calls"
     fail=1
 fi
 
@@ -131,9 +142,9 @@ else
     echo "  [OK]   revision is shortened to a short sha"
 fi
 
-# 2. A missing label prints "<no value>" via Go's `index`. That must never
-#    reach the log as though it were an identity.
-write_stub 'sha256:bbbb' '<no value>' '<no value>'
+# 2. An image with no labels at all: .Labels is nil, so `index` emits
+#    EMPTY fields — two adjacent tabs — not "<no value>".
+write_stub 'sha256:bbbb' '' ''
 out=$(run_helper docker.io/library/busybox:1.36)
 if grep -q 'sha256:bbbb' <<<"$out" && ! grep -q 'no value' <<<"$out" \
     && ! grep -q '(' <<<"$out"; then
@@ -143,13 +154,27 @@ else
     fail=1
 fi
 
-# 3. Only one of the two labels present — still useful, still clean.
-write_stub 'sha256:cccc' 'abcdef1234567890abcdef1234567890abcdef12' '<no value>'
+# 3. Revision present, version absent — an EMPTY middle field. Splitting
+#    with `IFS=$'\t' read` collapses the adjacent tabs and slides the
+#    revision into `version`, which then logs unshortened and without the
+#    "rev" label. Assert the revision is shortened and correctly named.
+write_stub 'sha256:cccc' '' 'abcdef1234567890abcdef1234567890abcdef12'
 out=$(run_helper ghcr.io/x/img:tag)
-if grep -q 'rev abcdef1' <<<"$out" && ! grep -q 'no value' <<<"$out"; then
-    echo "  [OK]   revision-only image logs the revision"
+if grep -q '(rev abcdef1)' <<<"$out" \
+    && ! grep -q 'abcdef1234567890' <<<"$out"; then
+    echo "  [OK]   empty middle field does not shift the revision"
 else
     echo "  [MISS] revision-only image produced: $out"
+    fail=1
+fi
+
+# A "<no value>" key (label map present, this key missing) is also absent.
+write_stub 'sha256:dddd' '<no value>' '<no value>'
+out=$(run_helper ghcr.io/x/img:tag)
+if grep -q 'sha256:dddd' <<<"$out" && ! grep -q 'no value' <<<"$out"; then
+    echo "  [OK]   '<no value>' keys are treated as absent"
+else
+    echo "  [MISS] '<no value>' leaked into the log: $out"
     fail=1
 fi
 

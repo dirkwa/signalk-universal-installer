@@ -1483,20 +1483,36 @@ SK_STAGING_PREEXISTING=0
 # so a podman quirk or an image without these labels (a third-party base
 # image carries neither) cannot abort a pull that actually succeeded —
 # the caller runs under `set -euo pipefail`.
-# Each inspect is bounded like the GraphRoot probe above: podman blocks
+# One inspect, not three: all three fields come out of a single Go
+# template, so a wedged podman costs this helper one timeout per image
+# rather than three (20s instead of 60s, and 60s instead of 180s across
+# the three pulls).
+#
+# The inspect is bounded like the GraphRoot probe above: podman blocks
 # forever rather than erroring when the c/storage lock is held by a stuck
-# cleanup, and the pull's own 900s timeout does not cover these calls. A
+# cleanup, and the pull's own 900s timeout does not cover this call. A
 # wedged podman ignores SIGTERM, so `-k` is what actually bounds it — see
 # scripts/test/check-podman-timeout-guards.sh for the measurement.
+#
+# Tab-separated because a label value is free text that can contain
+# spaces (`.description` does); tabs are what `read` splits on here, with
+# IFS set for this one read only.
 log_pulled_identity() {
-    local img="$1" digest="" revision="" version="" note=""
-    digest=$(timeout -k 5 15 podman image inspect "$img" \
-        --format '{{.Digest}}' 2>/dev/null || true)
-    revision=$(timeout -k 5 15 podman image inspect "$img" \
-        --format '{{index .Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)
-    version=$(timeout -k 5 15 podman image inspect "$img" \
-        --format '{{index .Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)
-    # `index` on a missing key prints "<no value>"; treat that as absent.
+    local img="$1" fields="" digest="" revision="" version="" note=""
+    fields=$(timeout -k 5 15 podman image inspect "$img" --format \
+        '{{.Digest}}{{"\t"}}{{index .Labels "org.opencontainers.image.version"}}{{"\t"}}{{index .Labels "org.opencontainers.image.revision"}}' \
+        2>/dev/null || true)
+    # Split at explicit tab boundaries. `IFS=$'\t' read` would collapse a
+    # run of tabs into one separator, so an image with a revision label
+    # and no version label — the empty middle field below — would put the
+    # revision into `version` and log it unshortened under the wrong name.
+    digest="${fields%%$'\t'*}"
+    fields="${fields#*$'\t'}"
+    version="${fields%%$'\t'*}"
+    revision="${fields#*$'\t'}"
+    # `index` on a missing key prints "<no value>" when .Labels exists but
+    # lacks the key, and an empty field when .Labels is nil entirely (a
+    # third-party image with no labels at all). Treat both as absent.
     [[ "$revision" == "<no value>" ]] && revision=""
     [[ "$version" == "<no value>" ]] && version=""
     # Short-sha the revision: the full 40 chars crowd the line, and the
