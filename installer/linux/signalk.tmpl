@@ -458,7 +458,7 @@ cmd_health() {
     # So scan the log instead of the unit state. A handful of exceptions is
     # ordinary (a plugin probing absent hardware at startup); a rate this high
     # is a plugin stuck in a throwing callback.
-    local exc_window=120 exc_min=10 exc_count exc_log exc_plugin
+    local exc_window=120 exc_min=10 exc_count exc_log exc_plugin exc_rc=0
     local -a exc_tmo=()
     command -v timeout >/dev/null 2>&1 && exc_tmo=(timeout -k 5 10)
     # --since, not --tail: with the journald driver `--tail N` scans the whole
@@ -468,24 +468,42 @@ cmd_health() {
     # ONE read, reused for both the count and the attribution below. A second
     # query would re-run a bounded podman call over the same window, so a
     # wedged runtime would cost `signalk health` another full timeout.
-    exc_log=$("${exc_tmo[@]}" podman logs --since "${exc_window}s" signalk-server 2>&1 || true)
-    exc_count=$(grep -c 'Uncaught exception' <<<"$exc_log" || true)
-    if [[ "$exc_count" =~ ^[0-9]+$ ]] && (( exc_count >= exc_min )); then
-        # Attribution is a LEAD, not a verdict. Counting every node_modules
-        # frame would let a dependency outvote the plugin (three lodash frames
-        # beat one plugin frame), so take the frame closest to the throw — the
-        # first after each `Uncaught exception` line — and keep an @scope/name
-        # whole rather than truncating it to the scope.
-        exc_plugin=$(grep -A1 'Uncaught exception' <<<"$exc_log"             | sed -n 's;.*/node_modules/\(@[^/]*/[^/]*\|[^/@][^/]*\)/.*;\1;p'             | sort | uniq -c | sort -rn | awk 'NR==1{print $2}' || true)
+    exc_log=$("${exc_tmo[@]}" podman logs --since "${exc_window}s" signalk-server 2>&1) || exc_rc=$?
+    if (( exc_rc != 0 )); then
+        # Say so rather than reading a failed query as a clean bill of health:
+        # an empty capture counts zero exceptions, which is exactly what a
+        # healthy server looks like. timeout exits 124 (and 137 once it
+        # escalates to SIGKILL) — a wedged runtime, not a quiet one.
         echo
-        echo "  [THROW] signalk-server logged ${exc_count} uncaught exceptions in the"
-        echo "          last ${exc_window}s. The handler in src/index.ts absorbs them,"
-        echo "          so the unit never restarts and the count is the only sign."
-        echo "          A plugin is throwing on a timer or socket callback."
-        if [[ -n "$exc_plugin" ]]; then
-            echo "          Most stack frames nearest the throw point at: ${exc_plugin}"
+        case "$exc_rc" in
+            124|137) echo "  [WARN] could not scan the server log for uncaught exceptions:" ;;
+            *)       echo "  [WARN] could not read the server log (exit ${exc_rc}):" ;;
+        esac
+        echo "         the container runtime did not answer in time, so a throwing"
+        echo "         plugin would not show up below. Retry, or read it directly:"
+        echo "           signalk logs | grep -A5 'Uncaught exception'"
+    else
+        exc_count=$(grep -c 'Uncaught exception' <<<"$exc_log" || true)
+        if [[ "$exc_count" =~ ^[0-9]+$ ]] && (( exc_count > exc_min )); then
+            # Attribution is a LEAD, not a verdict. Counting every node_modules
+            # frame would let a dependency outvote the plugin (three lodash frames
+            # beat one plugin frame), so take the frame closest to the throw — the
+            # first after each `Uncaught exception` line — and keep an @scope/name
+            # whole rather than truncating it to the scope.
+            exc_plugin=$(grep -A1 'Uncaught exception' <<<"$exc_log" \
+                | sed -n 's;.*/node_modules/\(@[^/]*/[^/]*\|[^/@][^/]*\)/.*;\1;p' \
+                | sort | uniq -c | sort -rn | awk 'NR==1{print $2}' || true)
+            echo
+            echo "  [THROW] signalk-server logged ${exc_count} uncaught exceptions in the"
+            echo "          last ${exc_window}s. The handler in src/index.ts absorbs them,"
+            echo "          so they need not have restarted the unit — check the restart"
+            echo "          count above for that. A plugin throwing on a timer or socket"
+            echo "          callback is the usual cause."
+            if [[ -n "$exc_plugin" ]]; then
+                echo "          Most stack frames nearest the throw point at: ${exc_plugin}"
+            fi
+            echo "          See them with:  signalk logs | grep -A5 'Uncaught exception'"
         fi
-        echo "          See them with:  signalk logs | grep -A5 'Uncaught exception'"
     fi
 
     echo

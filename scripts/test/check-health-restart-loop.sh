@@ -30,6 +30,22 @@ trap 'rm -rf "$tmp"' EXIT
 ok()   { echo "  [OK]   $1"; }
 miss() { echo "  [MISS] $1"; fail=1; }
 
+# cmd_health runs its log scan as `"${exc_tmo[@]}" podman logs ...`, and with
+# coreutils timeout present exc_tmo is `timeout -k 5 10` — which EXECS the real
+# podman, bypassing each case's shell-function stub and reaching host Podman
+# (host-dependent results, and up to a 10s wait per case). Stubbing timeout
+# here, once, keeps every case hermetic: strip timeout's own flags and the
+# duration, then run the rest through the shell so the stubs apply.
+# shellcheck disable=SC2317  # invoked from the eval'd cmd_health
+timeout_stub() {
+    while [[ "${1:-}" == -* ]]; do
+        [[ "$1" == "-k" ]] && shift
+        shift
+    done
+    shift || true   # the duration
+    "$@"
+}
+
 body=$(sed -n '/^cmd_health() {/,/^}/p' "$TMPL")
 if [[ -z "$body" ]] || ! grep -q '^}' <<<"$body"; then
     miss "cmd_health not extracted cleanly (renamed?)"
@@ -76,6 +92,8 @@ run_case() {
             }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             podman() { : ; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            timeout() { timeout_stub "$@"; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             docker() { : ; }
             eval "$body"
@@ -145,6 +163,8 @@ run_zero_case() {
             systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             podman() { : ; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            timeout() { timeout_stub "$@"; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             docker() { : ; }
             eval "$body"
@@ -276,19 +296,8 @@ run_throw_case() {
             systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             podman() { case "$*" in logs*) printf '%s\n' "$SIM_LOG" ;; *) : ;; esac; }
-            # The code calls `$exc_tmo podman logs ...`. With exc_tmo set to
-            # `timeout -k 5 10`, timeout execs the REAL podman and the stub
-            # above is bypassed, so timeout has to be stubbed too: strip its
-            # own flags and run the rest through the shell's functions.
             # shellcheck disable=SC2317  # invoked from the eval'd function
-            timeout() {
-                while [[ "${1:-}" == -* ]]; do
-                    [[ "$1" == "-k" ]] && shift
-                    shift
-                done
-                shift || true   # the duration
-                "$@"
-            }
+            timeout() { timeout_stub "$@"; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             docker() { : ; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
@@ -313,7 +322,6 @@ run_throw_case() {
     ok "$label"
 }
 
-# 12 exceptions, all from one plugin: [THROW] and the plugin named.
 throwing_log=""
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     throwing_log+="Uncaught exception: TypeError: Cannot read properties of undefined (reading 'value')
@@ -356,6 +364,69 @@ run_throw_case "2 exceptions -> no [THROW]" \
     "Uncaught exception: Error: connect ENOENT /var/run/dbus/system_bus_socket
 Uncaught exception: Error: connect ENOENT /var/run/dbus/system_bus_socket" \
     '=== SignalK Stack Health ===' '\[THROW\]'
+
+# Exactly 10 is the boundary: the threshold is "more than", so 10 stays quiet
+# and 11 reports. Asserted from both sides so a >= / > slip cannot pass.
+boundary_log=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    boundary_log+="Uncaught exception: TypeError: boom
+    at tick (/home/node/.signalk/node_modules/signalk-barometer/index.js:1:1)
+"
+done
+run_throw_case "exactly 10 exceptions -> no [THROW]" \
+    "$boundary_log" '=== SignalK Stack Health ===' '\[THROW\]'
+run_throw_case "11 exceptions -> [THROW]" \
+    "${boundary_log}Uncaught exception: TypeError: boom
+    at tick (/home/node/.signalk/node_modules/signalk-barometer/index.js:1:1)" \
+    '\[THROW\].*11 uncaught exceptions'
+
+# A log query that fails or times out captures nothing, which counts as zero
+# exceptions — indistinguishable from a healthy server. It must say so rather
+# than reporting a clean bill of health it did not establish.
+scan_fails_case() {
+    local label="$1" rc="$2" want="$3"
+    local out home="$tmp/home" crc=0
+    rm -rf "$home"; mkdir -p "$home/.cache"
+    out=$(
+        {
+            set -uo pipefail
+            # shellcheck disable=SC2030,SC2031
+            export HOME="$home" QUADLET_DIR="$home/quadlets"
+            # shellcheck disable=SC2030,SC2031
+            export SIGNALK_URL="http://stub" UPDATER_URL="http://stub" DOCTOR_URL="http://stub"
+            unset XDG_RUNTIME_DIR
+            mkdir -p "$QUADLET_DIR"
+            export SIM_RC="$rc"
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            health_probe() { printf 'ok 0.1\n'; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            pub_url() { printf '%s' "$1"; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
+            # A wedged runtime: no output, non-zero status.
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            podman() { case "$*" in logs*) return "$SIM_RC" ;; *) : ;; esac; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            timeout() { timeout_stub "$@"; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            docker() { : ; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            signalk_all_containers() { : ; }
+            eval "$body"
+            cmd_health
+        } 2>&1
+    ) || crc=$?
+    if (( crc != 0 )); then
+        miss "$label: cmd_health exited rc=$crc"
+    elif ! grep -qE "$want" <<<"$out"; then
+        miss "$label: output did not match /$want/ — a failed scan read as healthy"
+        printf '         %s\n' "$(tr '\n' '|' <<<"$out")" >&2
+    else
+        ok "$label"
+    fi
+}
+scan_fails_case "log scan times out -> [WARN], not silence" 124 '\[WARN\] could not scan the server log'
+scan_fails_case "log scan errors -> [WARN] with the exit code" 125 '\[WARN\] could not read the server log \(exit 125\)'
 
 run_throw_case "quiet log -> no [THROW]" \
     "signalk-server running at 0.0.0.0:3000" \
