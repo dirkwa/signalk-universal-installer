@@ -354,14 +354,19 @@ cmd_health() {
         fi
     fi
 
-    # A crash loop is the one failure this unit cannot show as [FAIL].
+    # A crash loop is one of two failures this unit cannot show as [FAIL].
     # signalk-server runs StartLimitIntervalSec=0 / Restart=always, so it
     # never latches into `failed` — it restarts every RestartSec forever,
     # and the branches above (which key off server_down) never run. With a
     # 10s cadence a server that dies on a 2s plugin timer is still up most
     # of the time, so the HTTP probe above lands in an up window and prints
     # [OK]: an operator whose server is looping all day gets a clean bill
-    # of health (SignalK/signalk-server#3056 burned a day on exactly this).
+    # of health.
+    #
+    # This covers only the case where the process actually DIES and systemd
+    # brings it back. A plugin that throws without killing the process is the
+    # other case, and NRestarts stays 0 for it — see the log scan further
+    # down, which is what SignalK/signalk-server#3056 turned out to be.
     #
     # NRestarts is systemd's own counter and survives the restarts, so it
     # reports the loop without needing to catch the process down. A full stop
@@ -438,6 +443,66 @@ cmd_health() {
                 echo "  signalk-server restart count: ${nrestarts} (run 'signalk health'"
                 echo "  again in a minute — a climbing count means a crash loop)"
             fi
+        fi
+    fi
+
+    # The other failure that reads as [OK]: a plugin throwing continuously
+    # WITHOUT killing the process. src/index.ts installs an uncaughtException
+    # handler, so a stray throw from a timer or socket callback is logged and
+    # absorbed — the server keeps serving, NRestarts stays 0, and the restart
+    # check above says nothing. Reproduced with signalk-barometer 1.1.0, whose
+    # publishReadings() reads pressureReadings[length-1].value on a 2s timer
+    # with no empty-array guard: 38 exceptions in three minutes, NRestarts=0,
+    # Result=success, HTTP answering, `signalk health` all [OK].
+    #
+    # So scan the log instead of the unit state. A handful of exceptions is
+    # ordinary (a plugin probing absent hardware at startup); a rate this high
+    # is a plugin stuck in a throwing callback.
+    local exc_window=120 exc_min=10 exc_count exc_log exc_plugin exc_rc=0
+    local -a exc_tmo=()
+    command -v timeout >/dev/null 2>&1 && exc_tmo=(timeout -k 5 10)
+    # --since, not --tail: with the journald driver `--tail N` scans the whole
+    # journal regardless of N (see cmd_bug_report), which on a chatty box costs
+    # 15-20s. Bounded anyway — a wedged podman ignores SIGTERM, hence -k.
+    #
+    # ONE read, reused for both the count and the attribution below. A second
+    # query would re-run a bounded podman call over the same window, so a
+    # wedged runtime would cost `signalk health` another full timeout.
+    exc_log=$("${exc_tmo[@]}" podman logs --since "${exc_window}s" signalk-server 2>&1) || exc_rc=$?
+    if (( exc_rc != 0 )); then
+        # Say so rather than reading a failed query as a clean bill of health:
+        # an empty capture counts zero exceptions, which is exactly what a
+        # healthy server looks like. timeout exits 124 (and 137 once it
+        # escalates to SIGKILL) — a wedged runtime, not a quiet one.
+        echo
+        case "$exc_rc" in
+            124|137) echo "  [WARN] could not scan the server log for uncaught exceptions:" ;;
+            *)       echo "  [WARN] could not read the server log (exit ${exc_rc}):" ;;
+        esac
+        echo "         the container runtime did not answer in time, so a throwing"
+        echo "         plugin would not show up below. Retry, or read it directly:"
+        echo "           signalk logs | grep -A5 'Uncaught exception'"
+    else
+        exc_count=$(grep -c 'Uncaught exception' <<<"$exc_log" || true)
+        if [[ "$exc_count" =~ ^[0-9]+$ ]] && (( exc_count > exc_min )); then
+            # Attribution is a LEAD, not a verdict. Counting every node_modules
+            # frame would let a dependency outvote the plugin (three lodash frames
+            # beat one plugin frame), so take the frame closest to the throw — the
+            # first after each `Uncaught exception` line — and keep an @scope/name
+            # whole rather than truncating it to the scope.
+            exc_plugin=$(grep -A1 'Uncaught exception' <<<"$exc_log" \
+                | sed -n 's;.*/node_modules/\(@[^/]*/[^/]*\|[^/@][^/]*\)/.*;\1;p' \
+                | sort | uniq -c | sort -rn | awk 'NR==1{print $2}' || true)
+            echo
+            echo "  [THROW] signalk-server logged ${exc_count} uncaught exceptions in the"
+            echo "          last ${exc_window}s. The handler in src/index.ts absorbs them,"
+            echo "          so they need not have restarted the unit — check the restart"
+            echo "          count above for that. A plugin throwing on a timer or socket"
+            echo "          callback is the usual cause."
+            if [[ -n "$exc_plugin" ]]; then
+                echo "          Most stack frames nearest the throw point at: ${exc_plugin}"
+            fi
+            echo "          See them with:  signalk logs | grep -A5 'Uncaught exception'"
         fi
     fi
 
