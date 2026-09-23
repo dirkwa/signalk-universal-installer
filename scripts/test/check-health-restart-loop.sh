@@ -246,6 +246,97 @@ else
     miss "stamp file not written with the current count (got: $(cat "$stampfile" 2>/dev/null))"
 fi
 
+# The OTHER [OK]-while-broken case: a plugin throwing continuously WITHOUT
+# killing the process. The uncaughtException handler in src/index.ts absorbs
+# it, so NRestarts stays 0 and the restart check above says nothing — verified
+# live with signalk-barometer 1.1.0 (60 exceptions in 120s, NRestarts=0,
+# Result=success, every probe [OK]). Detection reads the container log instead.
+#   $1 label | $2 simulated log body | $3 expect-match | $4 expect-NO-match
+run_throw_case() {
+    local label="$1" log="$2" want="$3" forbid="${4:-}"
+    local out rc=0 home="$tmp/home"
+    rm -rf "$home"; mkdir -p "$home/.cache"
+    out=$(
+        {
+            set -uo pipefail
+            # shellcheck disable=SC2030,SC2031
+            export HOME="$home" QUADLET_DIR="$home/quadlets"
+            # shellcheck disable=SC2030,SC2031
+            export SIGNALK_URL="http://stub" UPDATER_URL="http://stub" DOCTOR_URL="http://stub"
+            unset XDG_RUNTIME_DIR
+            mkdir -p "$QUADLET_DIR"
+            export SIM_LOG="$log"
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            health_probe() { printf 'ok 0.1\n'; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            pub_url() { printf '%s' "$1"; }
+            # No restarts: this failure mode leaves NRestarts at 0, which is
+            # the whole point — the restart check must stay silent.
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            podman() { case "$*" in logs*) printf '%s\n' "$SIM_LOG" ;; *) : ;; esac; }
+            # The code calls `$exc_tmo podman logs ...`. With exc_tmo set to
+            # `timeout -k 5 10`, timeout execs the REAL podman and the stub
+            # above is bypassed, so timeout has to be stubbed too: strip its
+            # own flags and run the rest through the shell's functions.
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            timeout() {
+                while [[ "${1:-}" == -* ]]; do
+                    [[ "$1" == "-k" ]] && shift
+                    shift
+                done
+                shift || true   # the duration
+                "$@"
+            }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            docker() { : ; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            signalk_all_containers() { : ; }
+            eval "$body"
+            cmd_health
+        } 2>&1
+    ) || rc=$?
+    if (( rc != 0 )); then
+        miss "$label: cmd_health exited rc=$rc"
+        return
+    fi
+    if ! grep -qE "$want" <<<"$out"; then
+        miss "$label: output did not match /$want/"
+        printf '         %s\n' "$(tr '\n' '|' <<<"$out")" >&2
+        return
+    fi
+    if [[ -n "$forbid" ]] && grep -qE "$forbid" <<<"$out"; then
+        miss "$label: output unexpectedly matched /$forbid/"
+        return
+    fi
+    ok "$label"
+}
+
+# 12 exceptions, all from one plugin: [THROW] and the plugin named.
+throwing_log=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    throwing_log+="Uncaught exception: TypeError: Cannot read properties of undefined (reading 'value')
+    at publishReadings (/home/node/.signalk/node_modules/signalk-barometer/index.js:142:38)
+"
+done
+run_throw_case "12 exceptions, NRestarts=0 -> [THROW] naming the plugin" \
+    "$throwing_log" '\[THROW\].*12 uncaught exceptions'
+run_throw_case "the throwing plugin is named" \
+    "$throwing_log" 'point at: signalk-barometer'
+
+# A couple of startup exceptions are ordinary (this box logs a dbus ENOENT on
+# every boot). Below the threshold, so no [THROW] — otherwise the line cries
+# wolf on every healthy install.
+run_throw_case "2 exceptions -> no [THROW]" \
+    "Uncaught exception: Error: connect ENOENT /var/run/dbus/system_bus_socket
+Uncaught exception: Error: connect ENOENT /var/run/dbus/system_bus_socket" \
+    '=== SignalK Stack Health ===' '\[THROW\]'
+
+run_throw_case "quiet log -> no [THROW]" \
+    "signalk-server running at 0.0.0.0:3000" \
+    '=== SignalK Stack Health ===' '\[THROW\]'
+
 if (( fail )); then
     echo "[FAIL] check-health-restart-loop"
     exit 1
