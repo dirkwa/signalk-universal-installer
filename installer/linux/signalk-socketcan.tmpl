@@ -298,6 +298,13 @@ print_recipe() {
     echo
     echo "     [CAN]"
     echo "     BitRate=${bitrate}"
+    # RestartSec makes the controller rejoin the bus after a BUS-OFF.
+    # Without it the kernel leaves restart-ms at 0: a burst of bus errors
+    # takes the controller off permanently, every reader on the host goes
+    # silent, and only a manual `ip link set can0 down && up` recovers it.
+    # The HALPI2 path already writes this (signalk-halpi2.tmpl); the
+    # generic recipe omitted it.
+    echo "     RestartSec=100ms"
     echo "     EOF"
     echo
     echo "     sudo systemctl enable --now systemd-networkd"

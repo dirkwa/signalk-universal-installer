@@ -45,15 +45,9 @@ The interactive flow:
 
 2. sudo reboot
 
-3. Persist the NMEA 2000 bitrate (systemd-networkd):
-
-     sudo tee /etc/systemd/network/80-signalk-can0.network > /dev/null <<'EOF'
-     [Match]
-     Name=can0
-
-     [CAN]
-     BitRate=250000
-     EOF
+3. Persist the bitrate and BUS-OFF recovery via systemd-networkd.
+   `signalk socketcan` prints the exact `/etc/systemd/network/80-signalk-can0.network`
+   contents for your adapter — paste that, then:
 
      sudo systemctl enable --now systemd-networkd
 
@@ -62,6 +56,10 @@ The interactive flow:
      ip -br link show type can
      candump can0
 ```
+
+> **The recipe configures `can0` only.** The dual-channel overlays above bring up both interfaces, but `signalk socketcan` writes a networkd file for `can0` alone — so `can1` appears with no bitrate and stays `DOWN`. That is deliberate: NMEA 2000 is one bus, and the second channel is usually either unused or carrying something else (an engine ECU at a different bitrate, say). To use it, copy the `can0` file to `80-signalk-can1.network`, change `Name=` to `can1`, and set that bus's own `BitRate=`.
+
+> **Why `RestartSec` is in the recipe.** It sets the controller's `restart-ms`, which the kernel leaves at **0** — meaning "never restart" — by default. A burst of bus errors (a device powered off mid-frame, a marginal terminator, a loose connector) puts the controller into **BUS-OFF**, and at `restart-ms 0` it stays there: `ip -br link show can0` reports `DOWN` with `NO-CARRIER`, every NMEA 2000 reader on the host goes silent, and only a manual `ip link set can0 down && ip link set can0 up` brings it back. On a boat that can go unnoticed for days. With `RestartSec` set, the controller rejoins on its own. Note this makes recovery automatic, not the fault harmless — a bus that goes BUS-OFF repeatedly has a physical cause worth finding, and `ip -d -s link show can0` carries the `bus-off` counter.
 
 > **Heads-up: interrupt pins.** Waveshare's factory solder default is **INT_0 = GPIO23, INT_1 = GPIO25**. The earliest `signalk socketcan` release used `25/24` (a Copperhill PiCAN-dual convention) by mistake. If your `can0` looks `UP` but `candump` shows no frames, this is the symptom — re-edit config.txt with the correct pins above and reboot. Users who reworked the 0-ohm jumpers on the HAT can override via menu option 7 (custom dtoverlay).
 >
@@ -83,15 +81,9 @@ The CAN **FD** sibling of option 1. It carries two **MCP2518FD** controllers (`m
 
 2. sudo reboot
 
-3. Persist the NMEA 2000 bitrate (systemd-networkd):
-
-     sudo tee /etc/systemd/network/80-signalk-can0.network > /dev/null <<'EOF'
-     [Match]
-     Name=can0
-
-     [CAN]
-     BitRate=250000
-     EOF
+3. Persist the bitrate and BUS-OFF recovery via systemd-networkd.
+   `signalk socketcan` prints the exact `/etc/systemd/network/80-signalk-can0.network`
+   contents for your adapter — paste that, then:
 
      sudo systemctl enable --now systemd-networkd
 
