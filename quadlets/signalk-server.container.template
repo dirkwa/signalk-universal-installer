@@ -167,15 +167,29 @@ Environment=PORT=__SK_HTTP_PORT__
 Environment=EXTERNALHOST=__SK_EXTERNAL_HOST__
 
 # Cut podman's SIGTERM → SIGKILL grace from the default 10s to 5s.
-# signalk-server registers no SIGTERM handler (none in src/ or
-# bin/signalk-server upstream), so Node's default applies: SIGTERM does
-# terminate it, but only once the event loop drains. Measured on this
-# stack's own image with a full plugin set, that takes ~24s — the
-# process is not ignoring the signal, it is outliving any sane grace
-# period. Neither 10s nor 5s ever reaches a clean exit, so the shorter
-# one only stops the user waiting twice as long for the same SIGKILL.
-# Every stop therefore records ExecMainStatus=137; that is this stack's
-# normal stop path, not a crash. Maps to podman's --stop-timeout flag.
+#
+# The container's PID 1 is signalk-server itself (startup.sh execs), and
+# signalk-server registers no SIGTERM handler — none in src/ or
+# bin/signalk-server upstream. The kernel does not apply default signal
+# dispositions to PID 1: a signal with no handler installed is discarded
+# rather than terminating it. So SIGTERM does nothing at all here, and
+# every stop ends when podman gives up and sends SIGKILL.
+#
+# Measured against this stack's own image, stopping on SIGTERM alone:
+#   node as PID 1, explicit SIGTERM handler ...   184ms
+#   node as PID 1, no handler ................. 12763ms  (podman's SIGKILL)
+#   `sleep` as PID 1, no handler .............. 12798ms  (same)
+#   signalk-server, empty config .............. 25742ms  (same)
+#   the SAME node process as PID 3, no handler .. 321ms  (control)
+# The last line is the control: identical image, process and signal, and
+# the only difference is not being PID 1. The plugins are not involved
+# either — an empty config behaves the same as a full one.
+#
+# Since no grace period ever reaches a clean exit, the shorter one only
+# stops the user waiting twice as long for the same SIGKILL. Every stop
+# therefore records ExecMainStatus=137; that is this stack's normal stop
+# path, not a crash. An upstream SIGTERM handler would fix it properly.
+# Maps to podman's --stop-timeout flag.
 StopTimeout=5
 
 Label=io.signalk.managed-by=updater
