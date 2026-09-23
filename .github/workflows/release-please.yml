@@ -1,0 +1,105 @@
+# Release automation. release-please maintains a standing Release PR built from
+# the conventional commits on master; merging that PR is the release act — it
+# creates the vX.Y.Z tag and the GitHub Release.
+#
+# Before this workflow, a release was a hand-written annotated tag. The tag is
+# still what everything downstream keys on, so the shape of the release did not
+# change; what changed is who writes it.
+name: release-please
+
+on:
+  push:
+    branches: [master]
+
+# Every push to master runs this, and back-to-back merges race over the same
+# Release PR. Queued rather than cancelled: a cancelled run could drop the
+# release commit that created the tag.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  # release-please's own "no user-facing commits" skip never fires under
+  # changelog-type: github — GitHub's generated notes are never empty, they
+  # always end in a Full Changelog line — so without this gate every docs: or
+  # chore: merge opens a release PR. This repo takes plenty of both.
+  #
+  # Reads the SUBJECT LINE of each pushed commit, which holds because this repo
+  # squash-merges (history is linear, subjects carry the PR title and `(#NNN)`).
+  # Merge commits would put the conventional title on a later line and every
+  # push would judge non-releasable, including the release PR's own merge — no
+  # release would ever happen. If merge commits are ever enabled here, test the
+  # whole message instead of split("\n")[0].
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      releasable: ${{ steps.check.outputs.releasable }}
+    steps:
+      - id: check
+        env:
+          MESSAGES: ${{ toJSON(github.event.commits.*.message) }}
+          # feat/fix/perf/revert, any type!:, a BREAKING CHANGE: footer,
+          # build(deps): (a runtime bump — Dependabot scopes dev ones
+          # deps-dev), and the release PR's own merge, whose title comes from
+          # pull-request-title-pattern in release-please-config.json. Keep the
+          # last alternative matching that pattern: that merge is what creates
+          # the tag.
+          RELEASABLE: '^((feat|fix|perf|revert)(\([^)]*\))?!?: |[a-z]+(\([^)]*\))?!: |build\(deps\): |Revert |chore(\([^)]*\))?: release v?[0-9])'
+        run: |
+          # Fail open at both ends: a full payload (>=2048) may hide a
+          # releasable commit behind truncation, and an empty one has nothing
+          # to judge — `any` is false for an empty array, so without that
+          # clause a payload carrying no commits would silently skip.
+          if jq -e --arg re "$RELEASABLE" '(length == 0) or (length >= 2048) or ([.[] | (split("\n")[0] | test($re)) or test("\nBREAKING[- ]CHANGE: ")] | any)' <<< "$MESSAGES" > /dev/null; then
+            echo "releasable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "releasable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release-please:
+    needs: gate
+    if: ${{ needs.gate.outputs.releasable == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      # release-please creates its autorelease:* labels through the issues API.
+      issues: write
+      # For the dispatches below.
+      actions: write
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # A tag pushed with GITHUB_TOKEN does not trigger other workflows —
+      # GitHub's recursion guard — and it is silent: no error, no skipped-run
+      # entry. Both of this repo's release workflows are tag-triggered, so
+      # without these dispatches the Release would appear correct while the
+      # `release` branch stopped advancing and Pages kept serving the previous
+      # version. workflow_dispatch is the documented exemption to the guard.
+      #
+      # Keep this list in step with the tag-triggered workflows: read their
+      # triggers rather than grepping for `tags:` — a push: with no
+      # branches:/tags: filter fires on tags too.
+      - name: Dispatch the tag-triggered release workflows
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          # release-branch.yml declares a required `tag` input and resolves the
+          # tag itself, so the dispatch ref does not matter.
+          gh workflow run release-branch.yml -f tag="$TAG"
+          # pages.yml declares NO inputs — passing one fails the dispatch with
+          # HTTP 422 "Unexpected inputs provided" and queues nothing. It needs
+          # none: scripts/installer-version.sh derives the label from the
+          # commit (git tag --points-at HEAD), so the tag ref is sufficient.
+          gh workflow run pages.yml --ref "$TAG"
