@@ -164,6 +164,9 @@ jobs:
       - name: curl HTTP-status capture
         run: bash scripts/test/check-curl-status-capture.sh
 
+      - name: health crash-loop detection
+        run: bash scripts/test/check-health-restart-loop.sh
+
       - name: Pages installer-version label
         run: bash scripts/test/check-pages-version.sh
 
