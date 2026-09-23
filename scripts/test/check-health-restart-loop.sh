@@ -323,7 +323,31 @@ done
 run_throw_case "12 exceptions, NRestarts=0 -> [THROW] naming the plugin" \
     "$throwing_log" '\[THROW\].*12 uncaught exceptions'
 run_throw_case "the throwing plugin is named" \
-    "$throwing_log" 'point at: signalk-barometer'
+    "$throwing_log" 'nearest the throw point at: signalk-barometer'
+
+# Attribution must take the frame CLOSEST to the throw, not the most frequent
+# node_modules frame overall — a chatty dependency deeper in the stack would
+# otherwise outvote the plugin and the diagnostic would name the wrong package.
+mixed_log=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    mixed_log+="Uncaught exception: TypeError: Cannot read properties of undefined (reading 'value')
+    at publishReadings (/home/node/.signalk/node_modules/signalk-barometer/index.js:142:38)
+    at wrapped (/home/node/.signalk/node_modules/lodash/lodash.js:1:1)
+    at wrapped2 (/home/node/.signalk/node_modules/lodash/lodash.js:2:2)
+"
+done
+run_throw_case "dependency frames must not outvote the plugin" \
+    "$mixed_log" 'nearest the throw point at: signalk-barometer' 'point at: lodash'
+
+# A scoped package keeps its @scope/name; truncating to @scope names no plugin.
+scoped_log=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    scoped_log+="Uncaught exception: TypeError: boom
+    at tick (/home/node/.signalk/node_modules/@signalk/some-plugin/index.js:1:1)
+"
+done
+run_throw_case "scoped plugin name is kept whole" \
+    "$scoped_log" 'nearest the throw point at: @signalk/some-plugin'
 
 # A couple of startup exceptions are ordinary (this box logs a dbus ENOENT on
 # every boot). Below the threshold, so no [THROW] — otherwise the line cries
