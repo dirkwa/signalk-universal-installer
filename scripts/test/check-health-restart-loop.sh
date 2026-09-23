@@ -161,6 +161,52 @@ run_zero_case() {
 }
 run_zero_case
 
+# A full stop resets NRestarts to 0. The zero run must stay silent but still
+# re-seed the stamp: leaving a stale high baseline makes the NEXT run compare
+# a fresh low count against it, fail the growth check, and miss a loop for a
+# whole window.
+zero_reseeds_stamp() {
+    local home="$tmp/home" out rc=0 now_n
+    rm -rf "$home"; mkdir -p "$home/.cache"
+    printf '20 %s\n' "$(( $(date +%s) - 30 ))" >"$home/.cache/signalk-health-restarts"
+    out=$(
+        {
+            set -uo pipefail
+            # shellcheck disable=SC2030,SC2031
+            export HOME="$home" QUADLET_DIR="$home/quadlets"
+            # shellcheck disable=SC2030,SC2031
+            export SIGNALK_URL="http://stub" UPDATER_URL="http://stub" DOCTOR_URL="http://stub"
+            unset XDG_RUNTIME_DIR
+            mkdir -p "$QUADLET_DIR"
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            health_probe() { printf 'ok 0.1\n'; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            pub_url() { printf '%s' "$1"; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            podman() { : ; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            docker() { : ; }
+            eval "$body"
+            cmd_health
+        } 2>&1
+    ) || rc=$?
+    now_n=$(cut -d' ' -f1 <"$home/.cache/signalk-health-restarts" 2>/dev/null || echo MISSING)
+    if (( rc != 0 )); then
+        miss "zero re-seeds stamp: cmd_health exited rc=$rc"
+    elif grep -qiE 'restart count|\[LOOP\]' <<<"$out"; then
+        miss "zero re-seeds stamp: expected silence, got: $(tr '\n' '|' <<<"$out")"
+    elif [[ "$now_n" != "0" ]]; then
+        miss "zero re-seeds stamp: stamp still [$now_n], expected 0 (stale baseline hides the next loop)"
+    elif ! grep -q "Container snapshot" <<<"$out"; then
+        miss "zero re-seeds stamp: cmd_health returned early — later sections missing"
+    else
+        ok "counter reset to 0 -> silent, stamp re-seeded, rest of health still runs"
+    fi
+}
+zero_reseeds_stamp
+
 # Corrupt stamp must not crash or produce a bogus delta.
 run_case "unparseable stamp -> falls back to total, no crash" \
     9 "garbage" 'restart count: 9' '\[LOOP\]'

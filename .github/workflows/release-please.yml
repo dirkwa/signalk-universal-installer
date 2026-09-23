@@ -17,6 +17,12 @@ on:
 concurrency:
   group: release-please
   cancel-in-progress: false
+  # Default `queue: single` keeps at most one run PENDING and drops the rest,
+  # so a docs-only push landing behind a queued release-PR merge can replace
+  # it — and the docs push fails the gate, so nothing creates the tag. `max`
+  # keeps up to 100 pending runs instead. (Not allowed with
+  # cancel-in-progress: true.)
+  queue: max
 
 permissions: {}
 
@@ -43,7 +49,9 @@ jobs:
           MESSAGES: ${{ toJSON(github.event.commits.*.message) }}
           # feat/fix/perf/revert, any type!:, a BREAKING CHANGE: footer,
           # build(deps): (a runtime bump — Dependabot scopes dev ones
-          # deps-dev), and the release PR's own merge. That last alternative
+          # deps-dev), and the release PR's own merge. A Release-As: footer is
+          # matched separately below, since its subject is an ordinary chore:.
+          # That last alternative
           # must stay in step with pull-request-title-pattern in
           # release-please-config.json — currently `chore(release): X.Y.Z`,
           # chosen to match .coderabbit.yaml's ignore_title_keywords. Change
@@ -55,7 +63,7 @@ jobs:
           # releasable commit behind truncation, and an empty one has nothing
           # to judge — `any` is false for an empty array, so without that
           # clause a payload carrying no commits would silently skip.
-          if jq -e --arg re "$RELEASABLE" '(length == 0) or (length >= 2048) or ([.[] | (split("\n")[0] | test($re)) or test("\nBREAKING[- ]CHANGE: ")] | any)' <<< "$MESSAGES" > /dev/null; then
+          if jq -e --arg re "$RELEASABLE" '(length == 0) or (length >= 2048) or ([.[] | (split("\n")[0] | test($re)) or test("\nBREAKING[- ]CHANGE: ") or test("\nRelease-As: *v?[0-9]"; "i")] | any)' <<< "$MESSAGES" > /dev/null; then
             echo "releasable=true" >> "$GITHUB_OUTPUT"
           else
             echo "releasable=false" >> "$GITHUB_OUTPUT"
@@ -82,21 +90,20 @@ jobs:
 
       # A tag pushed with GITHUB_TOKEN does not trigger other workflows —
       # GitHub's recursion guard — and it is silent: no error, no skipped-run
-      # entry. Both of this repo's release workflows are tag-triggered, so
-      # without these dispatches the Release would appear correct while the
-      # `release` branch stopped advancing and Pages kept serving the previous
-      # version. workflow_dispatch is the documented exemption to the guard.
+      # entry. Without this dispatch the Release would appear correct while
+      # the `release` branch stopped advancing and Pages kept serving the
+      # previous version. workflow_dispatch is the documented exemption.
       #
-      # Keep this list in step with the tag-triggered workflows: read their
+      # Keep this in step with the tag-triggered workflows: read their
       # triggers rather than grepping for `tags:` — a push: with no
       # branches:/tags: filter fires on tags too.
-      - name: Dispatch the tag-triggered release workflows
+      - name: Dispatch the tag-triggered release workflow
         if: ${{ steps.release.outputs.release_created }}
         env:
           GH_TOKEN: ${{ github.token }}
           # This job never checks out, so the workspace is not a git repo and
           # `gh` has no remote to infer the target from. It does not read
-          # GITHUB_REPOSITORY. Without this both dispatches fail — after the
+          # GITHUB_REPOSITORY. Without this the dispatch fails — after the
           # tag and Release already exist, which is precisely the silent
           # half-release this step exists to prevent.
           GH_REPO: ${{ github.repository }}
@@ -105,9 +112,13 @@ jobs:
           set -euo pipefail
           # release-branch.yml declares a required `tag` input and resolves the
           # tag itself, so the dispatch ref does not matter.
-          gh workflow run release-branch.yml -f tag="$TAG"
-          # pages.yml declares NO inputs — passing one fails the dispatch with
-          # HTTP 422 "Unexpected inputs provided" and queues nothing. It needs
-          # none: scripts/installer-version.sh derives the label from the
-          # commit (git tag --points-at HEAD), so the tag ref is sufficient.
-          gh workflow run pages.yml --ref "$TAG"
+          # redeploy-pages=true: this is a release, not a rollback, so the
+          # release-branch workflow should also redeploy Pages from master.
+          gh workflow run release-branch.yml -f tag="$TAG" -f redeploy-pages=true
+          # Pages is deliberately NOT dispatched here. A tag-ref Pages deploy
+          # succeeds and never reaches the serving origin (observed on v0.4.0
+          # and v0.4.1 — see release-branch.yml), so `--ref "$TAG"` would be a
+          # silent no-op. release-branch.yml owns the Pages redeploy and does
+          # it from master for that reason; its redeploy-pages job is gated on
+          # `github.event_name == 'push'`, which a dispatch is not, so that
+          # gate is widened rather than duplicated here.
