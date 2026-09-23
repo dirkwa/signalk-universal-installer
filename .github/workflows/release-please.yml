@@ -43,11 +43,13 @@ jobs:
           MESSAGES: ${{ toJSON(github.event.commits.*.message) }}
           # feat/fix/perf/revert, any type!:, a BREAKING CHANGE: footer,
           # build(deps): (a runtime bump — Dependabot scopes dev ones
-          # deps-dev), and the release PR's own merge, whose title comes from
-          # pull-request-title-pattern in release-please-config.json. Keep the
-          # last alternative matching that pattern: that merge is what creates
-          # the tag.
-          RELEASABLE: '^((feat|fix|perf|revert)(\([^)]*\))?!?: |[a-z]+(\([^)]*\))?!: |build\(deps\): |Revert |chore(\([^)]*\))?: release v?[0-9])'
+          # deps-dev), and the release PR's own merge. That last alternative
+          # must stay in step with pull-request-title-pattern in
+          # release-please-config.json — currently `chore(release): X.Y.Z`,
+          # chosen to match .coderabbit.yaml's ignore_title_keywords. Change
+          # one without the other and the release PR's merge judges
+          # non-releasable, so the tag is never created and releases stop.
+          RELEASABLE: '^((feat|fix|perf|revert)(\([^)]*\))?!?: |[a-z]+(\([^)]*\))?!: |build\(deps\): |Revert |chore\(release\): v?[0-9])'
         run: |
           # Fail open at both ends: a full payload (>=2048) may hide a
           # releasable commit behind truncation, and an empty one has nothing
@@ -92,6 +94,12 @@ jobs:
         if: ${{ steps.release.outputs.release_created }}
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job never checks out, so the workspace is not a git repo and
+          # `gh` has no remote to infer the target from. It does not read
+          # GITHUB_REPOSITORY. Without this both dispatches fail — after the
+          # tag and Release already exist, which is precisely the silent
+          # half-release this step exists to prevent.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.release.outputs.tag_name }}
         run: |
           set -euo pipefail

@@ -364,11 +364,13 @@ cmd_health() {
     # of health (SignalK/signalk-server#3056 burned a day on exactly this).
     #
     # NRestarts is systemd's own counter and survives the restarts, so it
-    # reports the loop without needing to catch the process down. It resets
-    # only on `reset-failed` or a daemon restart, so a nonzero value is not
-    # itself alarming on a long-uptime host — what matters is whether it is
-    # CLIMBING. The stamp file records the value and the time it was seen;
-    # a rising count over a short interval is the signal.
+    # reports the loop without needing to catch the process down. A full stop
+    # (`systemctl stop`, and so `signalk stop`) or `reset-failed` sets it back
+    # to 0 — verified on systemd 257; auto-restarts do not. So the count can
+    # fall as well as rise, a nonzero value is not itself alarming on a
+    # long-uptime host, and what matters is whether it is CLIMBING. The stamp
+    # file records the value and the time it was seen; a rising count over a
+    # short interval is the signal.
     local nrestarts stamp prev_n prev_t now delta_n delta_t
     nrestarts=$(systemctl --user show signalk-server.service \
         -p NRestarts --value 2>/dev/null || true)
