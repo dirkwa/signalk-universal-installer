@@ -158,6 +158,9 @@ jobs:
       - name: dbus-auth-proxy image pin sync
         run: bash scripts/test/check-proxy-image-sync.sh
 
+      - name: pulled image identity logging
+        run: bash scripts/test/check-pull-identity-log.sh
+
       - name: signalk restart verb
         run: bash scripts/test/check-signalk-restart.sh
 

@@ -1458,6 +1458,82 @@ fi
 SK_STAGING_PREEXISTING=0
 [[ -d "$SK_STAGING_DIR" ]] && SK_STAGING_PREEXISTING=1
 
+# Record WHICH image a pull actually landed on, in the install log.
+#
+# `podman pull` exiting 0 only says the tag resolved to something — not
+# which build that something is. The rolling tags (`:dirkwa`, `:latest`,
+# `:master`) are re-pointed every few hours, so a log line that says only
+# "pulling …:dirkwa" cannot later distinguish "pulled the then-current
+# build" from "kept an older local tag". Both leave an in-date exit code
+# and a container running an image nobody can identify after the fact.
+#
+# The digest answers that, and the image's own OCI labels make it
+# human-readable: `org.opencontainers.image.revision` is the source
+# commit and `.version` the release it was built from. The digest is the
+# local platform image's, not the manifest-list digest the registry
+# shows for a multi-arch tag — podman resolves the tag to this host's
+# architecture on pull, and that is the image actually running. Both
+# labels are baked into the image at build time, so they survive any
+# pull — unlike RepoTags, which after a plain `podman pull repo:tag`
+# holds only the ref that was asked for. Boats are off-network by the time
+# anyone reads the log, so resolving this against GHCR later is not an
+# option; it has to be captured here.
+#
+# Never fails the install: this is diagnostics. Every command is guarded
+# so a podman quirk or an image without these labels (a third-party base
+# image carries neither) cannot abort a pull that actually succeeded —
+# the caller runs under `set -euo pipefail`.
+# One inspect, not three: all three fields come out of a single Go
+# template, so a wedged podman costs this helper one timeout per image
+# rather than three (20s instead of 60s, and 60s instead of 180s across
+# the three pulls).
+#
+# The inspect is bounded like the GraphRoot probe above: podman blocks
+# forever rather than erroring when the c/storage lock is held by a stuck
+# cleanup, and the pull's own 900s timeout does not cover this call. A
+# wedged podman ignores SIGTERM, so `-k` is what actually bounds it — see
+# scripts/test/check-podman-timeout-guards.sh for the measurement.
+#
+# Tab-separated because a label value is free text that can contain
+# spaces (`.description` does); tabs are what `read` splits on here, with
+# IFS set for this one read only.
+log_pulled_identity() {
+    local img="$1" fields="" digest="" revision="" version="" note=""
+    fields=$(timeout -k 5 15 podman image inspect "$img" --format \
+        '{{.Digest}}{{"\t"}}{{index .Labels "org.opencontainers.image.version"}}{{"\t"}}{{index .Labels "org.opencontainers.image.revision"}}' \
+        2>/dev/null || true)
+    # Split at explicit tab boundaries. `IFS=$'\t' read` would collapse a
+    # run of tabs into one separator, so an image with a revision label
+    # and no version label — the empty middle field below — would put the
+    # revision into `version` and log it unshortened under the wrong name.
+    digest="${fields%%$'\t'*}"
+    fields="${fields#*$'\t'}"
+    version="${fields%%$'\t'*}"
+    revision="${fields#*$'\t'}"
+    # `index` on a missing key prints "<no value>" when .Labels exists but
+    # lacks the key, and an empty field when .Labels is nil entirely (a
+    # third-party image with no labels at all). Treat both as absent.
+    [[ "$revision" == "<no value>" ]] && revision=""
+    [[ "$version" == "<no value>" ]] && version=""
+    # Short-sha the revision: the full 40 chars crowd the line, and the
+    # first 7 are what the build's own tags and the GitHub UI use.
+    [[ -n "$revision" ]] && revision="${revision:0:7}"
+    if [[ -n "$version" && -n "$revision" ]]; then
+        note=" ($version, rev $revision)"
+    elif [[ -n "$version" ]]; then
+        note=" ($version)"
+    elif [[ -n "$revision" ]]; then
+        note=" (rev $revision)"
+    fi
+    if [[ -n "$digest" ]]; then
+        info "  pulled $digest$note"
+    else
+        # A failed digest inspect does not imply the label reads failed —
+        # keep whatever identity we did get rather than logging nothing.
+        info "  pulled (digest unavailable)$note"
+    fi
+}
+
 # Remove the staging directory if this run created it. `rmdir` never touches
 # a non-empty directory, so a stray file left by an interrupted pull keeps it
 # (and says so) rather than being deleted blind. Podman empties the directory
@@ -1530,6 +1606,7 @@ for img in "$SK_IMAGE" "$UPDATER_IMAGE" "$DOCTOR_IMAGE"; do
         sk_staging_cleanup
         exit 1
     fi
+    log_pulled_identity "$img"
 done
 trap - EXIT INT TERM
 sk_staging_cleanup
