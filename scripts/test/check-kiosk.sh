@@ -1052,8 +1052,17 @@ conf_has 'KIOSK_SK_USER_CREATED=' "not recorded as created by the kiosk"
 conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "records the type the user had before"
 run_enable
 conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "a later enable keeps the first recorded type"
+cookies="$root/var/lib/signalk-kiosk/chromium/Default"
+mkdir -p "$cookies/Network"
+: >"$cookies/Cookies"
+: >"$cookies/Network/Cookies"
 rm -f "$state/user-calls"
 run_helper disable >/dev/null 2>&1 || true
+if [[ -e "$cookies/Cookies" || -e "$cookies/Network/Cookies" ]]; then
+    miss "disable left the browser's session cookie for a user whose tokens stay valid"
+else
+    ok "disable removes the browser's session cookie, since the user's tokens stay valid"
+fi
 if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readonly"}' ]]; then
     ok "disable gives the user back its earlier type instead of deleting it"
 else
@@ -1069,8 +1078,17 @@ preinstall_kip
 preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
 echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"readonly"}]' >"$state/users.json"
 run_helper enable --admin >/dev/null 2>&1 || true
+mkdir -p "$cookies/Network"
+: >"$cookies/Network/Cookies"
 rm -f "$state/user-calls"
+: >"$state/calls"
 run_enable --no-autologin
+if [[ -e "$cookies/Network/Cookies" ]]; then
+    miss "--no-autologin left the browser signed in"
+else
+    ok "--no-autologin removes the browser's session cookie"
+fi
+call_made 'systemctl stop signalk-kiosk.service' "stops the kiosk before touching its cookies"
 if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readonly"}' ]]; then
     ok "a re-run with --no-autologin gives the user back its earlier type too"
 else

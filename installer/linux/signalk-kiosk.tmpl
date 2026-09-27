@@ -732,6 +732,14 @@ restore_kiosk_sk_user_type() {
     return 1
 }
 
+# The kiosk browser's cookie store (Chromium keeps it under Network/ since
+# version 96), taken while the browser is not running: a running one would
+# write its in-memory cookies back.
+clear_kiosk_cookies() {
+    local d="${KIOSK_ROOT}${KIOSK_HOME}/chromium/Default"
+    run_root rm -f "$d/Cookies" "$d/Cookies-journal" "$d/Network/Cookies" "$d/Network/Cookies-journal"
+}
+
 # ─── commands ──────────────────────────────────────────────────────────
 refuse_root() {
     if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
@@ -916,6 +924,11 @@ cmd_enable() {
         if [[ "$user_created" == 1 ]]; then
             if delete_kiosk_sk_user "$base"; then user_created=""; fi
         elif [[ -n "$user_prev_type" ]]; then
+            # The user and its tokens stay, so the browser's session cookie
+            # would keep the screen signed in: stop the kiosk (the end of
+            # enable starts it again) and remove it.
+            run_root systemctl stop "$KIOSK_UNIT" 2>/dev/null || true
+            clear_kiosk_cookies
             if restore_kiosk_sk_user_type "$base" "$user_prev_type"; then user_prev_type=""; fi
         fi
     fi
@@ -1037,6 +1050,8 @@ cmd_disable() {
         if [[ "$user_created" == 1 ]]; then
             delete_kiosk_sk_user "$base" || true
         elif [[ -n "$user_prev_type" ]]; then
+            # The user and its tokens stay, so the kiosk's own session goes.
+            clear_kiosk_cookies
             restore_kiosk_sk_user_type "$base" "$user_prev_type" || true
         fi
         if [[ -n "$changed" ]]; then
