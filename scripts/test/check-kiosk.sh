@@ -887,12 +887,39 @@ if grep -qe 'Security → Users' -e 'Plugin Config' <<<"$out"; then
 else
     ok "does not point at the Admin UI of a stopped server"
 fi
-if [[ ! -e "$conf" && ! -e "$tokfile" && ! -e "$root/etc/systemd/system/signalk-kiosk.service" ]]; then
+if [[ ! -e "$tokfile" && ! -e "$root/etc/systemd/system/signalk-kiosk.service" ]]; then
     ok "boot files and token removed regardless"
 else
     miss "kiosk files left with the server stopped"
 fi
 call_made 'systemctl enable --now lightdm.service' "gives the desktop login back"
+conf_has 'KIOSK_URL=' "the conf keeps nothing but the sign-in record"
+conf_has 'KIOSK_SK_USER_CREATED=1' "the record of the Signal K user stays for a retry"
+conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed' "the record of the plugin install stays for a retry"
+out_has 'again once the server answers to put them back' "says how to finish"
+# The server is back: disable again finishes the sign-in part only.
+rm -f "$state/server-down" "$state/user-calls" "$state/config-posts"
+: >"$state/calls"
+if out=$(run_helper disable 2>&1); then
+    ok "disable again exits 0"
+else
+    miss "second disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
+fi
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == DELETE ]] && jq -e '.enabled == false' "$cfgf" >/dev/null 2>&1; then
+    ok "the second disable deletes the user and switches the plugin off"
+else
+    miss "second disable: users $(tr '\n' '|' <"$state/user-calls" 2>/dev/null), plugin $(cat "$cfgf" 2>/dev/null)"
+fi
+if [[ -e "$conf" ]]; then
+    miss "the record is still there after the cleanup: $(grep -v '^#' "$conf" | tr '\n' '|')"
+else
+    ok "the record is gone once the cleanup is done"
+fi
+if grep -q 'getty@tty1\|lightdm' "$state/calls"; then
+    miss "the second disable touched tty1 or the desktop: $(grep 'getty\|lightdm' "$state/calls" | tr '\n' '|')"
+else
+    ok "the second disable leaves tty1 and the desktop alone"
+fi
 
 echo "  disable after the desktop was uninstalled"
 reset_box

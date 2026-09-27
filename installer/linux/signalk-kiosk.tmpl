@@ -976,7 +976,7 @@ report_kiosk_state() {
 }
 
 cmd_disable() {
-    local purge=0 prev_dm changed user_created user_prev_type base token
+    local purge=0 prev_dm changed user_created user_prev_type base token had_unit=0
     while (( $# )); do
         case "$1" in
             --purge) purge=1; shift ;;
@@ -994,6 +994,7 @@ cmd_disable() {
     if [[ -f "$UNIT_FILE" ]]; then
         run_root systemctl disable --now "$KIOSK_UNIT" || true
         ok "${KIOSK_UNIT} stopped and disabled"
+        had_unit=1
     else
         info "no kiosk unit installed"
     fi
@@ -1005,7 +1006,7 @@ cmd_disable() {
     # the kiosk's token.
     if [[ -n "$prev_dm" ]] && run_root systemctl enable --now "$prev_dm"; then
         ok "desktop login re-enabled (${prev_dm})"
-    else
+    elif [[ -n "$prev_dm" ]] || (( had_unit )); then
         [[ -z "$prev_dm" ]] || warn "could not re-enable ${prev_dm}; tty1 gets the console login instead"
         run_root systemctl start getty@tty1.service || true
         ok "tty1 is back to the console login"
@@ -1018,14 +1019,17 @@ cmd_disable() {
         # A stopped or crash-looping server: say what stays behind rather
         # than point at an Admin UI that is not there.
         if ! curl -fsS -m 5 -o /dev/null "${base}/signalk" 2>/dev/null; then
-            warn "the Signal K server is not answering, so these stay as they are in ${SK_DATA}:"
+            warn "the Signal K server is not answering, so these are left for now:"
             if [[ "$user_created" == 1 ]]; then
                 warn "  the Signal K user ${SK_KIOSK_USER}"
             elif [[ -n "$user_prev_type" ]]; then
                 warn "  the Signal K user ${SK_KIOSK_USER}, which was ${user_prev_type} before the kiosk"
             fi
             [[ -z "$changed" ]] || warn "  ${AUTOLOGIN_ID}, switched on"
-            warn "change them in the Admin UI once the server runs again"
+            # Only this record stays, so that disable run again finishes the job.
+            render_conf "" "" "" none "" "" "$changed" "$user_created" "$user_prev_type" \
+                | install_file 0644 "$CONF_FILE"
+            warn "run \`signalk kiosk disable\` again once the server answers to put them back"
             user_created=""
             user_prev_type=""
             changed=""
