@@ -1406,6 +1406,17 @@ switch (`$sub) {
     exit 1
   }
 
+  'kiosk' {
+    # Boots a physical screen into a full-screen browser via a system unit on
+    # tty1. The Podman machine VM has no physical display and no apt, so
+    # inside it the helper would only fail. Reject with a clear note, same as
+    # halpi2.
+    Write-Host "'signalk kiosk' is not available on Windows - it boots a screen"
+    Write-Host 'attached to a Linux box (Raspberry Pi OS, Debian) straight into the'
+    Write-Host 'Signal K GUI. On Windows, open the Signal K URL in a browser instead.'
+    exit 1
+  }
+
   'resetadmin' {
     # The VM CLI can't prompt (no PTY, stdin busy). Prompt on Windows, confirm
     # the match here, then hand the password to the VM via the env var

@@ -1,0 +1,1209 @@
+#!/usr/bin/env bash
+# signalk-kiosk — boot a connected screen straight into the Signal K GUI.
+# Installed by signalk-universal-installer to ~/.local/bin/signalk-kiosk and
+# invoked via `signalk kiosk …`. Linux only; written for Raspberry Pi OS and
+# Debian Trixie.
+#
+# The kiosk is cage (a Wayland compositor that runs exactly one application,
+# full-screen) running a Chromium-family browser, started at boot on tty1 by a
+# system unit. The unit runs as a dedicated unprivileged user and opens a real
+# logind seat session through its own PAM stack (PAMName + TTYPath): that
+# session is what lets cage take the display and input devices, and it is also
+# the "autologin" — nothing prompts for a password. This works the same on a
+# box with no desktop at all (Pi OS Lite, a Debian server) as on one with a
+# desktop; on the latter the display manager is disabled while the kiosk is
+# enabled and re-enabled by `disable`.
+#
+# The server runs with security enabled, so a fresh kiosk browser would stop
+# at a login form on a screen that may have no keyboard. `enable` therefore
+# gives the kiosk its own Signal K user, `signalk-kiosk` (an admin, or
+# readwrite with --readwrite; no password, so it can only sign in with its
+# token), mints a long-lived token for it, and signs the browser in through
+# signalk-autologin's token sign-in. That plugin is installed if missing and,
+# when the kiosk is what turns it on, runs in token-only mode: every other
+# device still logs in normally. `disable` deletes a user the kiosk created,
+# which revokes its token; a user that existed before is used only when its
+# type matches, never changed, and keeps its tokens.
+#
+# Usage:
+#   signalk-kiosk status       monitors, touchscreens and kiosk state (default)
+#   signalk-kiosk scan         monitors and touchscreens only (no sudo)
+#   signalk-kiosk enable [--url PATH|URL] [--readwrite] [--browser chromium|chrome] [--no-autologin]
+#   signalk-kiosk disable [--purge]
+#   signalk-kiosk restart
+#   signalk-kiosk help
+#
+# Test overrides (scripts/test/check-kiosk.sh): KIOSK_ROOT (prefix for every
+# system path written or read), KIOSK_SYSFS (default /sys), KIOSK_DEV_INPUT
+# (default /dev/input), SK_DATA (default ~/.signalk), DOCTOR_DATA, SIGNALK_URL,
+# SIGNALK_CLI, KIOSK_NPM_REGISTRY, KIOSK_WAIT_STEP. The launcher it writes also
+# reads KIOSK_CONF, KIOSK_TOKEN_FILE and KIOSK_PROFILE.
+
+set -euo pipefail
+
+DOCTOR_DATA="${DOCTOR_DATA:-${HOME}/.signalk-doctor}"
+SK_DATA="${SK_DATA:-${HOME}/.signalk}"
+SIGNALK_CLI="${SIGNALK_CLI:-${HOME}/.local/bin/signalk}"
+DOC_URL="https://github.com/dirkwa/signalk-universal-installer/blob/master/docs/kiosk.md"
+KIOSK_NPM_REGISTRY="${KIOSK_NPM_REGISTRY:-https://registry.npmjs.org}"
+# Seconds between readiness polls. Tests shrink it; nothing else should.
+KIOSK_WAIT_STEP="${KIOSK_WAIT_STEP:-3}"
+
+KIOSK_ROOT="${KIOSK_ROOT:-}"
+KIOSK_USER="signalk-kiosk"
+KIOSK_HOME="/var/lib/signalk-kiosk"
+KIOSK_UNIT="signalk-kiosk.service"
+KIOSK_SLICE="signalk-kiosk.slice"
+# Runtime paths (as the running kiosk sees them) and their written locations.
+LAUNCHER="/usr/local/lib/signalk-kiosk/browser"
+CONF="/etc/signalk-kiosk.conf"
+UNIT_FILE="${KIOSK_ROOT}/etc/systemd/system/${KIOSK_UNIT}"
+SLICE_FILE="${KIOSK_ROOT}/etc/systemd/system/${KIOSK_SLICE}"
+PAM_FILE="${KIOSK_ROOT}/etc/pam.d/${KIOSK_USER}"
+CONF_FILE="${KIOSK_ROOT}${CONF}"
+LAUNCHER_FILE="${KIOSK_ROOT}${LAUNCHER}"
+
+AUTOLOGIN_ID="signalk-autologin"
+# The kiosk's Signal K user is an admin by default: App Dock reads its app
+# list only for an admin, and its Settings entry is the Admin UI, which treats
+# the first 401 from its admin-only calls as a logged-out session. With
+# --readwrite, webapps still get live data and the server's configuration is
+# out of reach from the screen; the page is then Freeboard-SK (READWRITE_PATH),
+# which the server image ships, rather than an App Dock showing its built-in
+# app list.
+#
+# The default page is App Dock, which switches between webapps. The server
+# image does not ship it, so enable installs it when it is the page and
+# missing, and seeds its app list first (DOCK_APPS) — the list App Dock would
+# seed itself, without KIP, which the image does not ship either.
+DEFAULT_PKG="@signalk/app-dock"
+DEFAULT_PATH="/${DEFAULT_PKG}/"
+READWRITE_PATH="/@signalk/freeboard-sk/"
+DOCK_ID="signalk-app-dock"
+DOCK_APPS='[
+  {"enabled": true, "autostart": true, "url": "/@signalk/freeboard-sk/", "label": "Freeboard-SK",
+   "icon": "/@signalk/freeboard-sk/assets/icons/icon-72x72.png", "color": ""},
+  {"enabled": true, "autostart": false, "url": "/admin/", "label": "Settings",
+   "icon": "/@signalk/app-dock/icon-settings.svg", "color": "#78788c"}
+]'
+SK_KIOSK_USER="signalk-kiosk"
+TOKEN="/etc/signalk-kiosk.token"
+TOKEN_FILE="${KIOSK_ROOT}${TOKEN}"
+# Minted the way install.sh mints the doctor's admin token.
+SK_CONTAINER="signalk-server"
+SK_TOKEN_BIN=/home/node/signalk/node_modules/signalk-server/bin/signalk-generate-token
+SK_SECURITY_PATH=/home/node/.signalk/security.json
+
+# ─── output helpers ────────────────────────────────────────────────────
+# Mirrors installer/linux/lib/colors.sh (same escapes, same gate); inlined
+# because this script ships standalone to ~/.local/bin/.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_RED=$'\033[0;31m'
+    C_GREEN=$'\033[0;32m'
+    C_YELLOW=$'\033[0;33m'
+    C_BLUE=$'\033[0;34m'
+    C_BOLD=$'\033[1m'
+    C_RESET=$'\033[0m'
+else
+    C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_BOLD=''; C_RESET=''
+fi
+info()    { printf '%s[i]%s %s\n' "$C_BLUE"   "$C_RESET" "$*"; }
+ok()      { printf '%s[OK]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn()    { printf '%s[!]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+err()     { printf '%s[ERR]%s %s\n' "$C_RED"  "$C_RESET" "$*" >&2; }
+section() { printf '\n%s== %s ==%s\n' "$C_BOLD" "$*" "$C_RESET"; }
+
+# ─── privilege ─────────────────────────────────────────────────────────
+# Same shape as signalk-halpi2: bare when root, `sudo` otherwise.
+SUDO=()
+if [[ $EUID -ne 0 ]]; then
+    SUDO=(sudo)
+fi
+run_root() { "${SUDO[@]}" "$@"; }
+
+# Write stdin to a root-owned file. Staged through a temp file so a failed
+# sudo leaves the destination untouched rather than truncated.
+install_file() {
+    local mode="$1" dest="$2" tmp
+    tmp=$(mktemp)
+    cat >"$tmp"
+    run_root install -D -m "$mode" "$tmp" "$dest"
+    rm -f "$tmp"
+}
+
+# ─── Signal K endpoints ────────────────────────────────────────────────
+sk_http_port() {
+    local q="${HOME}/.config/containers/systemd/signalk-server.container"
+    local p
+    p=$(sed -n 's/^Environment=PORT=\([0-9][0-9]*\).*/\1/p' "$q" 2>/dev/null | head -1 || true)
+    printf '%s' "${p:-80}"
+}
+
+sk_base_url() {
+    local u="${SIGNALK_URL:-http://127.0.0.1:$(sk_http_port)/signalk}"
+    printf '%s' "${u%/signalk}"
+}
+
+# scheme://host:port of a URL, with the port its scheme implies filled in and
+# the loopback names folded into 127.0.0.1, so that two spellings of one
+# server compare equal.
+url_origin() {
+    local scheme="${1%%://*}" hostport host port
+    scheme="${scheme,,}"
+    hostport="${1#*://}"
+    hostport="${hostport%%[/?#]*}"
+    if [[ "$hostport" == \[* ]]; then
+        host="${hostport%%]*}]"
+    else
+        host="${hostport%%:*}"
+    fi
+    port="${hostport#"$host"}"
+    port="${port#:}"
+    if [[ -z "$port" ]]; then
+        if [[ "$scheme" == https ]]; then port=443; else port=80; fi
+    fi
+    host="${host,,}"
+    case "$host" in localhost|127.0.0.1|'[::1]') host=127.0.0.1 ;; esac
+    printf '%s://%s:%s' "$scheme" "$host" "$port"
+}
+
+# True when two URLs name the same host (any scheme or port).
+same_host() {
+    local a b
+    a=$(url_origin "$1")
+    b=$(url_origin "$2")
+    a="${a#*://}"
+    b="${b#*://}"
+    [[ "${a%:*}" == "${b%:*}" ]]
+}
+
+# With TLS enabled, signalk-server's HTTP port runs only a redirect to
+# https://<host>:<sslport>. Prints that origin; false when the server answers
+# anything else, or does not answer at all.
+server_https_origin() {
+    local out target
+    out=$(curl -sS -m 5 -o /dev/null -w '%{http_code} %{redirect_url}' "$1/signalk" 2>/dev/null) || return 1
+    [[ "$out" == 3??\ https://* ]] || return 1
+    target=${out#* https://}
+    printf 'https://%s' "${target%%/*}"
+}
+
+# ─── monitors ──────────────────────────────────────────────────────────
+# The monitor's name from its EDID: the first 18-byte display descriptor
+# tagged 0xFC. Prints nothing for a missing or short EDID (virtual outputs
+# often have none). sysfs reports a size of 0 for this attribute, so the
+# length is judged from what `od` actually read, not from stat.
+edid_name() {
+    local f="$1" off i name=""
+    local -a b
+    read -r -a b <<<"$(od -An -v -tx1 -N128 "$f" 2>/dev/null | tr -s ' \n' '  ')"
+    (( ${#b[@]} >= 128 )) || return 0
+    for off in 54 72 90 108; do
+        [[ "${b[off]}${b[off+1]}${b[off+2]}${b[off+3]}" == 000000fc ]] || continue
+        for (( i = off + 5; i < off + 18; i++ )); do
+            [[ "${b[i]}" == 0a ]] && break
+            # shellcheck disable=SC2059  # the \x escape is built on purpose
+            name+=$(printf "\\x${b[i]}")
+        done
+        printf '%s' "${name%"${name##*[! ]}"}"
+        return 0
+    done
+}
+
+# One line per DRM connector: connector, status, preferred mode, EDID name.
+# Read from sysfs, so it works over SSH on a box with no display server.
+scan_monitors() {
+    local sysfs="${KIOSK_SYSFS:-/sys}" c conn status mode name
+    for c in "${sysfs}"/class/drm/card*-*; do
+        [[ -r "$c/status" ]] || continue
+        conn=${c##*/}
+        conn=${conn#card*-}
+        status=$(<"$c/status")
+        mode=$(head -1 "$c/modes" 2>/dev/null || true)
+        name=$(edid_name "$c/edid")
+        printf '%s\t%s\t%s\t%s\n' "$conn" "$status" "${mode:--}" "${name:--}"
+    done
+}
+
+# ─── touchscreens ──────────────────────────────────────────────────────
+# udev classifies input devices; ID_INPUT_TOUCHSCREEN=1 is the touchscreen
+# flag. No root needed. The launcher embeds this same function so the browser
+# gets its touch flags from what is connected at each start.
+detect_touchscreens() {
+    local sysfs="${KIOSK_SYSFS:-/sys}" dev node name
+    for dev in "${KIOSK_DEV_INPUT:-/dev/input}"/event*; do
+        [[ -e "$dev" ]] || continue
+        node=${dev##*/}
+        udevadm info --query=property --name="$dev" 2>/dev/null \
+            | grep -qx 'ID_INPUT_TOUCHSCREEN=1' || continue
+        name=$(cat "${sysfs}/class/input/${node}/device/name" 2>/dev/null || true)
+        printf '%s\t%s\n' "$node" "${name:-unknown}"
+    done
+}
+
+print_scan() {
+    local mons touch n=0 line
+    section "Monitors"
+    mons=$(scan_monitors)
+    if [[ -z "$mons" ]]; then
+        echo "  (no display connectors — no GPU, or a VM without a display device)"
+    else
+        while IFS=$'\t' read -r conn status mode name; do
+            [[ "$status" == connected ]] && n=$((n + 1))
+            printf '  %-14s %-13s %-11s %s\n' "$conn" "$status" "$mode" "$name"
+        done <<<"$mons"
+        (( n > 0 )) || echo "  (nothing connected — the kiosk needs a monitor to show anything)"
+        (( n > 1 )) && echo "  (${n} connected — cage spans the browser across all of them)"
+    fi
+    section "Touchscreens"
+    touch=$(detect_touchscreens)
+    if [[ -z "$touch" ]]; then
+        echo "  (none — the browser starts without touch flags)"
+    else
+        while IFS=$'\t' read -r line name; do
+            printf '  %-14s %s\n' "$line" "$name"
+        done <<<"$touch"
+        echo "  pinch-zoom and swipe-back navigation are disabled in the kiosk"
+    fi
+}
+
+# ─── rendered files ────────────────────────────────────────────────────
+# Empty for a key or file that does not exist. `|| true`: before the first
+# enable there is no conf file, sed exits 2, pipefail carries that out, and a
+# plain `x=$(conf_get …)` would then trip set -e.
+conf_get() {
+    sed -n "s/^$1=//p" "$CONF_FILE" 2>/dev/null | tail -1 || true
+}
+
+render_conf() {
+    local url="$1" browser="$2" base="$3" signin="$4" sk_type="$5"
+    local prev_dm="$6" autologin="$7" user_created="$8"
+    cat <<EOF
+# Written by \`signalk kiosk enable\`; rewritten on every enable.
+# ${LAUNCHER} reads the KIOSK_URL, KIOSK_BROWSER, KIOSK_BASE and KIOSK_SIGNIN
+# lines. The rest records what \`signalk kiosk disable\` has to put back.
+KIOSK_URL=${url}
+KIOSK_BROWSER=${browser}
+KIOSK_BASE=${base}
+KIOSK_SIGNIN=${signin}
+KIOSK_SK_USER_TYPE=${sk_type}
+KIOSK_PREV_DISPLAY_MANAGER=${prev_dm}
+KIOSK_AUTOLOGIN_CHANGED=${autologin}
+KIOSK_SK_USER_CREATED=${user_created}
+EOF
+}
+
+# The browser launcher cage runs. Everything it needs comes from ${CONF} and
+# ${TOKEN}; nothing here is specific to one install.
+render_launcher() {
+    cat <<'EOF'
+#!/usr/bin/env bash
+# Run by signalk-kiosk.service inside cage, as the kiosk user. Written by
+# `signalk kiosk enable` and rewritten by every enable — do not edit.
+set -uo pipefail
+
+CONF="${KIOSK_CONF:-/etc/signalk-kiosk.conf}"
+TOKEN_FILE="${KIOSK_TOKEN_FILE:-/etc/signalk-kiosk.token}"
+conf_get() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1; }
+url=$(conf_get KIOSK_URL)
+browser=$(conf_get KIOSK_BROWSER)
+base=$(conf_get KIOSK_BASE)
+signin=$(conf_get KIOSK_SIGNIN)
+probe="${base}/signalk"
+profile="${KIOSK_PROFILE:-${HOME}/chromium}"
+step="${KIOSK_WAIT_STEP:-2}"
+EOF
+    declare -f detect_touchscreens
+    cat <<'EOF'
+
+# The server usually comes up after this unit: its container starts under the
+# Signal K user's systemd once the network is up. A browser started first
+# shows a connection error and never retries, so wait for the server — up to
+# the 300s the server unit itself is given to start — and start the browser
+# regardless after that, so a server that never answers leaves a visible error
+# rather than a black screen.
+waited=0
+answer="000 "
+until answer=$(curl -sS -m 3 -o /dev/null -w '%{http_code} %{redirect_url}' "$probe" 2>/dev/null) \
+        && [[ "$answer" == [23]??\ * ]]; do
+    if (( waited >= 300 )); then
+        echo "signalk-kiosk: no answer from ${probe} after ${waited}s, starting the browser anyway" >&2
+        break
+    fi
+    (( waited % 30 == 0 )) && echo "signalk-kiosk: waiting for ${probe} (${waited}s)" >&2
+    sleep "$step"
+    waited=$(( waited + step ))
+done
+
+# After a hard power-off the browser opens with a "restore pages?" bar over
+# the dashboard. Mark the last session as a clean exit before every start.
+prefs="${profile}/Default/Preferences"
+if [[ -f "$prefs" ]]; then
+    sed -i -e 's/"exited_cleanly":false/"exited_cleanly":true/' \
+        -e 's/"exit_type":"[^"]*"/"exit_type":"Normal"/' "$prefs"
+fi
+
+# --password-store=basic: a keyring unlock prompt would block an unattended
+# screen. --disable-features=Translate: the page language usually differs from
+# the system locale, which would otherwise raise a translate bar.
+flags=(--kiosk --noerrdialogs --no-first-run --no-default-browser-check
+    --password-store=basic --ozone-platform=wayland
+    --disable-features=Translate "--user-data-dir=${profile}")
+# On a touchscreen a stray two-finger touch must not zoom a chart, and a
+# sideways swipe must not navigate back off the dashboard.
+if [[ -n "$(detect_touchscreens)" ]]; then
+    flags+=(--touch-events=enabled --disable-pinch --overscroll-history-navigation=0)
+fi
+
+# TLS switched on after the kiosk was set up: the HTTP port now only redirects
+# to HTTPS, where the browser would stop at a certificate warning that nobody
+# at a screen without a keyboard can get past. For a page on this server, say
+# so on the screen instead; a page on another host does not go through it.
+# A data: URL, so there is no file to write that could fail.
+if [[ "$answer" == 3??\ https://* && "$url" == "${base}/"* ]]; then
+    echo "signalk-kiosk: ${probe} redirects to HTTPS (TLS enabled); showing why the kiosk cannot use it" >&2
+    page='<!doctype html><meta charset="utf-8"><title>Signal K kiosk</title><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#10161c;color:#c9d4de;font:20px sans-serif;text-align:center"><p>The Signal K server has TLS enabled, which this kiosk does not support.<br>Turn SSL off in the server settings, or run <code>signalk kiosk disable</code> on this box.</p>'
+    exec "$browser" "${flags[@]}" "data:text/html;charset=utf-8,$(jq -rn --arg p "$page" '$p|@uri')"
+fi
+
+# Token sign-in: signalk-autologin's seed page takes the token from the URL
+# fragment, which never reaches the server. The URL goes into a page only this
+# user can read, and the browser is started on that page's path: on the
+# command line the token would be readable by every local user through
+# /proc/<pid>/cmdline. `next` is percent-encoded (jq's @uri encodes UTF-8
+# bytes) because the seed page reads it back with URLSearchParams, where a
+# bare & or # in the path would cut it short.
+start="$url"
+if [[ "$signin" == token && -r "$TOKEN_FILE" ]]; then
+    token=$(<"$TOKEN_FILE")
+    next="${url#"$base"}"
+    [[ "$next" == /* ]] || next=/
+    start_page="${HOME}/start.html"
+    (
+        umask 077
+        printf '<!doctype html><meta charset="utf-8"><script>location.replace("%s/signalk-autologin/seed#token=%s&next=%s")</script>\n' \
+            "$base" "$token" "$(jq -rn --arg p "$next" '$p|@uri')" >"$start_page"
+    )
+    start="file://${start_page}"
+fi
+exec "$browser" "${flags[@]}" "$start"
+EOF
+}
+
+render_pam() {
+    cat <<'EOF'
+# PAM stack for signalk-kiosk.service (written by `signalk kiosk enable`).
+# systemd opens this session for the unit's User= on its TTYPath without ever
+# calling pam_authenticate, so there is no password to type: this is the
+# kiosk's autologin. pam_systemd registers the session with logind on seat0,
+# which is what lets cage take the display and input devices.
+auth     required pam_unix.so nullok
+account  required pam_unix.so
+session  required pam_unix.so
+session  required pam_systemd.so class=user type=wayland
+EOF
+}
+
+# A top-level slice so the weight competes with user.slice, where the Signal K
+# server runs. A CPUWeight on the service alone would only rank it against
+# other system services, never against the server.
+render_slice() {
+    cat <<'EOF'
+# Written by `signalk kiosk enable`. Under CPU contention the kiosk browser
+# yields to the Signal K server (user.slice) rather than competing with it.
+[Unit]
+Description=Signal K kiosk (lower CPU priority than the server)
+
+[Slice]
+CPUWeight=50
+EOF
+}
+
+render_unit() {
+    cat <<EOF
+# Written by \`signalk kiosk enable\`; removed by \`signalk kiosk disable\`.
+[Unit]
+Description=Signal K kiosk (cage + browser on tty1)
+Documentation=${DOC_URL}
+After=systemd-user-sessions.service plymouth-quit-wait.service
+After=dbus.socket systemd-logind.service getty@tty1.service
+Wants=dbus.socket systemd-logind.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=simple
+User=${KIOSK_USER}
+PAMName=${KIOSK_USER}
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Slice=${KIOSK_SLICE}
+# -s keeps Ctrl+Alt+F2 working, so a keyboard can still reach a console.
+ExecStart=/usr/bin/cage -s -d -- ${LAUNCHER}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# ─── Signal K sign-in ─────────────────────────────────────────────────
+admin_token() {
+    local f="${DOCTOR_DATA}/signalk-token"
+    [[ -s "$f" ]] && cat "$f"
+}
+
+autologin_installed() {
+    [[ -f "${SK_DATA}/node_modules/${AUTOLOGIN_ID}/package.json" ]]
+}
+
+# enabled | disabled | not-loaded (installed but the server has not loaded it
+# yet: its status route answers 404) | http-<code> for any other answer |
+# unreachable
+autologin_state() {
+    local token="$1" base="$2" out code body
+    out=$(curl -sS -m 10 -w $'\n%{http_code}' -H "Authorization: Bearer ${token}" \
+        "${base}/skServer/plugins/${AUTOLOGIN_ID}" 2>/dev/null) || { echo unreachable; return; }
+    code=${out##*$'\n'}
+    body=${out%$'\n'*}
+    if [[ "$code" == 404 ]]; then
+        echo not-loaded
+    elif [[ "$code" != 200 ]]; then
+        echo "http-${code}"
+    elif jq -e '.enabled == true' <<<"$body" >/dev/null 2>&1; then
+        echo enabled
+    else
+        echo disabled
+    fi
+}
+
+# Re-post the plugin's saved configuration through the jq filter $3, so its
+# other settings survive.
+autologin_post_config() {
+    local token="$1" base="$2" filter="$3" cfg code
+    cfg=$(curl -fsS -m 10 -H "Authorization: Bearer ${token}" \
+        "${base}/skServer/plugins/${AUTOLOGIN_ID}/config") || return 1
+    cfg=$(jq -c "$filter" <<<"$cfg") || return 1
+    code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X POST \
+        -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
+        --data "$cfg" "${base}/skServer/plugins/${AUTOLOGIN_ID}/config") || code=000
+    [[ "$code" == 200 ]]
+}
+
+AUTOLOGIN_TOKEN_ONLY='.enabled = true | .configuration = ((.configuration // {}) + {networkWideAdmin: false})'
+AUTOLOGIN_OFF='.enabled = false | .configuration = (.configuration // {})'
+
+wait_for_server() {
+    local base="$1" waited=0
+    until curl -fsS -m 3 -o /dev/null "${base}/signalk"; do
+        (( waited >= 300 )) && return 1
+        sleep "$KIOSK_WAIT_STEP"
+        waited=$(( waited + KIOSK_WAIT_STEP ))
+    done
+}
+
+# Set by an App Store install, cleared by restart_server: the server loads a
+# package installed since its last start only when it restarts.
+NEED_RESTART=""
+PAGE_INSTALLED=""
+
+# A new server process has started its plugins and mounted its webapps before
+# it answers. `signalk restart` returns once systemd has queued the restart,
+# though, so the process answering first can still be the one being replaced:
+# wait until what was installed is loaded, not only until the server answers.
+restart_server() {
+    local token="$1" base="$2" waited=0
+    info "restarting Signal K to load what was installed" >&2
+    "$SIGNALK_CLI" restart >&2 || true
+    NEED_RESTART=""
+    wait_for_server "$base" || { warn "the server did not come back within 300s"; return 1; }
+    until installed_loaded "$token" "$base"; do
+        if (( waited >= 120 )); then
+            warn "the server is up but has not loaded what was installed after 120s"
+            return 1
+        fi
+        sleep "$KIOSK_WAIT_STEP"
+        waited=$(( waited + KIOSK_WAIT_STEP ))
+    done
+}
+
+# The plugin's status reports the version the server loaded, which after an
+# update differs from the installed one until the restart has happened.
+installed_loaded() {
+    local token="$1" base="$2" installed loaded
+    if autologin_installed; then
+        installed=$(jq -r '.version // empty' "${SK_DATA}/node_modules/${AUTOLOGIN_ID}/package.json" 2>/dev/null)
+        loaded=$(curl -fsS -m 10 -H "Authorization: Bearer ${token}" \
+            "${base}/skServer/plugins/${AUTOLOGIN_ID}" 2>/dev/null | jq -r '.version // empty' 2>/dev/null)
+        [[ -n "$loaded" && "$loaded" == "$installed" ]] || return 1
+    fi
+    [[ -z "$PAGE_INSTALLED" ]] || curl -fsS -m 10 -o /dev/null "${base}${DEFAULT_PATH}"
+}
+
+# The version npm serves as latest, installed through the server's App Store
+# (which also upgrades an older copy). The install endpoint answers before npm
+# runs; the package landing in the config dir at that version is completion.
+appstore_install() {
+    local token="$1" base="$2" pkg="$3" version code waited=0
+    version=$(curl -fsS -m 15 "${KIOSK_NPM_REGISTRY}/${pkg}/latest" 2>/dev/null \
+        | jq -r '.version // empty' 2>/dev/null || true)
+    if [[ -z "$version" ]]; then
+        warn "could not read the latest ${pkg} version from npm (offline?)"
+        return 1
+    fi
+    info "installing ${pkg} ${version} through the server's App Store" >&2
+    code=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST \
+        -H "Authorization: Bearer ${token}" \
+        "${base}/skServer/appstore/install/${pkg}/${version}") || code=000
+    if [[ "$code" != 200 ]]; then
+        warn "the server did not accept the install of ${pkg} (HTTP ${code})"
+        return 1
+    fi
+    until [[ "$(jq -r '.version // empty' "${SK_DATA}/node_modules/${pkg}/package.json" 2>/dev/null)" == "$version" ]]; do
+        if (( waited >= 300 )); then
+            warn "${pkg} ${version} did not appear in ${SK_DATA}/node_modules within 300s"
+            return 1
+        fi
+        sleep "$KIOSK_WAIT_STEP"
+        waited=$(( waited + KIOSK_WAIT_STEP ))
+    done
+    NEED_RESTART=1
+}
+
+# Written before the plugin's first start, so a fresh install comes up in
+# token-only mode instead of granting admin to every device until the kiosk
+# could reconfigure it. Never overwrites a file that exists — the installer's
+# rule for plugin-config-data.
+seed_autologin_config() {
+    local f="${SK_DATA}/plugin-config-data/${AUTOLOGIN_ID}.json"
+    [[ -e "$f" ]] && return 0
+    mkdir -p "${f%/*}"
+    printf '%s\n' '{"enabled":true,"configuration":{"networkWideAdmin":false}}' >"$f"
+}
+
+# App Dock seeds its own app list on its first start unless it finds one; this
+# one is written before that start, with the settings App Dock would seed.
+# Never overwrites a file that exists.
+seed_dock_config() {
+    local f="${SK_DATA}/plugin-config-data/${DOCK_ID}.json"
+    [[ -e "$f" ]] && return 0
+    mkdir -p "${f%/*}"
+    # tourDismissed: on a screen with no input device the welcome tour would
+    # never go away.
+    jq -n --argjson apps "$DOCK_APPS" '{enabled: true, configuration: {
+        showNightModeButton: true, showFullscreenButton: false,
+        showExitButton: false, tourDismissed: true, apps: $apps}}' >"$f"
+}
+
+# The seed page exists from the first release with token sign-in on, and only
+# while the plugin is enabled.
+autologin_has_token_signin() {
+    curl -fsS -m 10 "$1/${AUTOLOGIN_ID}/seed" 2>/dev/null | grep -q "${AUTOLOGIN_ID}/session"
+}
+
+# Sets SIGNIN_TOKEN (the kiosk's sign-in token), SIGNIN_CHANGED (installed |
+# enabled | empty — what the kiosk did to signalk-autologin) and
+# SIGNIN_USER_CREATED (1 when this run created the Signal K user). $3 is 1
+# when an earlier enable created it. Non-zero when token sign-in is not usable;
+# the kiosk then opens its page signed out.
+ensure_sign_in() {
+    local base="$1" sk_type="$2" created_before="$3" token state users current tok code
+    SIGNIN_TOKEN=""
+    SIGNIN_CHANGED=""
+    SIGNIN_USER_CREATED=""
+    if ! token=$(admin_token); then
+        warn "no admin token at ${DOCTOR_DATA}/signalk-token — cannot set up the kiosk's sign-in"
+        return 1
+    fi
+
+    if ! autologin_installed; then
+        seed_autologin_config
+        appstore_install "$token" "$base" "$AUTOLOGIN_ID" || return 1
+        SIGNIN_CHANGED=installed
+    fi
+    state=$(autologin_state "$token" "$base")
+    if [[ "$state" == not-loaded ]]; then
+        restart_server "$token" "$base" || return 1
+        state=$(autologin_state "$token" "$base")
+    fi
+    case "$state" in
+        enabled)
+            # Read first: saving a plugin's config restarts the plugin.
+            if curl -fsS -m 10 -H "Authorization: Bearer ${token}" \
+                    "${base}/skServer/plugins/${AUTOLOGIN_ID}/config" \
+                    | jq -e '.configuration.networkWideAdmin == false' >/dev/null 2>&1; then
+                :
+            elif [[ "$SIGNIN_CHANGED" == installed ]]; then
+                # The server keeps a plugin's configuration after an uninstall,
+                # so reinstalling brings back whatever the earlier install was
+                # set to. The kiosk installed it, so it runs token-only.
+                if ! autologin_post_config "$token" "$base" "$AUTOLOGIN_TOKEN_ONLY"; then
+                    warn "could not switch ${AUTOLOGIN_ID} to token sign-in only"
+                    return 1
+                fi
+                info "${AUTOLOGIN_ID} came back with an earlier install's setting of admin for" >&2
+                info "every device; switched it to token sign-in only" >&2
+            else
+                info "${AUTOLOGIN_ID} is already granting admin to every device (its own" >&2
+                info "setting, left as it is); the kiosk signs in with its own token either way" >&2
+            fi
+            ;;
+        disabled)
+            if ! autologin_post_config "$token" "$base" "$AUTOLOGIN_TOKEN_ONLY"; then
+                warn "could not enable ${AUTOLOGIN_ID} through the admin API"
+                return 1
+            fi
+            [[ -n "$SIGNIN_CHANGED" ]] || SIGNIN_CHANGED=enabled
+            ;;
+        http-401|http-403)
+            warn "the server refused the admin token in ${DOCTOR_DATA}/signalk-token (HTTP ${state#http-})"
+            return 1
+            ;;
+        *)
+            warn "${AUTOLOGIN_ID} is '${state}'"
+            return 1
+            ;;
+    esac
+    if ! autologin_has_token_signin "$base"; then
+        info "the installed ${AUTOLOGIN_ID} predates token sign-in — updating it" >&2
+        appstore_install "$token" "$base" "$AUTOLOGIN_ID" || return 1
+        restart_server "$token" "$base" || return 1
+        if ! autologin_has_token_signin "$base"; then
+            warn "${AUTOLOGIN_ID} offers no token sign-in even after the update"
+            return 1
+        fi
+    fi
+
+    # No password: the only way this user can ever sign in is a token.
+    if ! users=$(curl -fsS -m 10 -H "Authorization: Bearer ${token}" "${base}/skServer/security/users"); then
+        warn "could not list Signal K users through the admin API"
+        return 1
+    fi
+    current=$(jq -r --arg u "$SK_KIOSK_USER" '.[] | select(.userId == $u) | .type' <<<"$users")
+    if [[ -z "$current" ]]; then
+        code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
+            --data "{\"type\":\"${sk_type}\"}" "${base}/skServer/security/users/${SK_KIOSK_USER}") || code=000
+        if [[ "$code" != 200 ]]; then
+            warn "could not create the Signal K user ${SK_KIOSK_USER} (HTTP ${code})"
+            return 1
+        fi
+        SIGNIN_USER_CREATED=1
+    elif [[ "$current" != "$sk_type" ]]; then
+        # Only the kiosk's own user changes type. A user it found may have a
+        # password — which the admin API does not show — and making that user
+        # an admin would give its password admin from every device.
+        if [[ "$created_before" != 1 ]]; then
+            warn "a Signal K user ${SK_KIOSK_USER} (${current}) already exists, and the kiosk did not"
+            warn "create it: delete it under Security → Users so enable can create its own, or"
+            warn "run enable with the mode that matches its type"
+            return 1
+        fi
+        code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
+            --data "{\"type\":\"${sk_type}\"}" "${base}/skServer/security/users/${SK_KIOSK_USER}") || code=000
+        if [[ "$code" != 200 ]]; then
+            warn "could not change ${SK_KIOSK_USER} from ${current} to ${sk_type} (HTTP ${code})"
+            return 1
+        fi
+    fi
+
+    tok=$(podman exec "$SK_CONTAINER" "$SK_TOKEN_BIN" -u "$SK_KIOSK_USER" -e 10y \
+        -s "$SK_SECURITY_PATH" 2>/dev/null | tail -1 || true)
+    if [[ ! "$tok" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+        warn "could not mint a token for ${SK_KIOSK_USER} (podman exec ${SK_CONTAINER} signalk-generate-token)"
+        return 1
+    fi
+    # The same request the kiosk's seed page makes: proof the token signs in.
+    code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X POST \
+        -H "Authorization: Bearer ${tok}" "${base}/${AUTOLOGIN_ID}/session") || code=000
+    if [[ "$code" != 204 ]]; then
+        warn "${AUTOLOGIN_ID} did not accept the kiosk's token (HTTP ${code})"
+        return 1
+    fi
+    SIGNIN_TOKEN="$tok"
+}
+
+# Deleting the user revokes every token issued for it, including the session
+# cookie the kiosk's browser profile holds.
+delete_kiosk_sk_user() {
+    local base="$1" token code
+    token=$(admin_token) || token=""
+    code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X DELETE \
+        -H "Authorization: Bearer ${token}" \
+        "${base}/skServer/security/users/${SK_KIOSK_USER}" 2>/dev/null) || code=000
+    if [[ "$code" == 200 ]]; then
+        ok "deleted Signal K user ${SK_KIOSK_USER} — its token no longer signs in"
+        return 0
+    fi
+    warn "could not delete Signal K user ${SK_KIOSK_USER} (HTTP ${code}); delete it"
+    warn "under Security → Users to revoke the kiosk's token"
+    return 1
+}
+
+# The kiosk user's home as passwd has it, which is the launcher's $HOME: a
+# signalk-kiosk user that existed before enable keeps its own.
+kiosk_home() {
+    local h
+    h=$(getent passwd "$KIOSK_USER" 2>/dev/null | cut -d: -f6)
+    printf '%s' "${h:-$KIOSK_HOME}"
+}
+
+# The kiosk browser's cookie store (Chromium keeps it under Network/ since
+# version 96), taken while the browser is not running: a running one would
+# write its in-memory cookies back.
+clear_kiosk_cookies() {
+    local d
+    d="${KIOSK_ROOT}$(kiosk_home)/chromium/Default"
+    run_root rm -f "$d/Cookies" "$d/Cookies-journal" "$d/Network/Cookies" "$d/Network/Cookies-journal"
+}
+
+# ─── commands ──────────────────────────────────────────────────────────
+refuse_root() {
+    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        err "run this as the Signal K user, not with sudo — it asks for sudo itself"
+        exit 1
+    fi
+}
+
+need_debian_family() {
+    if [[ "$(uname -s)" != Linux ]] || ! command -v systemctl >/dev/null 2>&1 \
+        || ! command -v apt-get >/dev/null 2>&1; then
+        err "signalk kiosk needs Linux with systemd and apt (Raspberry Pi OS, Debian)"
+        exit 1
+    fi
+}
+
+browser_binary() {
+    local c
+    case "$1" in
+        chromium) for c in chromium chromium-browser; do command -v "$c" && return 0; done ;;
+        chrome)   for c in google-chrome-stable google-chrome; do command -v "$c" && return 0; done ;;
+    esac
+    return 1
+}
+
+# Pi OS Trixie and Debian Trixie name it `chromium`; Pi OS Bookworm named it
+# `chromium-browser`.
+chromium_package() {
+    if apt-cache show chromium >/dev/null 2>&1; then echo chromium; else echo chromium-browser; fi
+}
+
+display_manager_unit() {
+    local t
+    t=$(readlink "${KIOSK_ROOT}/etc/systemd/system/display-manager.service" 2>/dev/null || true)
+    [[ -n "$t" ]] && basename "$t"
+    return 0
+}
+
+# A path is served by this server and can be signed into, and so is a full
+# URL that spells this server's own address another way (localhost, no port,
+# no path): it is rewritten onto the base, which every later check compares
+# against. Any other URL is taken as given.
+resolve_url() {
+    local want="$1" base="$2" path
+    if [[ "$want" != *://* ]]; then
+        printf '%s/%s' "$base" "${want#/}"
+    elif [[ "$(url_origin "$want")" == "$(url_origin "$base")" ]]; then
+        path="${want#*://}"
+        path="${path#"${path%%[/?#]*}"}"
+        printf '%s/%s' "$base" "${path#/}"
+    else
+        printf '%s' "$want"
+    fi
+}
+
+cmd_enable() {
+    local want_url="" url_defaulted=0 browser=chromium autologin=1 sk_type=admin base bin pkgs=() dock_status
+    local prev_dm dm_now url signin=none prev_signin changed user_created token tls_origin
+    while (( $# )); do
+        case "$1" in
+            --url)          want_url="${2:?--url needs a path or URL}"; shift 2 ;;
+            --url=*)        want_url="${1#--url=}"; shift ;;
+            --readwrite)    sk_type=readwrite; shift ;;
+            --browser)      browser="${2:?--browser needs chromium or chrome}"; shift 2 ;;
+            --browser=*)    browser="${1#--browser=}"; shift ;;
+            --no-autologin) autologin=0; shift ;;
+            *) err "unknown option for enable: $1"; usage; exit 2 ;;
+        esac
+    done
+    case "$browser" in chromium|chrome) ;; *) err "--browser must be chromium or chrome"; exit 2 ;; esac
+    if [[ -z "$want_url" ]]; then
+        url_defaulted=1
+        if [[ "$sk_type" == admin ]]; then want_url="$DEFAULT_PATH"; else want_url="$READWRITE_PATH"; fi
+    fi
+    refuse_root
+    need_debian_family
+    base=$(sk_base_url)
+    url=$(resolve_url "$want_url" "$base")
+    # Checked before anything changes. A page on another host does not go
+    # through this server, so its TLS does not matter there.
+    if same_host "$url" "$base" && tls_origin=$(server_https_origin "$base") \
+            && [[ "$url" == "${base}/"* || "$(url_origin "$url")" == "$(url_origin "$tls_origin")" ]]; then
+        err "The Signal K server has TLS enabled: ${base} only redirects to ${tls_origin}."
+        err "The kiosk talks plain HTTP to this server and does not support TLS."
+        err "See ${DOC_URL}"
+        exit 1
+    fi
+
+    print_scan
+
+    section "Packages"
+    command -v cage >/dev/null 2>&1 || pkgs+=(cage)
+    command -v jq >/dev/null 2>&1 || pkgs+=(jq)
+    if ! bin=$(browser_binary "$browser"); then
+        if [[ "$browser" == chrome ]]; then
+            err "Google Chrome is not installed. Install google-chrome-stable from Google's"
+            err "repository first, or use the default: --browser chromium"
+            exit 1
+        fi
+    fi
+    if (( ${#pkgs[@]} )) || [[ -z "${bin:-}" ]]; then
+        info "updating package lists (sudo)"
+        run_root apt-get update -qq
+        if [[ -z "${bin:-}" ]]; then
+            pkgs+=("$(chromium_package)")
+            # Raspberry Pi OS's own Chromium settings and flags. Only a
+            # Recommends of its chromium, which the install below skips.
+            if apt-cache show rpi-chromium-mods >/dev/null 2>&1; then
+                pkgs+=(rpi-chromium-mods)
+            fi
+        fi
+        info "installing: ${pkgs[*]}"
+        # --no-install-recommends: on Debian Trixie the Recommends take this
+        # install from 180 packages to 333 (printing, samba, polkit). The GPU
+        # drivers and a font arrive as hard dependencies either way.
+        run_root env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends "${pkgs[@]}"
+        bin=$(browser_binary "$browser") || { err "no ${browser} binary after the install"; exit 1; }
+    fi
+    ok "cage $(command -v cage), browser ${bin}"
+
+    section "Kiosk user"
+    if getent passwd "$KIOSK_USER" >/dev/null 2>&1; then
+        ok "${KIOSK_USER} exists"
+    else
+        run_root useradd --system --home-dir "$KIOSK_HOME" --create-home \
+            --shell /usr/sbin/nologin --user-group "$KIOSK_USER"
+        ok "created system user ${KIOSK_USER} (home ${KIOSK_HOME})"
+    fi
+
+    section "Page"
+    info "the kiosk shows ${url}"
+    # The default page that cannot be had becomes Freeboard-SK, which the
+    # server image ships; a page given with --url is kept as given.
+    page_fallback() {
+        (( url_defaulted )) || return 0
+        url=$(resolve_url "$READWRITE_PATH" "$base")
+        warn "the kiosk shows Freeboard-SK instead: ${url}"
+    }
+    case "${url#"$base"}" in
+        "${DEFAULT_PATH%/}"|"${DEFAULT_PATH}"*)
+            if [[ -f "${SK_DATA}/node_modules/${DEFAULT_PKG}/package.json" ]]; then
+                ok "App Dock is installed; its app list is left as it is"
+                if token=$(admin_token); then
+                    dock_status=$(curl -sS -m 10 -w $'\n%{http_code}' -H "Authorization: Bearer ${token}" \
+                        "${base}/skServer/plugins/${DOCK_ID}" 2>/dev/null) || dock_status=""
+                    case "${dock_status##*$'\n'}" in
+                        # Installed since the server's last start: not served yet,
+                        # and with no app list of its own until its first start.
+                        404)
+                            info "App Dock is not loaded yet; the server restarts to load it"
+                            seed_dock_config
+                            NEED_RESTART=1
+                            PAGE_INSTALLED=1
+                            ;;
+                        # Switched off by its owner: say so rather than switch it on.
+                        200)
+                            if jq -e '.enabled == false' <<<"${dock_status%$'\n'*}" >/dev/null 2>&1; then
+                                warn "App Dock is switched off, so this page will not work: switch it on under"
+                                warn "Server → Plugin Config, or pick another page with --url"
+                            fi
+                            ;;
+                    esac
+                fi
+            elif ! token=$(admin_token); then
+                warn "App Dock is not installed, and without an admin token at ${DOCTOR_DATA}/signalk-token"
+                warn "enable cannot install it: install App Dock from the App Store, or pick a page with --url"
+                page_fallback
+            else
+                seed_dock_config
+                # A configuration an earlier install left behind is kept, and
+                # with it an App Dock its owner switched off.
+                if jq -e '.enabled == false' "${SK_DATA}/plugin-config-data/${DOCK_ID}.json" >/dev/null 2>&1; then
+                    warn "App Dock is switched off, so this page will not work: switch it on under"
+                    warn "Server → Plugin Config, or pick another page with --url"
+                fi
+                if appstore_install "$token" "$base" "$DEFAULT_PKG"; then
+                    PAGE_INSTALLED=1
+                    ok "App Dock installed, with Freeboard-SK and Settings (the Admin UI)"
+                else
+                    warn "install App Dock from the App Store, or pick another page with --url"
+                    page_fallback
+                fi
+            fi
+            ;;
+    esac
+
+    section "Signal K sign-in"
+    # A re-run must not forget what an earlier enable changed.
+    changed=$(conf_get KIOSK_AUTOLOGIN_CHANGED)
+    user_created=$(conf_get KIOSK_SK_USER_CREATED)
+    prev_signin=$(conf_get KIOSK_SIGNIN)
+    if (( ! autologin )); then
+        info "--no-autologin: the kiosk opens its page signed out"
+    elif [[ "$url" != "${base}/"* ]]; then
+        warn "${url} is not on this server, so the kiosk cannot sign in to it"
+    else
+        if [[ "$sk_type" == admin ]]; then
+            warn "the kiosk signs in as an admin: anyone at this screen can change the server's"
+            warn "settings, plugins and users (--readwrite for a screen that should not)."
+            warn "Other devices still log in."
+        fi
+        # Recorded even when a later step fails, so disable still undoes it.
+        ensure_sign_in "$base" "$sk_type" "$user_created" && signin=token
+        [[ -z "$SIGNIN_CHANGED" ]] || changed="$SIGNIN_CHANGED"
+        [[ -z "$SIGNIN_USER_CREATED" ]] || user_created=1
+        if [[ "$signin" == token ]]; then
+            printf '%s\n' "$SIGNIN_TOKEN" | install_file 0640 "$TOKEN_FILE"
+            # Readable by the kiosk user, who runs the launcher, and root only.
+            run_root chgrp "$KIOSK_USER" "$TOKEN_FILE"
+            ok "the kiosk signs in as Signal K user ${SK_KIOSK_USER} (${sk_type}); other devices are unaffected"
+        else
+            warn "the kiosk will open its page signed out"
+        fi
+    fi
+    if [[ "$signin" != token ]]; then
+        # Both files hold the token. The browser profile keeps its session
+        # cookie regardless; deleting the user is what signs the kiosk out.
+        run_root rm -f "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
+        # The session cookie goes whoever the user is: deleting a user revokes
+        # it, but restoring a found user's type, or leaving one alone, does not.
+        if [[ "$prev_signin" == token ]]; then
+            run_root systemctl stop "$KIOSK_UNIT" 2>/dev/null || true
+            clear_kiosk_cookies
+        fi
+        if [[ "$user_created" == 1 ]]; then
+            if delete_kiosk_sk_user "$base"; then user_created=""; fi
+        fi
+    fi
+    # An install the sign-in setup did not already restart for.
+    if [[ -n "$NEED_RESTART" ]]; then
+        restart_server "$(admin_token)" "$base" || true
+    fi
+
+    section "Boot"
+    # Recorded once: disabling the display manager removes the alias this
+    # reads, so a second enable would otherwise lose it.
+    prev_dm=$(conf_get KIOSK_PREV_DISPLAY_MANAGER)
+    dm_now=$(display_manager_unit)
+    [[ -n "$prev_dm" ]] || prev_dm="$dm_now"
+
+    render_launcher | install_file 0755 "$LAUNCHER_FILE"
+    render_conf "$url" "$bin" "$base" "$signin" "$sk_type" "$prev_dm" "$changed" "$user_created" \
+        | install_file 0644 "$CONF_FILE"
+    render_pam | install_file 0644 "$PAM_FILE"
+    render_slice | install_file 0644 "$SLICE_FILE"
+    render_unit | install_file 0644 "$UNIT_FILE"
+    run_root systemctl daemon-reload
+    if [[ -n "$dm_now" ]]; then
+        run_root systemctl disable "$dm_now"
+        ok "disabled the desktop login (${dm_now}); \`signalk kiosk disable\` re-enables it"
+    fi
+    run_root systemctl enable "$KIOSK_UNIT"
+    ok "${KIOSK_UNIT} enabled — the box boots into the kiosk"
+    # prev_dm, not dm_now: disabling the display manager does not stop it, so
+    # on a re-run before the reboot it still holds the screen.
+    if [[ -n "$prev_dm" ]] && systemctl is-active --quiet "$prev_dm"; then
+        info "the desktop is still running; reboot to switch to the kiosk"
+    else
+        run_root systemctl restart "$KIOSK_UNIT"
+        report_kiosk_state "$url"
+    fi
+}
+
+# What the unit did, not what was asked of it. A machine without /dev/tty1 (a
+# container, some VMs) skips the unit on its condition; a compositor or
+# browser that cannot open the display fails and is restarted in a loop.
+report_kiosk_state() {
+    local url="$1" state cond
+    sleep "$KIOSK_WAIT_STEP"
+    state=$(systemctl is-active "$KIOSK_UNIT" 2>/dev/null || true)
+    cond=$(systemctl show -p ConditionResult --value "$KIOSK_UNIT" 2>/dev/null || true)
+    case "$state" in
+        active)     ok "kiosk running on tty1: ${url}" ;;
+        activating) info "kiosk starting on tty1 — follow it with: journalctl -u ${KIOSK_UNIT} -f" ;;
+        *)
+            if [[ "$cond" == no ]]; then
+                warn "enabled, but this machine has no /dev/tty1 (a container?) — the kiosk cannot run here"
+            else
+                warn "the kiosk did not start (${state:-unknown}) — see: journalctl -u ${KIOSK_UNIT} -b"
+            fi
+            ;;
+    esac
+}
+
+cmd_disable() {
+    local purge=0 prev_dm prev_signin changed user_created base token had_unit=0
+    while (( $# )); do
+        case "$1" in
+            --purge) purge=1; shift ;;
+            *) err "unknown option for disable: $1"; usage; exit 2 ;;
+        esac
+    done
+    refuse_root
+    need_debian_family
+    prev_dm=$(conf_get KIOSK_PREV_DISPLAY_MANAGER)
+    changed=$(conf_get KIOSK_AUTOLOGIN_CHANGED)
+    user_created=$(conf_get KIOSK_SK_USER_CREATED)
+    prev_signin=$(conf_get KIOSK_SIGNIN)
+
+    section "Boot"
+    if [[ -f "$UNIT_FILE" ]]; then
+        run_root systemctl disable --now "$KIOSK_UNIT" || true
+        ok "${KIOSK_UNIT} stopped and disabled"
+        had_unit=1
+    else
+        info "no kiosk unit installed"
+    fi
+    # With the browser stopped: its session cookie is a copy of the token.
+    if [[ "$prev_signin" == token ]]; then
+        clear_kiosk_cookies
+    fi
+    run_root rm -f "$UNIT_FILE" "$SLICE_FILE" "$PAM_FILE" "$CONF_FILE" "$LAUNCHER_FILE" \
+        "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
+    run_root rmdir "${LAUNCHER_FILE%/*}" 2>/dev/null || true
+    run_root systemctl daemon-reload
+    # A failure here must not skip the sign-in cleanup below, which revokes
+    # the kiosk's token.
+    if [[ -n "$prev_dm" ]] && run_root systemctl enable --now "$prev_dm"; then
+        ok "desktop login re-enabled (${prev_dm})"
+    elif [[ -n "$prev_dm" ]] || (( had_unit )); then
+        [[ -z "$prev_dm" ]] || warn "could not re-enable ${prev_dm}; tty1 gets the console login instead"
+        run_root systemctl start getty@tty1.service || true
+        ok "tty1 is back to the console login"
+    fi
+
+    if [[ -n "$changed" || "$user_created" == 1 ]]; then
+        section "Signal K sign-in"
+        base=$(sk_base_url)
+        token=$(admin_token) || token=""
+        # A stopped or crash-looping server: nothing to try, and no Admin UI to
+        # point at.
+        if ! curl -fsS -m 5 -o /dev/null "${base}/signalk" 2>/dev/null; then
+            warn "the Signal K server is not answering"
+        else
+            if [[ "$user_created" == 1 ]]; then
+                if delete_kiosk_sk_user "$base"; then user_created=""; fi
+            fi
+            if [[ -n "$changed" ]]; then
+                if [[ -n "$token" ]] && autologin_post_config "$token" "$base" "$AUTOLOGIN_OFF"; then
+                    ok "${AUTOLOGIN_ID} disabled again (the kiosk had ${changed} it)"
+                    changed=""
+                else
+                    warn "could not disable ${AUTOLOGIN_ID}"
+                fi
+            fi
+        fi
+        # Whatever is not undone stays recorded, so that disable run again
+        # finishes the job.
+        if [[ -n "$changed" || "$user_created" == 1 ]]; then
+            warn "left for now:"
+            [[ "$user_created" != 1 ]] || warn "  the Signal K user ${SK_KIOSK_USER}"
+            [[ -z "$changed" ]] || warn "  ${AUTOLOGIN_ID}, switched on"
+            render_conf "" "" "" none "" "" "$changed" "$user_created" \
+                | install_file 0644 "$CONF_FILE"
+            warn "run \`signalk kiosk disable\` again to put them back"
+        fi
+    fi
+
+    if (( purge )) && getent passwd "$KIOSK_USER" >/dev/null 2>&1; then
+        # stderr dropped: userdel reports the kiosk user's absent mail spool
+        # as a notice that reads like an error. The exit status still counts.
+        run_root userdel --remove "$KIOSK_USER" 2>/dev/null || warn "could not remove user ${KIOSK_USER}"
+        ok "removed ${KIOSK_USER} and its browser profile"
+    fi
+}
+
+cmd_restart() {
+    refuse_root
+    if [[ ! -f "$UNIT_FILE" ]]; then
+        err "the kiosk is not enabled (signalk kiosk enable)"
+        exit 1
+    fi
+    run_root systemctl restart "$KIOSK_UNIT"
+    ok "kiosk restarted"
+}
+
+cmd_status() {
+    local enabled active
+    print_scan
+    section "Kiosk"
+    if [[ ! -f "$UNIT_FILE" ]]; then
+        echo "  not enabled — \`signalk kiosk enable\` boots this box into the Signal K GUI"
+        return 0
+    fi
+    enabled=$(systemctl is-enabled "$KIOSK_UNIT" 2>/dev/null || true)
+    active=$(systemctl is-active "$KIOSK_UNIT" 2>/dev/null || true)
+    printf '  %-12s %s, %s\n' "service" "${enabled:-unknown}" "${active:-unknown}"
+    printf '  %-12s %s\n' "page" "$(conf_get KIOSK_URL)"
+    printf '  %-12s %s\n' "browser" "$(conf_get KIOSK_BROWSER)"
+    if [[ "$(conf_get KIOSK_SIGNIN)" == token ]]; then
+        printf '  %-12s %s\n' "sign-in" "token, as Signal K user ${SK_KIOSK_USER} ($(conf_get KIOSK_SK_USER_TYPE))"
+    else
+        printf '  %-12s %s\n' "sign-in" "none — the page opens signed out"
+    fi
+    if [[ -n "$(conf_get KIOSK_PREV_DISPLAY_MANAGER)" ]]; then
+        printf '  %-12s %s\n' "desktop" "$(conf_get KIOSK_PREV_DISPLAY_MANAGER) disabled while the kiosk is on"
+    fi
+    [[ "$active" == active ]] || echo "  logs: journalctl -u ${KIOSK_UNIT} -b"
+}
+
+usage() {
+    cat <<EOF
+signalk kiosk — boot a connected screen straight into the Signal K GUI
+
+  signalk kiosk status      monitors, touchscreens and kiosk state (default)
+  signalk kiosk scan        monitors and touchscreens only
+  signalk kiosk enable      install cage + Chromium and boot into a full-screen browser
+                            on tty1, signed in to Signal K as its own admin user (sudo)
+      --url PATH|URL        what to show (default: App Dock, ${DEFAULT_PATH}, installed
+                            with Freeboard-SK and Settings if missing)
+      --readwrite           sign in as a readwrite user and open Freeboard-SK instead:
+                            webapps get live data, but the server's configuration is out
+                            of reach from the screen
+      --browser chromium|chrome   default chromium; chrome must already be installed
+      --no-autologin        no sign-in: the kiosk opens its page signed out
+  signalk kiosk disable     restore the previous boot (desktop login or console) and
+                            delete the kiosk's Signal K user, revoking its token (sudo)
+      --purge               also remove the kiosk's system user and its browser profile
+  signalk kiosk restart     restart the browser after changing plugins or the page
+
+Docs: ${DOC_URL}
+EOF
+}
+
+main() {
+    case "${1:-status}" in
+        status)  cmd_status ;;
+        scan)    print_scan ;;
+        enable)  shift; cmd_enable "$@" ;;
+        disable) shift; cmd_disable "$@" ;;
+        restart) cmd_restart ;;
+        help|-h|--help) usage ;;
+        *) err "unknown subcommand: $1"; usage; exit 2 ;;
+    esac
+}
+
+# Sourced by the tests for its functions; run as a command otherwise.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
