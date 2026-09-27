@@ -1015,6 +1015,43 @@ out_has 'switched it to token sign-in only' "says it switched the plugin"
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed'
 no_unexpected_requests
 
+echo "  a Signal K user signalk-kiosk existed before the kiosk"
+reset_box
+preinstall_kip
+preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
+echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"readonly"}]' >"$state/users.json"
+run_enable --admin
+conf_has 'KIOSK_SK_USER_CREATED=' "not recorded as created by the kiosk"
+conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "records the type the user had before"
+run_enable
+conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "a later enable keeps the first recorded type"
+rm -f "$state/user-calls"
+run_helper disable >/dev/null 2>&1 || true
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readonly"}' ]]; then
+    ok "disable gives the user back its earlier type instead of deleting it"
+else
+    miss "Signal K user calls on disable: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
+fi
+if jq -e '.[] | select(.userId == "signalk-kiosk") | .type == "readonly"' "$state/users.json" >/dev/null; then
+    ok "the user is readonly again"
+else
+    miss "users after disable: $(cat "$state/users.json")"
+fi
+reset_box
+preinstall_kip
+preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
+echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"readonly"}]' >"$state/users.json"
+run_helper enable --admin >/dev/null 2>&1 || true
+rm -f "$state/user-calls"
+run_enable --no-autologin
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readonly"}' ]]; then
+    ok "a re-run with --no-autologin gives the user back its earlier type too"
+else
+    miss "Signal K user calls on --no-autologin: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
+fi
+conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=' "and no longer records it"
+no_unexpected_requests
+
 echo "  the server has TLS enabled"
 reset_box
 : >"$state/tls"

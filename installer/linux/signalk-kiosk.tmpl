@@ -261,7 +261,7 @@ conf_get() {
 
 render_conf() {
     local url="$1" browser="$2" base="$3" signin="$4" sk_type="$5"
-    local prev_dm="$6" autologin="$7" user_created="$8"
+    local prev_dm="$6" autologin="$7" user_created="$8" user_prev_type="$9"
     cat <<EOF
 # Written by \`signalk kiosk enable\`; rewritten on every enable.
 # ${LAUNCHER} reads the KIOSK_URL, KIOSK_BROWSER, KIOSK_BASE and KIOSK_SIGNIN
@@ -274,6 +274,7 @@ KIOSK_SK_USER_TYPE=${sk_type}
 KIOSK_PREV_DISPLAY_MANAGER=${prev_dm}
 KIOSK_AUTOLOGIN_CHANGED=${autologin}
 KIOSK_SK_USER_CREATED=${user_created}
+KIOSK_SK_USER_PREVIOUS_TYPE=${user_prev_type}
 EOF
 }
 
@@ -580,14 +581,17 @@ autologin_has_token_signin() {
 }
 
 # Sets SIGNIN_TOKEN (the kiosk's sign-in token), SIGNIN_CHANGED (installed |
-# enabled | empty — what the kiosk did to signalk-autologin) and
-# SIGNIN_USER_CREATED (1 when this run created the Signal K user). Non-zero
-# when token sign-in is not usable; the kiosk then shows the login page.
+# enabled | empty — what the kiosk did to signalk-autologin),
+# SIGNIN_USER_CREATED (1 when this run created the Signal K user) and
+# SIGNIN_USER_PREVIOUS_TYPE (the type this run changed an existing user from).
+# Non-zero when token sign-in is not usable; the kiosk then shows the login
+# page.
 ensure_sign_in() {
     local base="$1" sk_type="$2" token state users current tok code
     SIGNIN_TOKEN=""
     SIGNIN_CHANGED=""
     SIGNIN_USER_CREATED=""
+    SIGNIN_USER_PREVIOUS_TYPE=""
     if ! token=$(admin_token); then
         warn "no admin token at ${DOCTOR_DATA}/signalk-token — cannot set up the kiosk's sign-in"
         return 1
@@ -674,6 +678,7 @@ ensure_sign_in() {
             warn "could not change ${SK_KIOSK_USER} from ${current} to ${sk_type} (HTTP ${code})"
             return 1
         fi
+        SIGNIN_USER_PREVIOUS_TYPE="$current"
     fi
 
     tok=$(podman exec "$SK_CONTAINER" "$SK_TOKEN_BIN" -u "$SK_KIOSK_USER" -e 10y \
@@ -706,6 +711,24 @@ delete_kiosk_sk_user() {
     fi
     warn "could not delete Signal K user ${SK_KIOSK_USER} (HTTP ${code}); delete it"
     warn "under Security → Users to revoke the kiosk's token"
+    return 1
+}
+
+# A user the kiosk found rather than created is not deleted; it goes back to
+# the type it had before the kiosk changed it, so --admin leaves no admin
+# behind.
+restore_kiosk_sk_user_type() {
+    local base="$1" type="$2" token code
+    token=$(admin_token) || token=""
+    code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X PUT \
+        -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
+        --data "{\"type\":\"${type}\"}" "${base}/skServer/security/users/${SK_KIOSK_USER}" 2>/dev/null) || code=000
+    if [[ "$code" == 200 ]]; then
+        ok "Signal K user ${SK_KIOSK_USER} is ${type} again, as before the kiosk changed it"
+        return 0
+    fi
+    warn "could not change Signal K user ${SK_KIOSK_USER} back to ${type} (HTTP ${code});"
+    warn "change it under Security → Users"
     return 1
 }
 
@@ -766,7 +789,7 @@ resolve_url() {
 
 cmd_enable() {
     local want_url="" browser=chromium autologin=1 sk_type=readwrite base bin pkgs=()
-    local prev_dm dm_now url signin=none changed user_created token tls_origin
+    local prev_dm dm_now url signin=none changed user_created user_prev_type token tls_origin
     while (( $# )); do
         case "$1" in
             --url)          want_url="${2:?--url needs a path or URL}"; shift 2 ;;
@@ -859,6 +882,7 @@ cmd_enable() {
     # A re-run must not forget what an earlier enable changed.
     changed=$(conf_get KIOSK_AUTOLOGIN_CHANGED)
     user_created=$(conf_get KIOSK_SK_USER_CREATED)
+    user_prev_type=$(conf_get KIOSK_SK_USER_PREVIOUS_TYPE)
     if (( ! autologin )); then
         info "--no-autologin: the kiosk shows the Signal K login page"
     elif [[ "$url" != "${base}/"* ]]; then
@@ -872,6 +896,10 @@ cmd_enable() {
         ensure_sign_in "$base" "$sk_type" && signin=token
         [[ -z "$SIGNIN_CHANGED" ]] || changed="$SIGNIN_CHANGED"
         [[ -z "$SIGNIN_USER_CREATED" ]] || user_created=1
+        # Only the first change counts: that is the type to go back to.
+        if [[ -z "$user_prev_type" && "$user_created" != 1 ]]; then
+            user_prev_type="$SIGNIN_USER_PREVIOUS_TYPE"
+        fi
         if [[ "$signin" == token ]]; then
             printf '%s\n' "$SIGNIN_TOKEN" | install_file 0640 "$TOKEN_FILE"
             # Readable by the kiosk user, who runs the launcher, and root only.
@@ -885,8 +913,10 @@ cmd_enable() {
         # Both files hold the token. The browser profile keeps its session
         # cookie regardless; deleting the user is what signs the kiosk out.
         run_root rm -f "$TOKEN_FILE" "${KIOSK_ROOT}${KIOSK_HOME}/start.html"
-        if [[ "$user_created" == 1 ]] && delete_kiosk_sk_user "$base"; then
-            user_created=""
+        if [[ "$user_created" == 1 ]]; then
+            if delete_kiosk_sk_user "$base"; then user_created=""; fi
+        elif [[ -n "$user_prev_type" ]]; then
+            if restore_kiosk_sk_user_type "$base" "$user_prev_type"; then user_prev_type=""; fi
         fi
     fi
     # An install the sign-in setup did not already restart for.
@@ -903,7 +933,7 @@ cmd_enable() {
 
     render_launcher | install_file 0755 "$LAUNCHER_FILE"
     render_conf "$url" "$bin" "$base" "$signin" "$sk_type" "$prev_dm" "$changed" "$user_created" \
-        | install_file 0644 "$CONF_FILE"
+        "$user_prev_type" | install_file 0644 "$CONF_FILE"
     render_pam | install_file 0644 "$PAM_FILE"
     render_slice | install_file 0644 "$SLICE_FILE"
     render_unit | install_file 0644 "$UNIT_FILE"
@@ -946,7 +976,7 @@ report_kiosk_state() {
 }
 
 cmd_disable() {
-    local purge=0 prev_dm changed user_created base token
+    local purge=0 prev_dm changed user_created user_prev_type base token
     while (( $# )); do
         case "$1" in
             --purge) purge=1; shift ;;
@@ -958,6 +988,7 @@ cmd_disable() {
     prev_dm=$(conf_get KIOSK_PREV_DISPLAY_MANAGER)
     changed=$(conf_get KIOSK_AUTOLOGIN_CHANGED)
     user_created=$(conf_get KIOSK_SK_USER_CREATED)
+    user_prev_type=$(conf_get KIOSK_SK_USER_PREVIOUS_TYPE)
 
     section "Boot"
     if [[ -f "$UNIT_FILE" ]]; then
@@ -980,7 +1011,7 @@ cmd_disable() {
         ok "tty1 is back to the console login"
     fi
 
-    if [[ -n "$changed" || "$user_created" == 1 ]]; then
+    if [[ -n "$changed" || "$user_created" == 1 || -n "$user_prev_type" ]]; then
         section "Signal K sign-in"
         base=$(sk_base_url)
         token=$(admin_token) || token=""
@@ -988,14 +1019,21 @@ cmd_disable() {
         # than point at an Admin UI that is not there.
         if ! curl -fsS -m 5 -o /dev/null "${base}/signalk" 2>/dev/null; then
             warn "the Signal K server is not answering, so these stay as they are in ${SK_DATA}:"
-            [[ "$user_created" != 1 ]] || warn "  the Signal K user ${SK_KIOSK_USER}"
+            if [[ "$user_created" == 1 ]]; then
+                warn "  the Signal K user ${SK_KIOSK_USER}"
+            elif [[ -n "$user_prev_type" ]]; then
+                warn "  the Signal K user ${SK_KIOSK_USER}, which was ${user_prev_type} before the kiosk"
+            fi
             [[ -z "$changed" ]] || warn "  ${AUTOLOGIN_ID}, switched on"
             warn "change them in the Admin UI once the server runs again"
             user_created=""
+            user_prev_type=""
             changed=""
         fi
         if [[ "$user_created" == 1 ]]; then
             delete_kiosk_sk_user "$base" || true
+        elif [[ -n "$user_prev_type" ]]; then
+            restore_kiosk_sk_user_type "$base" "$user_prev_type" || true
         fi
         if [[ -n "$changed" ]]; then
             if [[ -n "$token" ]] && autologin_post_config "$token" "$base" "$AUTOLOGIN_OFF"; then
