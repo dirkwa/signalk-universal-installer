@@ -478,7 +478,7 @@ autologin_post_config() {
     cfg=$(jq -c "$filter" <<<"$cfg") || return 1
     code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X POST \
         -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
-        --data "$cfg" "${base}/skServer/plugins/${AUTOLOGIN_ID}/config" || echo 000)
+        --data "$cfg" "${base}/skServer/plugins/${AUTOLOGIN_ID}/config") || code=000
     [[ "$code" == 200 ]]
 }
 
@@ -546,7 +546,7 @@ appstore_install() {
     info "installing ${pkg} ${version} through the server's App Store" >&2
     code=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST \
         -H "Authorization: Bearer ${token}" \
-        "${base}/skServer/appstore/install/${pkg}/${version}" || echo 000)
+        "${base}/skServer/appstore/install/${pkg}/${version}") || code=000
     if [[ "$code" != 200 ]]; then
         warn "the server did not accept the install of ${pkg} (HTTP ${code})"
         return 1
@@ -660,7 +660,7 @@ ensure_sign_in() {
     if [[ -z "$current" ]]; then
         code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X POST \
             -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
-            --data "{\"type\":\"${sk_type}\"}" "${base}/skServer/security/users/${SK_KIOSK_USER}" || echo 000)
+            --data "{\"type\":\"${sk_type}\"}" "${base}/skServer/security/users/${SK_KIOSK_USER}") || code=000
         if [[ "$code" != 200 ]]; then
             warn "could not create the Signal K user ${SK_KIOSK_USER} (HTTP ${code})"
             return 1
@@ -669,7 +669,7 @@ ensure_sign_in() {
     elif [[ "$current" != "$sk_type" ]]; then
         code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X PUT \
             -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
-            --data "{\"type\":\"${sk_type}\"}" "${base}/skServer/security/users/${SK_KIOSK_USER}" || echo 000)
+            --data "{\"type\":\"${sk_type}\"}" "${base}/skServer/security/users/${SK_KIOSK_USER}") || code=000
         if [[ "$code" != 200 ]]; then
             warn "could not change ${SK_KIOSK_USER} from ${current} to ${sk_type} (HTTP ${code})"
             return 1
@@ -684,7 +684,7 @@ ensure_sign_in() {
     fi
     # The same request the kiosk's seed page makes: proof the token signs in.
     code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X POST \
-        -H "Authorization: Bearer ${tok}" "${base}/${AUTOLOGIN_ID}/session" || echo 000)
+        -H "Authorization: Bearer ${tok}" "${base}/${AUTOLOGIN_ID}/session") || code=000
     if [[ "$code" != 204 ]]; then
         warn "${AUTOLOGIN_ID} did not accept the kiosk's token (HTTP ${code})"
         return 1
@@ -699,7 +699,7 @@ delete_kiosk_sk_user() {
     token=$(admin_token) || token=""
     code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X DELETE \
         -H "Authorization: Bearer ${token}" \
-        "${base}/skServer/security/users/${SK_KIOSK_USER}" 2>/dev/null || echo 000)
+        "${base}/skServer/security/users/${SK_KIOSK_USER}" 2>/dev/null) || code=000
     if [[ "$code" == 200 ]]; then
         ok "deleted Signal K user ${SK_KIOSK_USER} — its token no longer signs in"
         return 0

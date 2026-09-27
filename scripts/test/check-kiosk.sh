@@ -1064,6 +1064,16 @@ out_has 'no admin token' "says why the kiosk cannot sign in"
 conf_has 'KIOSK_SIGNIN=none' "falls back to the login page"
 call_made 'systemctl enable signalk-kiosk.service' "the kiosk itself is still enabled"
 
+# ── 5b. status capture ────────────────────────────────────────────────────
+# On a connection failure curl prints its own 000 via -w and exits non-zero,
+# so `$(curl … || echo 000)` yields 000000 (see check-curl-status-capture.sh).
+echo "status capture"
+if grep -n '|| echo 000)' "$TMPL"; then
+    miss "a status capture appends to curl's own 000"
+else
+    ok "every status capture assigns 000 outside the substitution"
+fi
+
 # ── 6. uninstall while the kiosk is enabled ───────────────────────────────
 echo "uninstall with the kiosk enabled"
 ubin="$tmp/ubin"
