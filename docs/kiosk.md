@@ -31,13 +31,15 @@ The App Store installs and the sign-in go through the server's admin API with th
 
 | Path | Purpose |
 |---|---|
-| `/etc/systemd/system/signalk-kiosk.service` | Runs `cage -s -d -- /usr/local/lib/signalk-kiosk/browser` on tty1 as `signalk-kiosk`, `Restart=always`. `Conflicts=getty@tty1.service` takes tty1 from the console login. |
-| `/etc/systemd/system/signalk-kiosk.slice` | `CPUWeight=50` at the top level of the cgroup tree, so under CPU contention the browser yields to the Signal K server in `user.slice` (default weight 100). |
+| `/etc/systemd/system/signalk-kiosk.service` | Runs cage with the launcher on tty1 as `signalk-kiosk`, restarts it whenever it exits, and takes tty1 from the console login. |
+| `/etc/systemd/system/signalk-kiosk.slice` | A top-level slice with a lower CPU weight than `user.slice`, where the Signal K server runs, so under CPU contention the browser yields to the server. |
 | `/etc/pam.d/signalk-kiosk` | The PAM stack the unit opens its session with. systemd never calls `pam_authenticate` for a service, so nothing asks for a password; `pam_systemd` registers the session on seat0, which is what lets cage open the display and input devices. |
 | `/usr/local/lib/signalk-kiosk/browser` | The launcher cage runs: waits for the server, clears the crash marker, adds touch flags, writes the sign-in start page, starts the browser. |
 | `/etc/signalk-kiosk.conf` | The page, browser and sign-in mode the launcher uses, plus what `disable` has to undo (the desktop login unit, whether the kiosk installed or switched on signalk-autologin, whether it created the Signal K user). |
-| `/etc/signalk-kiosk.token` | The kiosk's sign-in token. Owner root, group `signalk-kiosk`, mode 0640: readable by the launcher and root only. |
-| `/var/lib/signalk-kiosk/start.html` | Written by the launcher at every start, mode 0600: the page that hands the token to the server (next section). |
+| `/etc/signalk-kiosk.token` | The kiosk's sign-in token, readable by root and the `signalk-kiosk` group only. |
+| `/var/lib/signalk-kiosk/start.html` | Written by the launcher at every start and readable by the kiosk user only: the page that hands the token to the server (next section). |
+
+`installer/linux/signalk-kiosk.tmpl` renders all of these; the exact directives and modes are there.
 
 `enable` can be re-run at any time to change `--url`, `--admin` or `--browser`; it keeps what the first run recorded.
 
@@ -64,11 +66,7 @@ The Admin UI needs an admin: signed in as a readwrite user it shows its login fo
 
 ## Touchscreens
 
-The launcher checks for a touchscreen (`ID_INPUT_TOUCHSCREEN=1` in udev) every time it starts, so plugging one in and running `signalk kiosk restart` is enough. With one present the browser gets:
-
-- `--disable-pinch` — a stray two-finger touch does not zoom a chart.
-- `--overscroll-history-navigation=0` — a sideways swipe does not navigate back off the dashboard.
-- `--touch-events=enabled`.
+The launcher checks for a touchscreen (`ID_INPUT_TOUCHSCREEN=1` in udev) every time it starts, so plugging one in and running `signalk kiosk restart` is enough. With one present, the browser starts with touch events on, and with pinch-zoom and swipe-to-go-back off: a stray two-finger touch does not zoom a chart, and a sideways swipe does not navigate away from the dashboard.
 
 The kiosk does not rotate the display (the official Raspberry Pi Touch Display 2 is portrait-native), map a touchscreen to one of several monitors, or provide an on-screen keyboard.
 
