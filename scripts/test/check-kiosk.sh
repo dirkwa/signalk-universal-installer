@@ -595,14 +595,14 @@ else
             echo "POST $data" >>"$s/user-calls"
             set_users --argjson d "$data" '. + [{userId: "signalk-kiosk", type: $d.type}]' ;;
         "PUT $sk/skServer/security/users/signalk-kiosk")
-            if [[ -e "$s/put-fails" ]]; then code=500
-            else
-                echo "PUT $data" >>"$s/user-calls"
-                set_users --argjson d "$data" 'map(if .userId == "signalk-kiosk" then .type = $d.type else . end)'
-            fi ;;
+            echo "PUT $data" >>"$s/user-calls"
+            set_users --argjson d "$data" 'map(if .userId == "signalk-kiosk" then .type = $d.type else . end)' ;;
         "DELETE $sk/skServer/security/users/signalk-kiosk")
-            echo DELETE >>"$s/user-calls"
-            set_users 'map(select(.userId != "signalk-kiosk"))' ;;
+            if [[ -e "$s/delete-fails" ]]; then code=500
+            else
+                echo DELETE >>"$s/user-calls"
+                set_users 'map(select(.userId != "signalk-kiosk"))'
+            fi ;;
         *)
             code=404 body="unexpected $method $url"
             echo "$method $url" >>"$s/unexpected" ;;
@@ -1081,68 +1081,38 @@ out_has 'switched it to token sign-in only' "says it switched the plugin"
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed'
 no_unexpected_requests
 
-echo "  a Signal K user signalk-kiosk existed before the kiosk"
+echo "  a Signal K user signalk-kiosk of another type existed before the kiosk"
 reset_box
 preinstall_dock
 preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
 echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"readonly"}]' >"$state/users.json"
 run_enable
-conf_has 'KIOSK_SK_USER_CREATED=' "not recorded as created by the kiosk"
-conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "records the type the user had before"
-run_enable --readwrite
-conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "a later enable keeps the first recorded type"
-cookies="$root/var/lib/signalk-kiosk/chromium/Default"
-mkdir -p "$cookies/Network"
-: >"$cookies/Cookies"
-: >"$cookies/Network/Cookies"
-: >"$state/put-fails"
-out=$(run_helper disable 2>&1) || true
-conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "a restore that fails with the server up stays recorded"
-out_has 'left for now' "says what is left"
-rm -f "$state/put-fails" "$state/user-calls"
-run_helper disable >/dev/null 2>&1 || true
-if [[ -e "$conf" ]]; then
-    miss "the record stays after the retry succeeded"
+out_has 'already exists, and the kiosk did not' "says it will not change a user it did not create"
+if [[ -e "$state/user-calls" ]]; then
+    miss "changed that user: $(tr '\n' '|' <"$state/user-calls")"
 else
-    ok "disable run again restores the type and drops the record"
+    ok "leaves that user's type alone"
 fi
-if [[ -e "$cookies/Cookies" || -e "$cookies/Network/Cookies" ]]; then
-    miss "disable left the browser's session cookie for a user whose tokens stay valid"
-else
-    ok "disable removes the browser's session cookie, since the user's tokens stay valid"
-fi
-if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readonly"}' ]]; then
-    ok "disable gives the user back its earlier type instead of deleting it"
-else
-    miss "Signal K user calls on disable: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
-fi
-if jq -e '.[] | select(.userId == "signalk-kiosk") | .type == "readonly"' "$state/users.json" >/dev/null; then
-    ok "the user is readonly again"
-else
-    miss "users after disable: $(cat "$state/users.json")"
-fi
+conf_has 'KIOSK_SIGNIN=none' "and sets the kiosk up without sign-in"
+conf_has 'KIOSK_SK_USER_CREATED=' "that user is not recorded as the kiosk's"
+no_unexpected_requests
+
+echo "  a disable step that fails with the server up"
 reset_box
 preinstall_dock
 preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
-echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"readonly"}]' >"$state/users.json"
 run_helper enable >/dev/null 2>&1 || true
-mkdir -p "$cookies/Network"
-: >"$cookies/Network/Cookies"
-rm -f "$state/user-calls"
-: >"$state/calls"
-run_enable --no-autologin
-if [[ -e "$cookies/Network/Cookies" ]]; then
-    miss "--no-autologin left the browser signed in"
+: >"$state/delete-fails"
+out=$(run_helper disable 2>&1) || true
+conf_has 'KIOSK_SK_USER_CREATED=1' "a deletion that fails stays recorded"
+out_has 'left for now' "says what is left"
+rm -f "$state/delete-fails" "$state/user-calls"
+run_helper disable >/dev/null 2>&1 || true
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == DELETE && ! -e "$conf" ]]; then
+    ok "disable run again deletes the user and drops the record"
 else
-    ok "--no-autologin removes the browser's session cookie"
+    miss "second disable: users $(tr '\n' '|' <"$state/user-calls" 2>/dev/null), record $(grep -v '^#' "$conf" 2>/dev/null | tr '\n' '|')"
 fi
-call_made 'systemctl stop signalk-kiosk.service' "stops the kiosk before touching its cookies"
-if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readonly"}' ]]; then
-    ok "a re-run with --no-autologin gives the user back its earlier type too"
-else
-    miss "Signal K user calls on --no-autologin: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
-fi
-conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=' "and no longer records it"
 no_unexpected_requests
 
 echo "  a found user of the right type, and a kiosk system user with its own home"
@@ -1153,7 +1123,12 @@ echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"admin
 : >"$state/user-exists"
 echo /home/kiosk >"$state/kiosk-home"
 run_enable
-conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=' "no type change, nothing to put back"
+if [[ -e "$state/user-calls" ]]; then
+    miss "changed the found user: $(tr '\n' '|' <"$state/user-calls")"
+else
+    ok "uses the found user of the matching type as it is"
+fi
+conf_has 'KIOSK_SIGNIN=token' "and signs in with it"
 ownhome="$root/home/kiosk"
 mkdir -p "$ownhome/chromium/Default/Network"
 : >"$ownhome/chromium/Default/Network/Cookies"
