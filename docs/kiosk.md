@@ -58,11 +58,15 @@ The Admin UI needs an admin: signed in as a readwrite user it shows its login fo
 
 ### Other pages and no sign-in
 
-`--url` takes a path on this server (`/@signalk/freeboard-sk/`) or a full URL. The kiosk signs in only to this server; a URL on another host is shown as it is. `--no-autologin` skips the sign-in and the kiosk shows the Signal K login page. A re-run that ends without sign-in deletes the Signal K user an earlier `enable` created, which is what signs the browser out — its profile would otherwise keep the session cookie.
+`--url` takes a path on this server (`/@signalk/freeboard-sk/`) or a full URL. A full URL that names this server another way (`http://localhost/…`, with or without the port) counts as a path on it. The kiosk signs in only to this server; a URL on another host is shown as it is. `--no-autologin` skips the sign-in and the kiosk shows the Signal K login page. A re-run that ends without sign-in deletes the Signal K user an earlier `enable` created, which is what signs the browser out — its profile would otherwise keep the session cookie.
 
 ### Revoking the sign-in
 
 `disable` deletes the Signal K user `signalk-kiosk`, and with it every token issued for it; it also removes the kiosk's copies of the token (the token file and the start page, and with `--purge` the browser profile's session cookie). A Signal K token names a user and nothing else, so once a user of that name exists again — after a later `enable` — tokens issued before work again. Only a new server secret key (`secretKey` in `~/.signalk/security.json`) invalidates them for good, and it invalidates every other token with them, the installer's admin token in `~/.signalk-doctor/signalk-token` included.
+
+## TLS
+
+The kiosk talks plain HTTP to this server. With TLS enabled on the server, its HTTP port only redirects to HTTPS, where the browser would stop at a certificate warning. So `signalk kiosk enable` stops with an explanation before it changes anything, and a kiosk set up before TLS was switched on shows a page saying the same instead of that warning. A page on another host (`--url https://…`) is not affected.
 
 ## Touchscreens
 

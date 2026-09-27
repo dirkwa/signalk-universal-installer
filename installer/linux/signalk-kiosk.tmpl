@@ -128,6 +128,50 @@ sk_base_url() {
     printf '%s' "${u%/signalk}"
 }
 
+# scheme://host:port of a URL, with the port its scheme implies filled in and
+# the loopback names folded into 127.0.0.1, so that two spellings of one
+# server compare equal.
+url_origin() {
+    local scheme="${1%%://*}" hostport host port
+    scheme="${scheme,,}"
+    hostport="${1#*://}"
+    hostport="${hostport%%[/?#]*}"
+    if [[ "$hostport" == \[* ]]; then
+        host="${hostport%%]*}]"
+    else
+        host="${hostport%%:*}"
+    fi
+    port="${hostport#"$host"}"
+    port="${port#:}"
+    if [[ -z "$port" ]]; then
+        if [[ "$scheme" == https ]]; then port=443; else port=80; fi
+    fi
+    host="${host,,}"
+    case "$host" in localhost|127.0.0.1|'[::1]') host=127.0.0.1 ;; esac
+    printf '%s://%s:%s' "$scheme" "$host" "$port"
+}
+
+# True when two URLs name the same host (any scheme or port).
+same_host() {
+    local a b
+    a=$(url_origin "$1")
+    b=$(url_origin "$2")
+    a="${a#*://}"
+    b="${b#*://}"
+    [[ "${a%:*}" == "${b%:*}" ]]
+}
+
+# With TLS enabled, signalk-server's HTTP port runs only a redirect to
+# https://<host>:<sslport>. Prints that origin; false when the server answers
+# anything else, or does not answer at all.
+server_https_origin() {
+    local out target
+    out=$(curl -sS -m 5 -o /dev/null -w '%{http_code} %{redirect_url}' "$1/signalk" 2>/dev/null) || return 1
+    [[ "$out" == 3??\ https://* ]] || return 1
+    target=${out#* https://}
+    printf 'https://%s' "${target%%/*}"
+}
+
 # ─── monitors ──────────────────────────────────────────────────────────
 # The monitor's name from its EDID: the first 18-byte display descriptor
 # tagged 0xFC. Prints nothing for a missing or short EDID (virtual outputs
@@ -263,7 +307,9 @@ EOF
 # regardless after that, so a server that never answers leaves a visible error
 # rather than a black screen.
 waited=0
-until curl -fsS -m 3 -o /dev/null "$probe"; do
+answer="000 "
+until answer=$(curl -sS -m 3 -o /dev/null -w '%{http_code} %{redirect_url}' "$probe" 2>/dev/null) \
+        && [[ "$answer" == [23]??\ * ]]; do
     if (( waited >= 300 )); then
         echo "signalk-kiosk: no answer from ${probe} after ${waited}s, starting the browser anyway" >&2
         break
@@ -291,6 +337,17 @@ flags=(--kiosk --noerrdialogs --no-first-run --no-default-browser-check
 # sideways swipe must not navigate back off the dashboard.
 if [[ -n "$(detect_touchscreens)" ]]; then
     flags+=(--touch-events=enabled --disable-pinch --overscroll-history-navigation=0)
+fi
+
+# TLS switched on after the kiosk was set up: the HTTP port now only redirects
+# to HTTPS, where the browser would stop at a certificate warning that nobody
+# at a screen without a keyboard can get past. For a page on this server, say
+# so on the screen instead; a page on another host does not go through it.
+# A data: URL, so there is no file to write that could fail.
+if [[ "$answer" == 3??\ https://* && "$url" == "${base}/"* ]]; then
+    echo "signalk-kiosk: ${probe} redirects to HTTPS (TLS enabled); showing why the kiosk cannot use it" >&2
+    page='<!doctype html><meta charset="utf-8"><title>Signal K kiosk</title><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#10161c;color:#c9d4de;font:20px sans-serif;text-align:center"><p>The Signal K server has TLS enabled, which this kiosk does not support.<br>Turn SSL off in the server settings, or run <code>signalk kiosk disable</code> on this box.</p>'
+    exec "$browser" "${flags[@]}" "data:text/html;charset=utf-8,$(jq -rn --arg p "$page" '$p|@uri')"
 fi
 
 # Token sign-in: signalk-autologin's seed page takes the token from the URL
@@ -690,20 +747,26 @@ display_manager_unit() {
     return 0
 }
 
-# A path is served by this server and can be signed into; anything with a
-# scheme is taken as given.
+# A path is served by this server and can be signed into, and so is a full
+# URL that spells this server's own address another way (localhost, no port,
+# no path): it is rewritten onto the base, which every later check compares
+# against. Any other URL is taken as given.
 resolve_url() {
-    local want="$1" base="$2"
-    if [[ "$want" == *://* ]]; then
-        printf '%s' "$want"
-    else
+    local want="$1" base="$2" path
+    if [[ "$want" != *://* ]]; then
         printf '%s/%s' "$base" "${want#/}"
+    elif [[ "$(url_origin "$want")" == "$(url_origin "$base")" ]]; then
+        path="${want#*://}"
+        path="${path#"${path%%[/?#]*}"}"
+        printf '%s/%s' "$base" "${path#/}"
+    else
+        printf '%s' "$want"
     fi
 }
 
 cmd_enable() {
     local want_url="" browser=chromium autologin=1 sk_type=readwrite base bin pkgs=()
-    local prev_dm dm_now url signin=none changed user_created token
+    local prev_dm dm_now url signin=none changed user_created token tls_origin
     while (( $# )); do
         case "$1" in
             --url)          want_url="${2:?--url needs a path or URL}"; shift 2 ;;
@@ -723,6 +786,15 @@ cmd_enable() {
     need_debian_family
     base=$(sk_base_url)
     url=$(resolve_url "$want_url" "$base")
+    # Checked before anything changes. A page on another host does not go
+    # through this server, so its TLS does not matter there.
+    if same_host "$url" "$base" && tls_origin=$(server_https_origin "$base") \
+            && [[ "$url" == "${base}/"* || "$(url_origin "$url")" == "$(url_origin "$tls_origin")" ]]; then
+        err "The Signal K server has TLS enabled: ${base} only redirects to ${tls_origin}."
+        err "The kiosk talks plain HTTP to this server and does not support TLS."
+        err "See ${DOC_URL}"
+        exit 1
+    fi
 
     print_scan
 

@@ -162,6 +162,12 @@ check_url / "http://127.0.0.1:80/" "the server's landing page"
 check_url /@mxtommy/kip/ "http://127.0.0.1:80/@mxtommy/kip/" "a path on this server"
 check_url @mxtommy/kip/ "http://127.0.0.1:80/@mxtommy/kip/" "a path without the leading slash"
 check_url https://example.test/x "https://example.test/x" "a full URL is used as given"
+check_url http://localhost/@signalk/freeboard-sk/ "http://127.0.0.1:80/@signalk/freeboard-sk/" \
+    "this server spelled localhost, no port: rewritten onto the base"
+check_url http://127.0.0.1:80 "http://127.0.0.1:80/" "this server's bare origin: its landing page"
+check_url "http://[::1]:80/app/" "http://127.0.0.1:80/app/" "this server over IPv6 loopback"
+check_url HTTP://LOCALHOST/app/ "http://127.0.0.1:80/app/" "this server with scheme and host in capitals"
+check_url http://127.0.0.1:3000/app "http://127.0.0.1:3000/app" "another port on this host is another server"
 
 # ── 4. the launcher ───────────────────────────────────────────────────────
 echo "launcher"
@@ -177,12 +183,20 @@ fi
 lbin="$tmp/lbin"
 mkdir -p "$lbin"
 cp "$stubs/udevadm" "$lbin/udevadm"
-# Fails until $tmp/server-up exists, like a server still starting.
+# Fails until $tmp/server-up exists, like a server still starting. Prints what
+# the launcher asks for, "<status> <redirect target>": with $tmp/tls the answer
+# of a server with TLS enabled, with $tmp/redirect-http a redirect that is not.
 cat >"$lbin/curl" <<EOF
 #!/bin/bash
 printf '%s\n' "\${@: -1}" >"$tmp/probe-url"
-[[ -e "$tmp/server-up" ]] && exit 0
+if [[ -e "$tmp/server-up" ]]; then
+    if [[ -e "$tmp/tls" ]]; then printf '302 https://127.0.0.1:443/signalk'
+    elif [[ -e "$tmp/redirect-http" ]]; then printf '301 http://127.0.0.1:80/signalk/'
+    else printf '200 '; fi
+    exit 0
+fi
 echo x >>"$tmp/probes"
+printf '000 '
 exit 7
 EOF
 cat >"$lbin/sleep" <<EOF
@@ -328,6 +342,43 @@ if [[ "$(tail -1 "$tmp/browser-args" 2>/dev/null)" == http://127.0.0.1:80/@mxtom
 else
     miss "unreadable token fallback: $(tail -1 "$tmp/browser-args" 2>/dev/null)"
 fi
+
+# TLS switched on after the kiosk was set up.
+: >"$tmp/tls"
+rm -f "$tmp/start.html"
+run_launcher "$tmp/dev/noinput" 2 "$tmp/kiosk-token.conf"
+last=$(tail -1 "$tmp/browser-args" 2>/dev/null)
+if [[ "$last" == data:text/html\;charset=utf-8,* && "$last" == *has%20TLS%20enabled* ]]; then
+    ok "server redirects to HTTPS: the browser shows why the kiosk cannot use it"
+else
+    miss "TLS page: last arg ${last:0:120}"
+fi
+if [[ -e "$tmp/start.html" ]]; then
+    miss "wrote the token start page for a server it cannot sign in to"
+else
+    ok "no token start page on a TLS server"
+fi
+cat >"$tmp/kiosk-external.conf" <<EOF
+KIOSK_URL=https://example.test/x
+KIOSK_BROWSER=$lbin/fakebrowser
+KIOSK_BASE=http://127.0.0.1:80
+KIOSK_SIGNIN=none
+EOF
+run_launcher "$tmp/dev/noinput" 2 "$tmp/kiosk-external.conf"
+if [[ "$(tail -1 "$tmp/browser-args" 2>/dev/null)" == https://example.test/x ]]; then
+    ok "a page on another host still opens while this server redirects to HTTPS"
+else
+    miss "external page with local TLS: last arg $(tail -1 "$tmp/browser-args" 2>/dev/null)"
+fi
+rm -f "$tmp/tls"
+: >"$tmp/redirect-http"
+run_launcher "$tmp/dev/noinput" 2
+if [[ "$(tail -1 "$tmp/browser-args" 2>/dev/null)" == http://127.0.0.1:80/@mxtommy/kip/ ]]; then
+    ok "a redirect that is not to HTTPS: the page, not the TLS explanation"
+else
+    miss "plain redirect: last arg $(tail -1 "$tmp/browser-args" 2>/dev/null)"
+fi
+rm -f "$tmp/redirect-http"
 
 # ── 5. enable / disable end to end ────────────────────────────────────────
 echo "enable / disable"
@@ -481,7 +532,7 @@ loaded() { [[ -s "$s/loaded-version" ]]; }
 enabled() { loaded && { [[ ! -e "$cfg" ]] || "$jq" -e '.enabled != false' "$cfg" >/dev/null; }; }
 token_signin() { enabled && [[ "$(cat "$s/loaded-version")" == 1.1.0 ]]; }
 set_users() { local u; u=$("$jq" -c "$@" "$s/users.json") && printf '%s\n' "$u" >"$s/users.json"; }
-body="" code=200
+body="" code=200 redirect=""
 if [[ "$url" == "$sk/skServer/"* && ( -z "$admin" || "$auth" != "$admin" ) ]]; then
     code=401 body=Unauthorized
 else
@@ -513,7 +564,10 @@ else
         "POST $sk/skServer/plugins/signalk-autologin/config")
             printf '%s\n' "$data" >"$cfg"
             printf '%s\n' "$data" >>"$s/config-posts" ;;
-        "GET $sk/signalk") body='{}' ;;
+        "GET $sk/signalk")
+            # TLS enabled: the HTTP port only redirects.
+            if [[ -e "$s/tls" ]]; then code=302 redirect="https://127.0.0.1:443/signalk"
+            else body='{}'; fi ;;
         "GET $sk/signalk-autologin/seed")
             if token_signin; then body="fetch('/signalk-autologin/session'"; else code=404; fi ;;
         "POST $sk/signalk-autologin/session")
@@ -538,7 +592,10 @@ else
 fi
 if (( fail )) && (( code >= 400 )); then exit 22; fi
 [[ "$out" == /dev/null ]] || printf '%s' "$body"
-[[ -n "$wfmt" ]] && printf '%s' "${wfmt//'%{http_code}'/$code}"
+if [[ -n "$wfmt" ]]; then
+    wfmt=${wfmt//'%{http_code}'/$code}
+    printf '%s' "${wfmt//'%{redirect_url}'/$redirect}"
+fi
 exit 0
 EOF
 chmod +x "$ebin"/*
@@ -957,6 +1014,31 @@ fi
 out_has 'switched it to token sign-in only' "says it switched the plugin"
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed'
 no_unexpected_requests
+
+echo "  the server has TLS enabled"
+reset_box
+: >"$state/tls"
+if out=$(run_helper enable 2>&1); then
+    miss "enable went ahead on a server with TLS enabled"
+else
+    ok "enable refuses"
+fi
+out_has 'has TLS enabled' "says the server has TLS enabled"
+if [[ -e "$state/calls" ]]; then
+    miss "changed something before refusing: $(tr '\n' '|' <"$state/calls")"
+else
+    ok "refuses before changing anything"
+fi
+for u in https://127.0.0.1:443/@mxtommy/kip/ https://localhost/@mxtommy/kip/ http://localhost/@mxtommy/kip/; do
+    if out=$(run_helper enable --url "$u" 2>&1); then
+        miss "enable went ahead with $u, this server's own address"
+    else
+        ok "refused: $u"
+    fi
+done
+# A page on another host does not go through this server.
+run_enable --url https://example.test/x
+conf_has 'KIOSK_URL=https://example.test/x' "a page on another host is still set up"
 
 echo "  the server refuses the admin token"
 reset_box
