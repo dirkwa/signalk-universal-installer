@@ -159,8 +159,8 @@ check_url() {
     fi
 }
 check_url / "http://127.0.0.1:80/" "the server's landing page"
-check_url /@mxtommy/kip/ "http://127.0.0.1:80/@mxtommy/kip/" "a path on this server"
-check_url @mxtommy/kip/ "http://127.0.0.1:80/@mxtommy/kip/" "a path without the leading slash"
+check_url /@signalk/app-dock/ "http://127.0.0.1:80/@signalk/app-dock/" "a path on this server"
+check_url @signalk/app-dock/ "http://127.0.0.1:80/@signalk/app-dock/" "a path without the leading slash"
 check_url https://example.test/x "https://example.test/x" "a full URL is used as given"
 check_url http://localhost/@signalk/freeboard-sk/ "http://127.0.0.1:80/@signalk/freeboard-sk/" \
     "this server spelled localhost, no port: rewritten onto the base"
@@ -212,7 +212,7 @@ printf '%s\n' "\$@" >"$tmp/browser-args"
 EOF
 chmod +x "$lbin/curl" "$lbin/sleep" "$lbin/fakebrowser"
 cat >"$tmp/kiosk.conf" <<EOF
-KIOSK_URL=http://127.0.0.1:80/@mxtommy/kip/
+KIOSK_URL=http://127.0.0.1:80/@signalk/app-dock/
 KIOSK_BROWSER=$lbin/fakebrowser
 KIOSK_BASE=http://127.0.0.1:80
 KIOSK_SIGNIN=none
@@ -256,7 +256,7 @@ if grep -qx -- '--kiosk' <<<"$args"; then
 else
     miss "no --kiosk: $(tr '\n' ' ' <<<"$args")"
 fi
-if [[ "$(tail -1 <<<"$args")" == http://127.0.0.1:80/@mxtommy/kip/ ]]; then
+if [[ "$(tail -1 <<<"$args")" == http://127.0.0.1:80/@signalk/app-dock/ ]]; then
     ok "no sign-in: the page from the conf file is the last argument, token file or not"
 else
     miss "URL wrong: $(tail -1 <<<"$args")"
@@ -319,7 +319,7 @@ if grep -qF "$JWT" <<<"$args"; then
 else
     ok "the token is not on the browser's command line"
 fi
-want_page="<!doctype html><meta charset=\"utf-8\"><script>location.replace(\"http://127.0.0.1:80/signalk-autologin/seed#token=${JWT}&next=%2F%40mxtommy%2Fkip%2F\")</script>"
+want_page="<!doctype html><meta charset=\"utf-8\"><script>location.replace(\"http://127.0.0.1:80/signalk-autologin/seed#token=${JWT}&next=%2F%40signalk%2Fapp-dock%2F\")</script>"
 if [[ "$(cat "$tmp/start.html" 2>/dev/null)" == "$want_page" ]]; then
     ok "start page: the seed page, token in the fragment, the conf file's page as next"
 else
@@ -337,7 +337,7 @@ else
     miss "next encoding: $(cat "$tmp/start.html" 2>/dev/null)"
 fi
 run_launcher "$tmp/dev/noinput" 2 "$tmp/kiosk-token.conf" "$tmp/no-such-token"
-if [[ "$(tail -1 "$tmp/browser-args" 2>/dev/null)" == http://127.0.0.1:80/@mxtommy/kip/ ]]; then
+if [[ "$(tail -1 "$tmp/browser-args" 2>/dev/null)" == http://127.0.0.1:80/@signalk/app-dock/ ]]; then
     ok "token sign-in with no readable token: the page itself, which shows the login"
 else
     miss "unreadable token fallback: $(tail -1 "$tmp/browser-args" 2>/dev/null)"
@@ -373,7 +373,7 @@ fi
 rm -f "$tmp/tls"
 : >"$tmp/redirect-http"
 run_launcher "$tmp/dev/noinput" 2
-if [[ "$(tail -1 "$tmp/browser-args" 2>/dev/null)" == http://127.0.0.1:80/@mxtommy/kip/ ]]; then
+if [[ "$(tail -1 "$tmp/browser-args" 2>/dev/null)" == http://127.0.0.1:80/@signalk/app-dock/ ]]; then
     ok "a redirect that is not to HTTPS: the page, not the TLS explanation"
 else
     miss "plain redirect: last arg $(tail -1 "$tmp/browser-args" 2>/dev/null)"
@@ -396,7 +396,7 @@ conf="$root/etc/signalk-kiosk.conf"
 tokfile="$root/etc/signalk-kiosk.token"
 startpage="$root/var/lib/signalk-kiosk/start.html"
 pkg="$home/.signalk/node_modules/signalk-autologin/package.json"
-kippkg="$home/.signalk/node_modules/@mxtommy/kip/package.json"
+dockpkg="$home/.signalk/node_modules/@signalk/app-dock/package.json"
 cfgf="$home/.signalk/plugin-config-data/signalk-autologin.json"
 mkdir -p "$ebin"
 cp "$stubs/udevadm" "$ebin/udevadm"
@@ -483,14 +483,19 @@ EOF
 cat >"$ebin/signalk" <<'EOF'
 #!/bin/bash
 echo "signalk $*" >>"$STUB_STATE/calls"
-[[ "$1" == restart ]] && echo 3 >"$STUB_STATE/old-answers"
+if [[ "$1" == restart ]]; then
+    echo 3 >"$STUB_STATE/old-answers"
+    # What App Dock reads when the restart loads it.
+    cat "$HOME/.signalk/plugin-config-data/signalk-app-dock.json" >"$STUB_STATE/dock-config-at-restart" 2>/dev/null \
+        || echo none >"$STUB_STATE/dock-config-at-restart"
+fi
 exit 0
 EOF
 # The server and the npm registry, as far as the helper uses them. What is
 # installed is where the server keeps it: package.json files and the plugin's
 # plugin-config-data file under $HOME/.signalk. What the running process has
 # loaded is in $STUB_STATE: loaded-version for signalk-autologin (1.1.0 is the
-# first release with token sign-in) and kip-loaded for KIP.
+# first release with token sign-in) and dock-loaded for App Dock.
 cat >"$ebin/curl" <<'EOF'
 #!/bin/bash
 method=GET out="" wfmt="" fail=0 data="" url="" auth=""
@@ -509,7 +514,7 @@ while (( $# )); do
 done
 s="$STUB_STATE" jq="$STUB_JQ" sk=http://127.0.0.1:80
 pkg="$HOME/.signalk/node_modules/signalk-autologin/package.json"
-kip="$HOME/.signalk/node_modules/@mxtommy/kip/package.json"
+dock="$HOME/.signalk/node_modules/@signalk/app-dock/package.json"
 cfg="$HOME/.signalk/plugin-config-data/signalk-autologin.json"
 # The admin token the server accepts; the helper sends whatever its token
 # file holds.
@@ -523,9 +528,9 @@ if [[ -e "$s/old-answers" ]]; then
         echo $(( n - 1 )) >"$s/old-answers"
     else
         # The new process: it loaded what is installed now.
-        rm -f "$s/old-answers" "$s/loaded-version" "$s/kip-loaded"
+        rm -f "$s/old-answers" "$s/loaded-version" "$s/dock-loaded"
         "$jq" -r .version "$pkg" >"$s/loaded-version" 2>/dev/null || rm -f "$s/loaded-version"
-        [[ -e "$kip" ]] && : >"$s/kip-loaded"
+        [[ -e "$dock" ]] && : >"$s/dock-loaded"
     fi
 fi
 loaded() { [[ -s "$s/loaded-version" ]]; }
@@ -541,20 +546,28 @@ else
     case "$method $url" in
         "GET https://registry.test/signalk-autologin/latest")
             body='{"name":"signalk-autologin","version":"1.1.0"}' ;;
-        "GET https://registry.test/@mxtommy/kip/latest")
-            body='{"name":"@mxtommy/kip","version":"4.8.5"}' ;;
+        "GET https://registry.test/@signalk/app-dock/latest")
+            if [[ -e "$s/dock-unavailable" ]]; then code=404 body='Not found'
+            else body='{"name":"@signalk/app-dock","version":"1.1.0"}'; fi ;;
         "POST $sk/skServer/appstore/install/signalk-autologin/1.1.0")
             # What the plugin reads when it first starts.
             cat "$cfg" >"$s/config-at-install" 2>/dev/null || echo none >"$s/config-at-install"
             mkdir -p "${pkg%/*}"
             echo '{"name":"signalk-autologin","version":"1.1.0"}' >"$pkg"
             body='"Installing signalk-autologin..."' ;;
-        "POST $sk/skServer/appstore/install/@mxtommy/kip/4.8.5")
-            mkdir -p "${kip%/*}"
-            echo '{"name":"@mxtommy/kip","version":"4.8.5"}' >"$kip"
-            body='"Installing @mxtommy/kip..."' ;;
-        "GET $sk/@mxtommy/kip/")
-            if [[ -e "$s/kip-loaded" ]]; then body='<!doctype html>'; else code=404; fi ;;
+        "POST $sk/skServer/appstore/install/@signalk/app-dock/1.1.0")
+            # What App Dock reads when it first starts.
+            cat "$HOME/.signalk/plugin-config-data/signalk-app-dock.json" >"$s/dock-config-at-install" 2>/dev/null \
+                || echo none >"$s/dock-config-at-install"
+            mkdir -p "${dock%/*}"
+            echo '{"name":"@signalk/app-dock","version":"1.1.0"}' >"$dock"
+            body='"Installing @signalk/app-dock..."' ;;
+        "GET $sk/skServer/plugins/signalk-app-dock")
+            if [[ ! -e "$s/dock-loaded" ]]; then code=404 body='Cannot GET'
+            elif [[ -e "$s/dock-disabled" ]]; then body='{"enabled":false}'
+            else body='{"enabled":true}'; fi ;;
+        "GET $sk/@signalk/app-dock/")
+            if [[ -e "$s/dock-loaded" ]]; then body='<!doctype html>'; else code=404; fi ;;
         "GET $sk/skServer/plugins/signalk-autologin")
             if ! loaded; then code=404 body='Cannot GET'
             else
@@ -634,11 +647,11 @@ preinstall_autologin() {
     echo "$1" >"$state/loaded-version"
 }
 
-# KIP installed and served, as after an App Store install and a restart.
-preinstall_kip() {
-    mkdir -p "${kippkg%/*}"
-    echo '{"name":"@mxtommy/kip","version":"4.8.5"}' >"$kippkg"
-    : >"$state/kip-loaded"
+# App Dock installed and served, as after an App Store install and a restart.
+preinstall_dock() {
+    mkdir -p "${dockpkg%/*}"
+    echo '{"name":"@signalk/app-dock","version":"1.1.0"}' >"$dockpkg"
+    : >"$state/dock-loaded"
 }
 
 restarts() { grep -cx 'signalk restart' "$state/calls" 2>/dev/null || true; }
@@ -695,28 +708,37 @@ call_made 'apt-get install -y --no-install-recommends cage jq chromium' \
     "installs cage, jq and the distro chromium package"
 call_made 'useradd --system --home-dir /var/lib/signalk-kiosk --create-home --shell /usr/sbin/nologin --user-group signalk-kiosk' \
     "creates the unprivileged kiosk system user"
-if [[ -f "$kippkg" ]]; then
-    ok "installs KIP, the default page, which the server image does not ship"
+if [[ -f "$dockpkg" ]]; then
+    ok "installs App Dock, the default page, which the server image does not ship"
 else
-    miss "KIP not installed"
+    miss "App Dock not installed"
+fi
+if jq -e '[.configuration.apps[] | {label, url, enabled, autostart}] == [
+        {label: "Freeboard-SK", url: "/@signalk/freeboard-sk/", enabled: true, autostart: true},
+        {label: "Settings", url: "/admin/", enabled: true, autostart: false}]
+        and .configuration.tourDismissed == true' \
+        "$state/dock-config-at-install" >/dev/null 2>&1; then
+    ok "App Dock's first start reads Freeboard-SK (autostart), Settings, and no welcome tour"
+else
+    miss "App Dock config when the install ran: $(cat "$state/dock-config-at-install" 2>/dev/null)"
 fi
 if [[ "$(cat "$state/config-at-install" 2>/dev/null)" == '{"enabled":true,"configuration":{"networkWideAdmin":false}}' ]]; then
     ok "signalk-autologin's first start reads a token-only configuration"
 else
     miss "plugin config when the install ran: $(cat "$state/config-at-install" 2>/dev/null)"
 fi
-if [[ "$(restarts)" == 1 && -e "$state/kip-loaded" && "$(cat "$state/loaded-version" 2>/dev/null)" == 1.1.0 ]]; then
-    ok "one server restart loads both KIP and signalk-autologin"
+if [[ "$(restarts)" == 1 && -e "$state/dock-loaded" && "$(cat "$state/loaded-version" 2>/dev/null)" == 1.1.0 ]]; then
+    ok "one server restart loads both App Dock and signalk-autologin"
 else
-    miss "restarts: $(restarts), KIP loaded: $([[ -e "$state/kip-loaded" ]] && echo yes || echo no), plugin loaded: $(cat "$state/loaded-version" 2>/dev/null)"
+    miss "restarts: $(restarts), App Dock loaded: $([[ -e "$state/dock-loaded" ]] && echo yes || echo no), plugin loaded: $(cat "$state/loaded-version" 2>/dev/null)"
 fi
 if [[ -s "$state/config-posts" ]]; then
     miss "re-posted the plugin config: $(tr '\n' '|' <"$state/config-posts")"
 else
     ok "no config re-post (a post restarts the plugin)"
 fi
-if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'POST {"type":"readwrite"}' ]]; then
-    ok "creates Signal K user signalk-kiosk as readwrite, with no password"
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'POST {"type":"admin"}' ]]; then
+    ok "creates Signal K user signalk-kiosk as an admin, with no password"
 else
     miss "Signal K user calls: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
 fi
@@ -742,10 +764,10 @@ call_made 'systemctl disable lightdm.service' "disables the running desktop logi
 call_made 'systemctl enable signalk-kiosk.service' "enables the kiosk unit"
 call_not_made 'systemctl restart signalk-kiosk.service' \
     "desktop still running: the kiosk waits for the reboot instead of fighting it"
-conf_has 'KIOSK_URL=http://127.0.0.1:80/@mxtommy/kip/' "default page: KIP"
+conf_has 'KIOSK_URL=http://127.0.0.1:80/@signalk/app-dock/' "default page: App Dock"
 conf_has 'KIOSK_BASE=http://127.0.0.1:80'
 conf_has 'KIOSK_SIGNIN=token'
-conf_has 'KIOSK_SK_USER_TYPE=readwrite'
+conf_has 'KIOSK_SK_USER_TYPE=admin'
 conf_has "KIOSK_BROWSER=$ebin/chromium" "conf: browser path resolved after the install"
 conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service'
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed'
@@ -763,10 +785,11 @@ if [[ -x "$root/usr/local/lib/signalk-kiosk/browser" ]]; then
 else
     miss "launcher not executable"
 fi
-if grep -qe '--admin:' -e 'every device' <<<"$out"; then
-    miss "admin warning printed: $(grep -e '--admin:' -e 'every device' <<<"$out" | tr '\n' '|')"
+out_has 'the kiosk signs in as an admin: anyone at this screen' "warns that anyone at the screen is admin"
+if grep -q 'every device' <<<"$out"; then
+    miss "network-wide note printed: $(grep 'every device' <<<"$out" | tr '\n' '|')"
 else
-    ok "no admin warnings"
+    ok "no network-wide note: the plugin runs token-only"
 fi
 no_unexpected_requests
 
@@ -777,19 +800,23 @@ call_not_made 'systemctl restart signalk-kiosk.service' \
     "the disabled desktop still holds the screen: no kiosk restart"
 out_has 'the desktop is still running; reboot' "says to reboot"
 
-echo "  re-enable with --admin after the reboot"
+echo "  re-enable with --readwrite after the reboot"
 : >"$state/lightdm-stopped"
 : >"$state/calls"
 rm -f "$state/user-calls"
-run_enable --admin
-if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"admin"}' ]]; then
-    ok "the existing kiosk user is changed to admin"
+run_enable --readwrite
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readwrite"}' ]]; then
+    ok "the existing kiosk user is changed to readwrite"
 else
     miss "Signal K user calls: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
 fi
-conf_has 'KIOSK_URL=http://127.0.0.1:80/' "--admin: default page is the server's landing page"
-conf_has 'KIOSK_SK_USER_TYPE=admin'
-out_has '--admin: the kiosk signs in as an admin' "--admin: warns that anyone at the screen is admin"
+conf_has 'KIOSK_URL=http://127.0.0.1:80/@signalk/freeboard-sk/' "--readwrite: Freeboard-SK, not App Dock"
+conf_has 'KIOSK_SK_USER_TYPE=readwrite'
+if grep -q 'signs in as an admin' <<<"$out"; then
+    miss "--readwrite still warns about an admin sign-in"
+else
+    ok "--readwrite: no admin warning"
+fi
 conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service' "re-enable keeps the recorded display manager"
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed' "re-enable keeps the recorded plugin install"
 conf_has 'KIOSK_SK_USER_CREATED=1' "re-enable keeps the recorded Signal K user"
@@ -968,7 +995,7 @@ fi
 
 echo "  signalk-autologin 1.0.0 installed by the owner, admin for every device"
 reset_box
-preinstall_kip
+preinstall_dock
 preinstall_autologin 1.0.0 '{"enabled":true,"configuration":{"adminUser":"skipper"}}'
 run_enable
 out_has 'already granting admin to every device' "says the plugin grants admin network-wide by its own setting"
@@ -992,10 +1019,17 @@ else
 fi
 no_unexpected_requests
 
-echo "  signalk-autologin installed and switched off, KIP missing"
+echo "  signalk-autologin installed and switched off, App Dock missing"
 reset_box
 preinstall_autologin 1.1.0 '{"enabled":false,"configuration":{"adminUser":"skipper"}}'
+mine='{"enabled":true,"configuration":{"apps":[{"enabled":true,"url":"/x/","label":"Mine"}]}}'
+printf '%s\n' "$mine" >"$home/.signalk/plugin-config-data/signalk-app-dock.json"
 run_enable
+if [[ "$(cat "$state/dock-config-at-install" 2>/dev/null)" == "$mine" ]]; then
+    ok "an existing App Dock configuration is not overwritten"
+else
+    miss "App Dock config when the install ran: $(cat "$state/dock-config-at-install" 2>/dev/null)"
+fi
 if tail -1 "$state/config-posts" 2>/dev/null \
         | jq -e '.enabled == true and .configuration == {"adminUser": "skipper", "networkWideAdmin": false}' >/dev/null 2>&1; then
     ok "switches it on for token sign-in only, keeping its other settings"
@@ -1004,20 +1038,20 @@ else
 fi
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=enabled'
 conf_has 'KIOSK_SIGNIN=token'
-if [[ "$(restarts)" == 1 && -e "$state/kip-loaded" ]]; then
-    ok "restarts once for KIP, with the plugin already loaded"
+if [[ "$(restarts)" == 1 && -e "$state/dock-loaded" ]]; then
+    ok "restarts once for App Dock, with the plugin already loaded"
 else
-    miss "restarts: $(restarts), KIP loaded: $([[ -e "$state/kip-loaded" ]] && echo yes || echo no)"
+    miss "restarts: $(restarts), App Dock loaded: $([[ -e "$state/dock-loaded" ]] && echo yes || echo no)"
 fi
 no_unexpected_requests
 
-echo "  KIP missing, --no-autologin"
+echo "  App Dock missing, --no-autologin"
 reset_box
 run_enable --no-autologin
-if [[ -f "$kippkg" && "$(restarts)" == 1 && -e "$state/kip-loaded" ]]; then
-    ok "installs KIP and restarts the server to serve it"
+if [[ -f "$dockpkg" && "$(restarts)" == 1 && -e "$state/dock-loaded" ]]; then
+    ok "installs App Dock and restarts the server to serve it"
 else
-    miss "KIP installed: $([[ -f "$kippkg" ]] && echo yes || echo no), restarts: $(restarts), KIP loaded: $([[ -e "$state/kip-loaded" ]] && echo yes || echo no)"
+    miss "App Dock installed: $([[ -f "$dockpkg" ]] && echo yes || echo no), restarts: $(restarts), App Dock loaded: $([[ -e "$state/dock-loaded" ]] && echo yes || echo no)"
 fi
 if grep -q 'autologin' "$state/requests" 2>/dev/null; then
     miss "touched signalk-autologin: $(grep autologin "$state/requests" | tr '\n' '|')"
@@ -1029,7 +1063,7 @@ no_unexpected_requests
 
 echo "  an earlier install left a configuration for every device"
 reset_box
-preinstall_kip
+preinstall_dock
 mkdir -p "${cfgf%/*}"
 echo '{"enabled":true,"configuration":{}}' >"$cfgf"
 run_enable
@@ -1049,13 +1083,13 @@ no_unexpected_requests
 
 echo "  a Signal K user signalk-kiosk existed before the kiosk"
 reset_box
-preinstall_kip
+preinstall_dock
 preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
 echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"readonly"}]' >"$state/users.json"
-run_enable --admin
+run_enable
 conf_has 'KIOSK_SK_USER_CREATED=' "not recorded as created by the kiosk"
 conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "records the type the user had before"
-run_enable
+run_enable --readwrite
 conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "a later enable keeps the first recorded type"
 cookies="$root/var/lib/signalk-kiosk/chromium/Default"
 mkdir -p "$cookies/Network"
@@ -1088,10 +1122,10 @@ else
     miss "users after disable: $(cat "$state/users.json")"
 fi
 reset_box
-preinstall_kip
+preinstall_dock
 preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
 echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"readonly"}]' >"$state/users.json"
-run_helper enable --admin >/dev/null 2>&1 || true
+run_helper enable >/dev/null 2>&1 || true
 mkdir -p "$cookies/Network"
 : >"$cookies/Network/Cookies"
 rm -f "$state/user-calls"
@@ -1113,9 +1147,9 @@ no_unexpected_requests
 
 echo "  a found user of the right type, and a kiosk system user with its own home"
 reset_box
-preinstall_kip
+preinstall_dock
 preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
-echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"readwrite"}]' >"$state/users.json"
+echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"admin"}]' >"$state/users.json"
 : >"$state/user-exists"
 echo /home/kiosk >"$state/kiosk-home"
 run_enable
@@ -1142,6 +1176,63 @@ else
 fi
 no_unexpected_requests
 
+echo "  App Dock installed but switched off"
+reset_box
+preinstall_dock
+preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
+: >"$state/dock-disabled"
+run_enable
+out_has 'App Dock is switched off, so this page will not work' "says App Dock is switched off"
+if grep -q '^POST .*signalk-app-dock' "$state/requests" 2>/dev/null; then
+    miss "changed App Dock's settings: $(grep 'signalk-app-dock' "$state/requests" | tr '\n' '|')"
+else
+    ok "leaves App Dock switched off, as its owner set it"
+fi
+no_unexpected_requests
+
+echo "  an earlier App Dock install left it switched off"
+reset_box
+preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
+off='{"enabled":false,"configuration":{"apps":[]}}'
+printf '%s\n' "$off" >"$home/.signalk/plugin-config-data/signalk-app-dock.json"
+run_enable
+out_has 'App Dock is switched off, so this page will not work' "says the kept configuration has App Dock off"
+if [[ "$(cat "$home/.signalk/plugin-config-data/signalk-app-dock.json")" == "$off" ]]; then
+    ok "the kept configuration is not changed"
+else
+    miss "App Dock config after enable: $(cat "$home/.signalk/plugin-config-data/signalk-app-dock.json")"
+fi
+no_unexpected_requests
+
+echo "  App Dock cannot be installed"
+reset_box
+preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
+: >"$state/dock-unavailable"
+run_enable
+out_has 'the kiosk shows Freeboard-SK instead' "says it falls back to Freeboard-SK"
+conf_has 'KIOSK_URL=http://127.0.0.1:80/@signalk/freeboard-sk/' "the kiosk opens Freeboard-SK"
+conf_has 'KIOSK_SIGNIN=token' "and still signs in"
+no_unexpected_requests
+
+echo "  App Dock installed but not loaded yet"
+reset_box
+mkdir -p "${dockpkg%/*}"
+echo '{"name":"@signalk/app-dock","version":"1.1.0"}' >"$dockpkg"
+preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
+run_enable
+out_has 'App Dock is not loaded yet' "says App Dock needs a restart to load"
+if jq -e '[.configuration.apps[].label] == ["Freeboard-SK", "Settings"]' "$state/dock-config-at-restart" >/dev/null 2>&1; then
+    ok "App Dock's first start, at the restart, reads the kiosk's app list"
+else
+    miss "App Dock config at the restart: $(cat "$state/dock-config-at-restart" 2>/dev/null)"
+fi
+if [[ "$(restarts)" == 1 && -e "$state/dock-loaded" ]]; then
+    ok "restarts once and waits until App Dock is served"
+else
+    miss "restarts: $(restarts), App Dock loaded: $([[ -e "$state/dock-loaded" ]] && echo yes || echo no)"
+fi
+no_unexpected_requests
+
 echo "  the server has TLS enabled"
 reset_box
 : >"$state/tls"
@@ -1156,7 +1247,7 @@ if [[ -e "$state/calls" ]]; then
 else
     ok "refuses before changing anything"
 fi
-for u in https://127.0.0.1:443/@mxtommy/kip/ https://localhost/@mxtommy/kip/ http://localhost/@mxtommy/kip/; do
+for u in https://127.0.0.1:443/@signalk/app-dock/ https://localhost/@signalk/app-dock/ http://localhost/@signalk/app-dock/; do
     if out=$(run_helper enable --url "$u" 2>&1); then
         miss "enable went ahead with $u, this server's own address"
     else
@@ -1169,7 +1260,7 @@ conf_has 'KIOSK_URL=https://example.test/x' "a page on another host is still set
 
 echo "  the server refuses the admin token"
 reset_box
-preinstall_kip
+preinstall_dock
 preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
 echo "a-rotated-token" >"$home/.signalk-doctor/signalk-token"
 run_enable
@@ -1186,7 +1277,10 @@ echo "  no admin token"
 reset_box
 rm -f "$home/.signalk-doctor/signalk-token"
 run_enable
-out_has 'KIP is not installed, and without an admin token' "says why it cannot install KIP"
+out_has 'App Dock is not installed, and without an admin token' "says why it cannot install App Dock"
+conf_has 'KIOSK_URL=http://127.0.0.1:80/@signalk/freeboard-sk/' "no App Dock to be had: Freeboard-SK instead"
+run_enable --url /@signalk/app-dock/
+conf_has 'KIOSK_URL=http://127.0.0.1:80/@signalk/app-dock/' "an App Dock asked for with --url is kept"
 out_has 'no admin token' "says why the kiosk cannot sign in"
 conf_has 'KIOSK_SIGNIN=none' "falls back to the login page"
 call_made 'systemctl enable signalk-kiosk.service' "the kiosk itself is still enabled"

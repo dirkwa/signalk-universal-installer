@@ -16,17 +16,19 @@
 #
 # The server runs with security enabled, so a fresh kiosk browser would stop
 # at a login form on a screen that may have no keyboard. `enable` therefore
-# gives the kiosk its own Signal K user, `signalk-kiosk` (readwrite, or admin
-# with --admin; no password, so it can only sign in with its token), mints a
-# long-lived token for it, and signs the browser in through signalk-autologin's
-# token sign-in. That plugin is installed if missing and, when the kiosk is
-# what turns it on, runs in token-only mode: every other device still logs in
-# normally. `disable` deletes the user again, which revokes the token.
+# gives the kiosk its own Signal K user, `signalk-kiosk` (an admin, or
+# readwrite with --readwrite; no password, so it can only sign in with its
+# token), mints a long-lived token for it, and signs the browser in through
+# signalk-autologin's token sign-in. That plugin is installed if missing and,
+# when the kiosk is what turns it on, runs in token-only mode: every other
+# device still logs in normally. `disable` deletes a user the kiosk created,
+# which revokes its token; a user that existed before gets back the type it
+# had, and keeps its tokens.
 #
 # Usage:
 #   signalk-kiosk status       monitors, touchscreens and kiosk state (default)
 #   signalk-kiosk scan         monitors and touchscreens only (no sudo)
-#   signalk-kiosk enable [--url PATH|URL] [--admin] [--browser chromium|chrome] [--no-autologin]
+#   signalk-kiosk enable [--url PATH|URL] [--readwrite] [--browser chromium|chrome] [--no-autologin]
 #   signalk-kiosk disable [--purge]
 #   signalk-kiosk restart
 #   signalk-kiosk help
@@ -62,14 +64,28 @@ CONF_FILE="${KIOSK_ROOT}${CONF}"
 LAUNCHER_FILE="${KIOSK_ROOT}${LAUNCHER}"
 
 AUTOLOGIN_ID="signalk-autologin"
-# Readwrite by default: dashboards (KIP, Freeboard-SK) get live data, while
-# someone at the screen cannot reconfigure the server. The Admin UI needs an
-# admin — it treats the first 401 from its admin-only calls as a logged-out
-# session — which is why --admin also moves the default page to the server's
-# own landing page. The server image ships Freeboard-SK but not KIP, so
-# enable installs KIP when it is the page and missing.
-DEFAULT_PKG="@mxtommy/kip"
+# The kiosk's Signal K user is an admin by default: App Dock reads its app
+# list only for an admin, and its Settings entry is the Admin UI, which treats
+# the first 401 from its admin-only calls as a logged-out session. With
+# --readwrite, webapps still get live data and the server's configuration is
+# out of reach from the screen; the page is then Freeboard-SK (READWRITE_PATH),
+# which the server image ships, rather than an App Dock showing its built-in
+# app list.
+#
+# The default page is App Dock, which switches between webapps. The server
+# image does not ship it, so enable installs it when it is the page and
+# missing, and seeds its app list first (DOCK_APPS) — the list App Dock would
+# seed itself, without KIP, which the image does not ship either.
+DEFAULT_PKG="@signalk/app-dock"
 DEFAULT_PATH="/${DEFAULT_PKG}/"
+READWRITE_PATH="/@signalk/freeboard-sk/"
+DOCK_ID="signalk-app-dock"
+DOCK_APPS='[
+  {"enabled": true, "autostart": true, "url": "/@signalk/freeboard-sk/", "label": "Freeboard-SK",
+   "icon": "/@signalk/freeboard-sk/assets/icons/icon-72x72.png", "color": ""},
+  {"enabled": true, "autostart": false, "url": "/admin/", "label": "Settings",
+   "icon": "/@signalk/app-dock/icon-settings.svg", "color": "#78788c"}
+]'
 SK_KIOSK_USER="signalk-kiosk"
 TOKEN="/etc/signalk-kiosk.token"
 TOKEN_FILE="${KIOSK_ROOT}${TOKEN}"
@@ -574,6 +590,20 @@ seed_autologin_config() {
     printf '%s\n' '{"enabled":true,"configuration":{"networkWideAdmin":false}}' >"$f"
 }
 
+# App Dock seeds its own app list on its first start unless it finds one; this
+# one is written before that start, with the settings App Dock would seed.
+# Never overwrites a file that exists.
+seed_dock_config() {
+    local f="${SK_DATA}/plugin-config-data/${DOCK_ID}.json"
+    [[ -e "$f" ]] && return 0
+    mkdir -p "${f%/*}"
+    # tourDismissed: on a screen with no input device the welcome tour would
+    # never go away.
+    jq -n --argjson apps "$DOCK_APPS" '{enabled: true, configuration: {
+        showNightModeButton: true, showFullscreenButton: false,
+        showExitButton: false, tourDismissed: true, apps: $apps}}' >"$f"
+}
+
 # The seed page exists from the first release with token sign-in on, and only
 # while the plugin is enabled.
 autologin_has_token_signin() {
@@ -715,7 +745,7 @@ delete_kiosk_sk_user() {
 }
 
 # A user the kiosk found rather than created is not deleted; it goes back to
-# the type it had before the kiosk changed it, so --admin leaves no admin
+# the type it had before the kiosk changed it, so the kiosk leaves no admin
 # behind.
 restore_kiosk_sk_user_type() {
     local base="$1" type="$2" token code
@@ -805,13 +835,13 @@ resolve_url() {
 }
 
 cmd_enable() {
-    local want_url="" browser=chromium autologin=1 sk_type=readwrite base bin pkgs=()
+    local want_url="" url_defaulted=0 browser=chromium autologin=1 sk_type=admin base bin pkgs=() dock_status
     local prev_dm dm_now url signin=none prev_signin changed user_created user_prev_type token tls_origin
     while (( $# )); do
         case "$1" in
             --url)          want_url="${2:?--url needs a path or URL}"; shift 2 ;;
             --url=*)        want_url="${1#--url=}"; shift ;;
-            --admin)        sk_type="admin"; shift ;;
+            --readwrite)    sk_type=readwrite; shift ;;
             --browser)      browser="${2:?--browser needs chromium or chrome}"; shift 2 ;;
             --browser=*)    browser="${1#--browser=}"; shift ;;
             --no-autologin) autologin=0; shift ;;
@@ -820,7 +850,8 @@ cmd_enable() {
     done
     case "$browser" in chromium|chrome) ;; *) err "--browser must be chromium or chrome"; exit 2 ;; esac
     if [[ -z "$want_url" ]]; then
-        if [[ "$sk_type" == admin ]]; then want_url=/; else want_url="$DEFAULT_PATH"; fi
+        url_defaulted=1
+        if [[ "$sk_type" == admin ]]; then want_url="$DEFAULT_PATH"; else want_url="$READWRITE_PATH"; fi
     fi
     refuse_root
     need_debian_family
@@ -880,17 +911,57 @@ cmd_enable() {
 
     section "Page"
     info "the kiosk shows ${url}"
+    # The default page that cannot be had becomes Freeboard-SK, which the
+    # server image ships; a page given with --url is kept as given.
+    page_fallback() {
+        (( url_defaulted )) || return 0
+        url=$(resolve_url "$READWRITE_PATH" "$base")
+        warn "the kiosk shows Freeboard-SK instead: ${url}"
+    }
     case "${url#"$base"}" in
         "${DEFAULT_PATH%/}"|"${DEFAULT_PATH}"*)
             if [[ -f "${SK_DATA}/node_modules/${DEFAULT_PKG}/package.json" ]]; then
-                ok "KIP is installed"
+                ok "App Dock is installed; its app list is left as it is"
+                if token=$(admin_token); then
+                    dock_status=$(curl -sS -m 10 -w $'\n%{http_code}' -H "Authorization: Bearer ${token}" \
+                        "${base}/skServer/plugins/${DOCK_ID}" 2>/dev/null) || dock_status=""
+                    case "${dock_status##*$'\n'}" in
+                        # Installed since the server's last start: not served yet,
+                        # and with no app list of its own until its first start.
+                        404)
+                            info "App Dock is not loaded yet; the server restarts to load it"
+                            seed_dock_config
+                            NEED_RESTART=1
+                            PAGE_INSTALLED=1
+                            ;;
+                        # Switched off by its owner: say so rather than switch it on.
+                        200)
+                            if jq -e '.enabled == false' <<<"${dock_status%$'\n'*}" >/dev/null 2>&1; then
+                                warn "App Dock is switched off, so this page will not work: switch it on under"
+                                warn "Server → Plugin Config, or pick another page with --url"
+                            fi
+                            ;;
+                    esac
+                fi
             elif ! token=$(admin_token); then
-                warn "KIP is not installed, and without an admin token at ${DOCTOR_DATA}/signalk-token"
-                warn "enable cannot install it: install KIP from the App Store, or pick a page with --url"
-            elif appstore_install "$token" "$base" "$DEFAULT_PKG"; then
-                PAGE_INSTALLED=1
+                warn "App Dock is not installed, and without an admin token at ${DOCTOR_DATA}/signalk-token"
+                warn "enable cannot install it: install App Dock from the App Store, or pick a page with --url"
+                page_fallback
             else
-                warn "install KIP from the App Store, or pick another page with --url"
+                seed_dock_config
+                # A configuration an earlier install left behind is kept, and
+                # with it an App Dock its owner switched off.
+                if jq -e '.enabled == false' "${SK_DATA}/plugin-config-data/${DOCK_ID}.json" >/dev/null 2>&1; then
+                    warn "App Dock is switched off, so this page will not work: switch it on under"
+                    warn "Server → Plugin Config, or pick another page with --url"
+                fi
+                if appstore_install "$token" "$base" "$DEFAULT_PKG"; then
+                    PAGE_INSTALLED=1
+                    ok "App Dock installed, with Freeboard-SK and Settings (the Admin UI)"
+                else
+                    warn "install App Dock from the App Store, or pick another page with --url"
+                    page_fallback
+                fi
             fi
             ;;
     esac
@@ -902,13 +973,14 @@ cmd_enable() {
     user_prev_type=$(conf_get KIOSK_SK_USER_PREVIOUS_TYPE)
     prev_signin=$(conf_get KIOSK_SIGNIN)
     if (( ! autologin )); then
-        info "--no-autologin: the kiosk shows the Signal K login page"
+        info "--no-autologin: the kiosk opens its page signed out"
     elif [[ "$url" != "${base}/"* ]]; then
         warn "${url} is not on this server, so the kiosk cannot sign in to it"
     else
         if [[ "$sk_type" == admin ]]; then
-            warn "--admin: the kiosk signs in as an admin. Anyone at this screen can change"
-            warn "the server's settings, plugins and users. Other devices still log in."
+            warn "the kiosk signs in as an admin: anyone at this screen can change the server's"
+            warn "settings, plugins and users (--readwrite for a screen that should not)."
+            warn "Other devices still log in."
         fi
         # Recorded even when a later step fails, so disable still undoes it.
         ensure_sign_in "$base" "$sk_type" && signin=token
@@ -924,7 +996,7 @@ cmd_enable() {
             run_root chgrp "$KIOSK_USER" "$TOKEN_FILE"
             ok "the kiosk signs in as Signal K user ${SK_KIOSK_USER} (${sk_type}); other devices are unaffected"
         else
-            warn "the kiosk will show the Signal K login page"
+            warn "the kiosk will open its page signed out"
         fi
     fi
     if [[ "$signin" != token ]]; then
@@ -1114,7 +1186,7 @@ cmd_status() {
     if [[ "$(conf_get KIOSK_SIGNIN)" == token ]]; then
         printf '  %-12s %s\n' "sign-in" "token, as Signal K user ${SK_KIOSK_USER} ($(conf_get KIOSK_SK_USER_TYPE))"
     else
-        printf '  %-12s %s\n' "sign-in" "none — the Signal K login page"
+        printf '  %-12s %s\n' "sign-in" "none — the page opens signed out"
     fi
     if [[ -n "$(conf_get KIOSK_PREV_DISPLAY_MANAGER)" ]]; then
         printf '  %-12s %s\n' "desktop" "$(conf_get KIOSK_PREV_DISPLAY_MANAGER) disabled while the kiosk is on"
@@ -1129,13 +1201,14 @@ signalk kiosk — boot a connected screen straight into the Signal K GUI
   signalk kiosk status      monitors, touchscreens and kiosk state (default)
   signalk kiosk scan        monitors and touchscreens only
   signalk kiosk enable      install cage + Chromium and boot into a full-screen browser
-                            on tty1, signed in to Signal K as its own user (sudo)
-      --url PATH|URL        what to show (default: KIP, ${DEFAULT_PATH}, installed if missing)
-      --admin               sign in as an admin instead of readwrite, and default to the
-                            server's landing page — needed for the Admin UI; anyone at
-                            the screen can then change the server's configuration
+                            on tty1, signed in to Signal K as its own admin user (sudo)
+      --url PATH|URL        what to show (default: App Dock, ${DEFAULT_PATH}, installed
+                            with Freeboard-SK and Settings if missing)
+      --readwrite           sign in as a readwrite user and open Freeboard-SK instead:
+                            webapps get live data, but the server's configuration is out
+                            of reach from the screen
       --browser chromium|chrome   default chromium; chrome must already be installed
-      --no-autologin        no sign-in: the kiosk shows the Signal K login page
+      --no-autologin        no sign-in: the kiosk opens its page signed out
   signalk kiosk disable     restore the previous boot (desktop login or console) and
                             delete the kiosk's Signal K user, revoking its token (sudo)
       --purge               also remove the kiosk's system user and its browser profile
