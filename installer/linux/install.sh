@@ -119,11 +119,13 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-/dev/null}" ]]; then
         installer/linux/install-socketcan-script.sh \
         installer/linux/install-bluetooth-script.sh \
         installer/linux/install-halpi2-script.sh \
+        installer/linux/install-kiosk-script.sh \
         installer/linux/signalk.tmpl \
         installer/linux/signalk-recovery.tmpl \
         installer/linux/signalk-socketcan.tmpl \
         installer/linux/signalk-bluetooth.tmpl \
         installer/linux/signalk-halpi2.tmpl \
+        installer/linux/signalk-kiosk.tmpl \
         installer/linux/signalk-timesync.tmpl \
         installer/linux/legacy-cleanup.sh \
         installer/linux/lib/colors.sh \
@@ -1922,6 +1924,7 @@ INSTALLER_VERSION="$INSTALLER_VERSION" bash "$HERE/install-signalk-command.sh"
 bash "$HERE/install-socketcan-script.sh"
 bash "$HERE/install-bluetooth-script.sh"
 bash "$HERE/install-halpi2-script.sh"
+bash "$HERE/install-kiosk-script.sh"
 
 # Container DNS self-heal (signalk-resolv-watch.path/.service): recreates
 # signalk-server if the boot beat DHCP and the container snapshotted an
