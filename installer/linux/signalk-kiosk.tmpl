@@ -732,11 +732,20 @@ restore_kiosk_sk_user_type() {
     return 1
 }
 
+# The kiosk user's home as passwd has it, which is the launcher's $HOME: a
+# signalk-kiosk user that existed before enable keeps its own.
+kiosk_home() {
+    local h
+    h=$(getent passwd "$KIOSK_USER" 2>/dev/null | cut -d: -f6)
+    printf '%s' "${h:-$KIOSK_HOME}"
+}
+
 # The kiosk browser's cookie store (Chromium keeps it under Network/ since
 # version 96), taken while the browser is not running: a running one would
 # write its in-memory cookies back.
 clear_kiosk_cookies() {
-    local d="${KIOSK_ROOT}${KIOSK_HOME}/chromium/Default"
+    local d
+    d="${KIOSK_ROOT}$(kiosk_home)/chromium/Default"
     run_root rm -f "$d/Cookies" "$d/Cookies-journal" "$d/Network/Cookies" "$d/Network/Cookies-journal"
 }
 
@@ -797,7 +806,7 @@ resolve_url() {
 
 cmd_enable() {
     local want_url="" browser=chromium autologin=1 sk_type=readwrite base bin pkgs=()
-    local prev_dm dm_now url signin=none changed user_created user_prev_type token tls_origin
+    local prev_dm dm_now url signin=none prev_signin changed user_created user_prev_type token tls_origin
     while (( $# )); do
         case "$1" in
             --url)          want_url="${2:?--url needs a path or URL}"; shift 2 ;;
@@ -891,6 +900,7 @@ cmd_enable() {
     changed=$(conf_get KIOSK_AUTOLOGIN_CHANGED)
     user_created=$(conf_get KIOSK_SK_USER_CREATED)
     user_prev_type=$(conf_get KIOSK_SK_USER_PREVIOUS_TYPE)
+    prev_signin=$(conf_get KIOSK_SIGNIN)
     if (( ! autologin )); then
         info "--no-autologin: the kiosk shows the Signal K login page"
     elif [[ "$url" != "${base}/"* ]]; then
@@ -920,15 +930,16 @@ cmd_enable() {
     if [[ "$signin" != token ]]; then
         # Both files hold the token. The browser profile keeps its session
         # cookie regardless; deleting the user is what signs the kiosk out.
-        run_root rm -f "$TOKEN_FILE" "${KIOSK_ROOT}${KIOSK_HOME}/start.html"
+        run_root rm -f "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
+        # The session cookie goes whoever the user is: deleting a user revokes
+        # it, but restoring a found user's type, or leaving one alone, does not.
+        if [[ "$prev_signin" == token ]]; then
+            run_root systemctl stop "$KIOSK_UNIT" 2>/dev/null || true
+            clear_kiosk_cookies
+        fi
         if [[ "$user_created" == 1 ]]; then
             if delete_kiosk_sk_user "$base"; then user_created=""; fi
         elif [[ -n "$user_prev_type" ]]; then
-            # The user and its tokens stay, so the browser's session cookie
-            # would keep the screen signed in: stop the kiosk (the end of
-            # enable starts it again) and remove it.
-            run_root systemctl stop "$KIOSK_UNIT" 2>/dev/null || true
-            clear_kiosk_cookies
             if restore_kiosk_sk_user_type "$base" "$user_prev_type"; then user_prev_type=""; fi
         fi
     fi
@@ -989,7 +1000,7 @@ report_kiosk_state() {
 }
 
 cmd_disable() {
-    local purge=0 prev_dm changed user_created user_prev_type base token had_unit=0
+    local purge=0 prev_dm prev_signin changed user_created user_prev_type base token had_unit=0
     while (( $# )); do
         case "$1" in
             --purge) purge=1; shift ;;
@@ -1002,6 +1013,7 @@ cmd_disable() {
     changed=$(conf_get KIOSK_AUTOLOGIN_CHANGED)
     user_created=$(conf_get KIOSK_SK_USER_CREATED)
     user_prev_type=$(conf_get KIOSK_SK_USER_PREVIOUS_TYPE)
+    prev_signin=$(conf_get KIOSK_SIGNIN)
 
     section "Boot"
     if [[ -f "$UNIT_FILE" ]]; then
@@ -1011,8 +1023,12 @@ cmd_disable() {
     else
         info "no kiosk unit installed"
     fi
+    # With the browser stopped: its session cookie is a copy of the token.
+    if [[ "$prev_signin" == token ]]; then
+        clear_kiosk_cookies
+    fi
     run_root rm -f "$UNIT_FILE" "$SLICE_FILE" "$PAM_FILE" "$CONF_FILE" "$LAUNCHER_FILE" \
-        "$TOKEN_FILE" "${KIOSK_ROOT}${KIOSK_HOME}/start.html"
+        "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
     run_root rmdir "${LAUNCHER_FILE%/*}" 2>/dev/null || true
     run_root systemctl daemon-reload
     # A failure here must not skip the sign-in cleanup below, which revokes
@@ -1037,8 +1053,6 @@ cmd_disable() {
             if [[ "$user_created" == 1 ]]; then
                 if delete_kiosk_sk_user "$base"; then user_created=""; fi
             elif [[ -n "$user_prev_type" ]]; then
-                # The user and its tokens stay, so the kiosk's own session goes.
-                clear_kiosk_cookies
                 if restore_kiosk_sk_user_type "$base" "$user_prev_type"; then user_prev_type=""; fi
             fi
             if [[ -n "$changed" ]]; then

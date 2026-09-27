@@ -454,7 +454,9 @@ cat >"$ebin/apt-cache" <<'EOF'
 EOF
 cat >"$ebin/getent" <<'EOF'
 #!/bin/bash
-[[ -e "$STUB_STATE/user-exists" ]]
+[[ -e "$STUB_STATE/user-exists" ]] || exit 2
+home=$(cat "$STUB_STATE/kiosk-home" 2>/dev/null || echo /var/lib/signalk-kiosk)
+echo "signalk-kiosk:x:999:999::${home}:/usr/sbin/nologin"
 EOF
 cat >"$ebin/useradd" <<'EOF'
 #!/bin/bash
@@ -1107,6 +1109,37 @@ else
     miss "Signal K user calls on --no-autologin: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
 fi
 conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=' "and no longer records it"
+no_unexpected_requests
+
+echo "  a found user of the right type, and a kiosk system user with its own home"
+reset_box
+preinstall_kip
+preinstall_autologin 1.1.0 '{"enabled":true,"configuration":{"networkWideAdmin":false}}'
+echo '[{"userId":"admin","type":"admin"},{"userId":"signalk-kiosk","type":"readwrite"}]' >"$state/users.json"
+: >"$state/user-exists"
+echo /home/kiosk >"$state/kiosk-home"
+run_enable
+conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=' "no type change, nothing to put back"
+ownhome="$root/home/kiosk"
+mkdir -p "$ownhome/chromium/Default/Network"
+: >"$ownhome/chromium/Default/Network/Cookies"
+: >"$ownhome/start.html"
+: >"$state/calls"
+run_enable --no-autologin
+call_made 'systemctl stop signalk-kiosk.service' "sign-in off: stops the kiosk"
+if [[ -e "$ownhome/chromium/Default/Network/Cookies" || -e "$ownhome/start.html" ]]; then
+    miss "sign-in off left the session cookie or start page in the user's own home"
+else
+    ok "sign-in off clears the session cookie and start page in the user's own home"
+fi
+run_helper enable >/dev/null 2>&1 || true
+: >"$ownhome/chromium/Default/Network/Cookies"
+run_helper disable >/dev/null 2>&1 || true
+if [[ -e "$ownhome/chromium/Default/Network/Cookies" ]]; then
+    miss "disable left the session cookie of a user whose tokens stay valid"
+else
+    ok "disable clears the session cookie there too"
+fi
 no_unexpected_requests
 
 echo "  the server has TLS enabled"
