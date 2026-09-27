@@ -106,7 +106,9 @@ check_uninstall() {
     : > "$STUB_LOG"
     run_step >/dev/null
     [[ -f "$CONF" ]] || { miss "$label: precondition — drop-in not written"; return; }
-    HOME="$tmp/home" PATH="$tmp/bin:$PATH" "$@" >/dev/null 2>&1 || true
+    # KIOSK_ROOT moves the uninstall scripts' kiosk-unit check off the host's
+    # /etc: on a box with the kiosk enabled, both refuse to run.
+    HOME="$tmp/home" KIOSK_ROOT="$tmp/root" PATH="$tmp/bin:$PATH" "$@" >/dev/null 2>&1 || true
     if [[ ! -e "$CONF" ]]; then ok "$label removes the drop-in"; else miss "$label left $CONF"; fi
     if grep -q -- 'set-property --runtime app.slice CPUWeight=100' "$STUB_LOG"; then
         ok "$label resets the live app.slice weight"
