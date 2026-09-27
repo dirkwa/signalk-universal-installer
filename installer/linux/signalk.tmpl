@@ -580,14 +580,12 @@ cmd_bluetooth() {
 cmd_halpi2() {
     # Thin delegate into the sibling helper installed by
     # install-halpi2-script.sh — same pattern as cmd_socketcan. Falls back
-    # to the doctor-staged payload copy so a box refreshed via `signalk
-    # update` before the CLI copy existed can still run it.
+    # to the copy install.sh stages in the doctor's installer-payload/.
     local helper="$HOME/.local/bin/signalk-halpi2"
     [[ -x "$helper" ]] || helper="${DOCTOR_DATA}/installer-payload/signalk-halpi2.tmpl"
     if [[ ! -x "$helper" ]]; then
-        echo "[ERR] ~/.local/bin/signalk-halpi2 is missing." >&2
-        echo "  Run 'signalk update' to refresh installer artifacts, or re-run" >&2
-        echo "  the bash bootstrap one-liner." >&2
+        echo "[ERR] ~/.local/bin/signalk-halpi2 is missing. Re-run the bash" >&2
+        echo "  bootstrap one-liner to install it." >&2
         exit 1
     fi
     exec "$helper" "$@"
