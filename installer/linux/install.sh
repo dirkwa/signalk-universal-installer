@@ -1880,9 +1880,9 @@ install -m 0755 "$HERE/detect-hardware.sh" "$PAYLOAD_DIR/detect-hardware.sh"
 # detect-hardware.sh it's fetched-not-invoked by the doctor; the host CLI runs
 # it. 0755 — it's an executable script.
 install -m 0755 "$HERE/render-server-quadlet.sh" "$PAYLOAD_DIR/render-server-quadlet.sh"
-# signalk-halpi2.tmpl is staged so a box that predates the CLI copy can still
-# run `signalk halpi2` from the payload after `signalk update` (the doctor
-# refresh list is what keeps it current). Self-contained: sources no lib.
+# signalk-halpi2.tmpl is staged as the copy cmd_halpi2 falls back to when
+# ~/.local/bin/signalk-halpi2 is missing. Only the installer writes this
+# copy. Self-contained: sources no lib.
 install -m 0755 "$HERE/signalk-halpi2.tmpl" "$PAYLOAD_DIR/signalk-halpi2.tmpl"
 # Stage the libs those scripts source, or the staged copies cannot run.
 # detect-hardware.sh sources lib/distro.sh unconditionally and died with
