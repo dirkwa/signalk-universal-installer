@@ -1029,37 +1029,40 @@ cmd_disable() {
         section "Signal K sign-in"
         base=$(sk_base_url)
         token=$(admin_token) || token=""
-        # A stopped or crash-looping server: say what stays behind rather
-        # than point at an Admin UI that is not there.
+        # A stopped or crash-looping server: nothing to try, and no Admin UI to
+        # point at.
         if ! curl -fsS -m 5 -o /dev/null "${base}/signalk" 2>/dev/null; then
-            warn "the Signal K server is not answering, so these are left for now:"
+            warn "the Signal K server is not answering"
+        else
+            if [[ "$user_created" == 1 ]]; then
+                if delete_kiosk_sk_user "$base"; then user_created=""; fi
+            elif [[ -n "$user_prev_type" ]]; then
+                # The user and its tokens stay, so the kiosk's own session goes.
+                clear_kiosk_cookies
+                if restore_kiosk_sk_user_type "$base" "$user_prev_type"; then user_prev_type=""; fi
+            fi
+            if [[ -n "$changed" ]]; then
+                if [[ -n "$token" ]] && autologin_post_config "$token" "$base" "$AUTOLOGIN_OFF"; then
+                    ok "${AUTOLOGIN_ID} disabled again (the kiosk had ${changed} it)"
+                    changed=""
+                else
+                    warn "could not disable ${AUTOLOGIN_ID}"
+                fi
+            fi
+        fi
+        # Whatever is not undone stays recorded, so that disable run again
+        # finishes the job.
+        if [[ -n "$changed" || "$user_created" == 1 || -n "$user_prev_type" ]]; then
+            warn "left for now:"
             if [[ "$user_created" == 1 ]]; then
                 warn "  the Signal K user ${SK_KIOSK_USER}"
             elif [[ -n "$user_prev_type" ]]; then
                 warn "  the Signal K user ${SK_KIOSK_USER}, which was ${user_prev_type} before the kiosk"
             fi
             [[ -z "$changed" ]] || warn "  ${AUTOLOGIN_ID}, switched on"
-            # Only this record stays, so that disable run again finishes the job.
             render_conf "" "" "" none "" "" "$changed" "$user_created" "$user_prev_type" \
                 | install_file 0644 "$CONF_FILE"
-            warn "run \`signalk kiosk disable\` again once the server answers to put them back"
-            user_created=""
-            user_prev_type=""
-            changed=""
-        fi
-        if [[ "$user_created" == 1 ]]; then
-            delete_kiosk_sk_user "$base" || true
-        elif [[ -n "$user_prev_type" ]]; then
-            # The user and its tokens stay, so the kiosk's own session goes.
-            clear_kiosk_cookies
-            restore_kiosk_sk_user_type "$base" "$user_prev_type" || true
-        fi
-        if [[ -n "$changed" ]]; then
-            if [[ -n "$token" ]] && autologin_post_config "$token" "$base" "$AUTOLOGIN_OFF"; then
-                ok "${AUTOLOGIN_ID} disabled again (the kiosk had ${changed} it)"
-            else
-                warn "could not disable ${AUTOLOGIN_ID}; disable it under Server → Plugin Config"
-            fi
+            warn "run \`signalk kiosk disable\` again to put them back"
         fi
     fi
 

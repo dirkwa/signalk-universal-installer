@@ -580,8 +580,11 @@ else
             echo "POST $data" >>"$s/user-calls"
             set_users --argjson d "$data" '. + [{userId: "signalk-kiosk", type: $d.type}]' ;;
         "PUT $sk/skServer/security/users/signalk-kiosk")
-            echo "PUT $data" >>"$s/user-calls"
-            set_users --argjson d "$data" 'map(if .userId == "signalk-kiosk" then .type = $d.type else . end)' ;;
+            if [[ -e "$s/put-fails" ]]; then code=500
+            else
+                echo "PUT $data" >>"$s/user-calls"
+                set_users --argjson d "$data" 'map(if .userId == "signalk-kiosk" then .type = $d.type else . end)'
+            fi ;;
         "DELETE $sk/skServer/security/users/signalk-kiosk")
             echo DELETE >>"$s/user-calls"
             set_users 'map(select(.userId != "signalk-kiosk"))' ;;
@@ -896,7 +899,7 @@ call_made 'systemctl enable --now lightdm.service' "gives the desktop login back
 conf_has 'KIOSK_URL=' "the conf keeps nothing but the sign-in record"
 conf_has 'KIOSK_SK_USER_CREATED=1' "the record of the Signal K user stays for a retry"
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed' "the record of the plugin install stays for a retry"
-out_has 'again once the server answers to put them back' "says how to finish"
+out_has 'again to put them back' "says how to finish"
 # The server is back: disable again finishes the sign-in part only.
 rm -f "$state/server-down" "$state/user-calls" "$state/config-posts"
 : >"$state/calls"
@@ -1056,8 +1059,17 @@ cookies="$root/var/lib/signalk-kiosk/chromium/Default"
 mkdir -p "$cookies/Network"
 : >"$cookies/Cookies"
 : >"$cookies/Network/Cookies"
-rm -f "$state/user-calls"
+: >"$state/put-fails"
+out=$(run_helper disable 2>&1) || true
+conf_has 'KIOSK_SK_USER_PREVIOUS_TYPE=readonly' "a restore that fails with the server up stays recorded"
+out_has 'left for now' "says what is left"
+rm -f "$state/put-fails" "$state/user-calls"
 run_helper disable >/dev/null 2>&1 || true
+if [[ -e "$conf" ]]; then
+    miss "the record stays after the retry succeeded"
+else
+    ok "disable run again restores the type and drops the record"
+fi
 if [[ -e "$cookies/Cookies" || -e "$cookies/Network/Cookies" ]]; then
     miss "disable left the browser's session cookie for a user whose tokens stay valid"
 else
