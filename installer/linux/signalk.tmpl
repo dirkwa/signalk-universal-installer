@@ -579,13 +579,16 @@ cmd_bluetooth() {
 
 cmd_halpi2() {
     # Thin delegate into the sibling helper installed by
-    # install-halpi2-script.sh — same pattern as cmd_socketcan. Falls back
-    # to the copy install.sh stages in the doctor's installer-payload/.
+    # install-halpi2-script.sh — same pattern as cmd_socketcan, whose
+    # `signalk update` route works for this helper from
+    # signalk-doctor-server 1.1.0 on. Falls back to the copy install.sh
+    # stages in the doctor's installer-payload/.
     local helper="$HOME/.local/bin/signalk-halpi2"
     [[ -x "$helper" ]] || helper="${DOCTOR_DATA}/installer-payload/signalk-halpi2.tmpl"
     if [[ ! -x "$helper" ]]; then
-        echo "[ERR] ~/.local/bin/signalk-halpi2 is missing. Re-run the bash" >&2
-        echo "  bootstrap one-liner to install it." >&2
+        echo "[ERR] ~/.local/bin/signalk-halpi2 is missing." >&2
+        echo "  Run 'signalk update' (doctor 1.1.0 or later installs it), or" >&2
+        echo "  re-run the bash bootstrap one-liner." >&2
         exit 1
     fi
     exec "$helper" "$@"
@@ -593,13 +596,14 @@ cmd_halpi2() {
 
 cmd_kiosk() {
     # Thin delegate into the sibling helper installed by
-    # install-kiosk-script.sh. `signalk update` does not deliver it: the
-    # doctor's refresh list writes signalk, signalk-recovery,
-    # signalk-socketcan and signalk-bluetooth only.
+    # install-kiosk-script.sh — same pattern as cmd_socketcan, whose
+    # `signalk update` route works for this helper from
+    # signalk-doctor-server 1.1.0 on.
     local helper="$HOME/.local/bin/signalk-kiosk"
     if [[ ! -x "$helper" ]]; then
-        echo "[ERR] ~/.local/bin/signalk-kiosk is missing. The bash bootstrap" >&2
-        echo "  one-liner installs it; re-run it to add the kiosk to this box." >&2
+        echo "[ERR] ~/.local/bin/signalk-kiosk is missing." >&2
+        echo "  Run 'signalk update' (doctor 1.1.0 or later installs it), or" >&2
+        echo "  re-run the bash bootstrap one-liner." >&2
         exit 1
     fi
     exec "$helper" "$@"
@@ -1377,6 +1381,8 @@ cmd_update() {
     # latest payload from GitHub Pages and rewrites:
     #   ~/.local/bin/signalk           (this script)
     #   ~/.local/bin/signalk-recovery  (the host-resident safety net)
+    #   ~/.local/bin/signalk-<helper>  (socketcan and bluetooth; halpi2 and
+    #                                   kiosk from signalk-doctor-server 1.1.0)
     #   ~/.signalk-doctor/installer-payload/*  (Quadlet templates + the
     #                                            render-server-quadlet.sh
     #                                            renderer — staged, not applied)
