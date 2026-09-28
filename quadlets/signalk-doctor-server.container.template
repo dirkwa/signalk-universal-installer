@@ -53,9 +53,10 @@ Volume=%t/podman/podman.sock:/var/run/docker.sock
 Volume=%t/bus:/host/dbus:ro
 # Read access to the updater's data dir for the shared operation.lock
 Volume=%h/.signalk-updater:/updater-data:rw,Z
-# Host scripts (~/.local/bin/signalk + signalk-recovery) for the
-# /api/installer/refresh endpoint. The doctor writes here only via that
-# token-gated endpoint; nothing else under ~/.local/bin/ is touched.
+# Host scripts for the /api/installer/refresh endpoint: signalk,
+# signalk-recovery and the feature helpers on the doctor's refresh list.
+# The doctor writes here only via that token-gated endpoint; nothing else
+# under ~/.local/bin/ is touched.
 # Older installs that don't yet expose this mount fall back to
 # 'mount-missing' status on host-script artifacts — the bash one-liner
 # remains the floor.

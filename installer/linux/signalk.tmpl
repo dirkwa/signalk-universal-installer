@@ -587,8 +587,8 @@ cmd_halpi2() {
     [[ -x "$helper" ]] || helper="${DOCTOR_DATA}/installer-payload/signalk-halpi2.tmpl"
     if [[ ! -x "$helper" ]]; then
         echo "[ERR] ~/.local/bin/signalk-halpi2 is missing." >&2
-        echo "  Run 'signalk update' (doctor 1.1.0 or later installs it), or" >&2
-        echo "  re-run the bash bootstrap one-liner." >&2
+        echo "  'signalk update' installs it when the doctor is 1.1.0 or later and" >&2
+        echo "  has ~/.local/bin mounted; otherwise re-run the bash bootstrap one-liner." >&2
         exit 1
     fi
     exec "$helper" "$@"
@@ -602,8 +602,8 @@ cmd_kiosk() {
     local helper="$HOME/.local/bin/signalk-kiosk"
     if [[ ! -x "$helper" ]]; then
         echo "[ERR] ~/.local/bin/signalk-kiosk is missing." >&2
-        echo "  Run 'signalk update' (doctor 1.1.0 or later installs it), or" >&2
-        echo "  re-run the bash bootstrap one-liner." >&2
+        echo "  'signalk update' installs it when the doctor is 1.1.0 or later and" >&2
+        echo "  has ~/.local/bin mounted; otherwise re-run the bash bootstrap one-liner." >&2
         exit 1
     fi
     exec "$helper" "$@"

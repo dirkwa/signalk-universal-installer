@@ -2,7 +2,7 @@
 
 `signalk kiosk` turns a Linux box with a monitor or touchscreen attached into a dedicated Signal K display: at power-on it shows a Signal K page full-screen, already signed in, with no desktop, no login prompt and no browser controls. Written for Raspberry Pi OS and Debian Trixie; Linux only.
 
-The installer puts the helper at `~/.local/bin/signalk-kiosk`. On a box installed before the kiosk existed, `signalk update` adds it once the box runs signalk-doctor-server 1.1.0 or later (the doctor updates from the Updater Console); re-running the installer's bash one-liner adds it too.
+The installer puts the helper at `~/.local/bin/signalk-kiosk`. On a box installed before the kiosk existed, `signalk update` adds it once the box runs signalk-doctor-server 1.1.0 or later (the doctor updates from the Updater Console). If `signalk update` reports `signalk-kiosk mount-missing`, the doctor cannot write to `~/.local/bin`; re-running the installer's bash one-liner adds that mount and the helper.
 
 ## TL;DR
 
