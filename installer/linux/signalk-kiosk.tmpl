@@ -816,6 +816,13 @@ browser_binary() {
     return 1
 }
 
+# Kiosk pages use emoji as icons (App Dock's night-mode button, for one), and a
+# minimal Debian or Pi OS install has no font for them: Chromium draws an
+# empty box instead.
+emoji_font_installed() {
+    dpkg-query -W -f='${Status}' fonts-noto-color-emoji 2>/dev/null | grep -q ' installed$'
+}
+
 # Pi OS Trixie and Debian Trixie name it `chromium`; Pi OS Bookworm named it
 # `chromium-browser`.
 chromium_package() {
@@ -884,6 +891,7 @@ cmd_enable() {
     section "Packages"
     command -v cage >/dev/null 2>&1 || pkgs+=(cage)
     command -v jq >/dev/null 2>&1 || pkgs+=(jq)
+    emoji_font_installed || pkgs+=(fonts-noto-color-emoji)
     if ! bin=$(browser_binary "$browser"); then
         if [[ "$browser" == chrome ]]; then
             err "Google Chrome is not installed. Install google-chrome-stable from Google's"
@@ -910,7 +918,7 @@ cmd_enable() {
             apt-get install -y --no-install-recommends "${pkgs[@]}"
         bin=$(browser_binary "$browser") || { err "no ${browser} binary after the install"; exit 1; }
     fi
-    ok "cage $(command -v cage), browser ${bin}"
+    ok "cage $(command -v cage), browser ${bin}, colour emoji font"
 
     section "Kiosk user"
     if getent passwd "$KIOSK_USER" >/dev/null 2>&1; then
