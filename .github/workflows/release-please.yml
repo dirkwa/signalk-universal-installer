@@ -10,6 +10,12 @@ name: release-please
 on:
   push:
     branches: [master]
+  # Runs release-please on demand. The gate below skips a docs:, ci: or
+  # chore: merge, a change to release-please-config.json included, so the
+  # Release PR is only rebuilt against a new config, or regrouped after a
+  # merged PR's label changed, when this is run by hand. A manual run carries
+  # no commits, and the gate passes an empty payload.
+  workflow_dispatch:
 
 # Every push to master runs this, and back-to-back merges race over the same
 # Release PR. Queued rather than cancelled: a cancelled run could drop the
