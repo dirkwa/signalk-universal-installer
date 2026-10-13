@@ -19,7 +19,7 @@ signalk kiosk disable          # put the boot back and revoke the kiosk's sign-i
 
 ## What `enable` does
 
-1. Installs `cage`, `chromium` (the distro package — `chromium-browser` on Raspberry Pi OS Bookworm; on Raspberry Pi OS also `rpi-chromium-mods`) and `jq` with apt, without Recommends, skipping what is already there.
+1. Installs `cage`, `chromium` (the distro package — `chromium-browser` on Raspberry Pi OS Bookworm; on Raspberry Pi OS also `rpi-chromium-mods`), `jq` and `fonts-noto-color-emoji` with apt, without Recommends, skipping what is already there.
 2. Creates an unprivileged system user, `signalk-kiosk`, with its home at `/var/lib/signalk-kiosk`. The browser runs as this user, not as the user that owns `~/.signalk` and the podman socket.
 3. Installs App Dock through the server's App Store when App Dock is the page and is not installed. Before its first start, `enable` writes the app list described above. An App Dock that is already installed keeps its own list; if it is switched off, `enable` says so and leaves it off. If App Dock was the default page and cannot be installed, the kiosk shows Freeboard-SK instead; one asked for with `--url` stays.
 4. Sets up the sign-in (next section): the Signal K user `signalk-kiosk`, its token, and the signalk-autologin plugin. Skip with `--no-autologin`.
@@ -110,6 +110,6 @@ signalk kiosk disable           # desktop login (or the tty1 console) back, Sign
 signalk kiosk disable --purge   # also removes the signalk-kiosk system user and its browser profile
 ```
 
-`disable` switches signalk-autologin off again when the kiosk installed it or switched it on (it stays installed, with its settings); if it was on before, `disable` leaves it on. App Dock stays installed. So do the packages (`cage`, `chromium`, `jq`); remove them with apt if nothing else needs them.
+`disable` switches signalk-autologin off again when the kiosk installed it or switched it on (it stays installed, with its settings); if it was on before, `disable` leaves it on. App Dock stays installed. So do the packages (`cage`, `chromium`, `jq`, `fonts-noto-color-emoji`); remove them with apt if nothing else needs them.
 
 Uninstalling the stack does not undo the kiosk — `signalk uninstall` runs without sudo. While the kiosk is enabled, `signalk uninstall` and `scripts/uninstall.sh` refuse to run and ask for `signalk kiosk disable --purge` first: `disable` deletes the kiosk's Signal K user through the server, which the uninstall stops.

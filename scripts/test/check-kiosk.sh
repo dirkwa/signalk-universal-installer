@@ -458,9 +458,16 @@ if [[ "$1" == install ]]; then
         case "$p" in
             cage|chromium) printf '#!/bin/bash\n' >"$STUB_EBIN/$p"; chmod +x "$STUB_EBIN/$p" ;;
             jq) ln -sf "$STUB_JQ" "$STUB_EBIN/jq" ;;
+            fonts-noto-color-emoji) : >"$STUB_STATE/emoji-font" ;;
         esac
     done
 fi
+EOF
+# Installed once the apt-get stub has installed it.
+cat >"$ebin/dpkg-query" <<'EOF'
+#!/bin/bash
+[[ "${*: -1}" == fonts-noto-color-emoji && -e "$STUB_STATE/emoji-font" ]] || exit 1
+printf 'install ok installed'
 EOF
 cat >"$ebin/apt-cache" <<'EOF'
 #!/bin/bash
@@ -719,8 +726,8 @@ run_enable() {
 echo "  fresh box, desktop running"
 reset_box
 run_enable
-call_made 'apt-get install -y --no-install-recommends cage jq chromium' \
-    "installs cage, jq and the distro chromium package"
+call_made 'apt-get install -y --no-install-recommends cage jq fonts-noto-color-emoji chromium' \
+    "installs cage, jq, the emoji font and the distro chromium package"
 call_made 'useradd --system --home-dir /var/lib/signalk-kiosk --create-home --shell /usr/sbin/nologin --user-group signalk-kiosk' \
     "creates the unprivileged kiosk system user"
 if [[ -f "$dockpkg" ]]; then
@@ -1001,7 +1008,7 @@ echo "  Raspberry Pi OS, a page on another host"
 reset_box
 : >"$state/pi-os"
 run_enable --url https://example.test/x
-call_made 'apt-get install -y --no-install-recommends cage jq chromium rpi-chromium-mods' \
+call_made 'apt-get install -y --no-install-recommends cage jq fonts-noto-color-emoji chromium rpi-chromium-mods' \
     "Pi OS: installs rpi-chromium-mods alongside chromium"
 out_has 'is not on this server' "another host: says the kiosk cannot sign in there"
 conf_has 'KIOSK_URL=https://example.test/x'
