@@ -279,6 +279,11 @@ for f in --touch-events=enabled --disable-pinch --overscroll-history-navigation=
         miss "touch flag missing: $f"
     fi
 done
+if grep -qx -- '--force-dark-mode' <<<"$args"; then
+    ok "no colour scheme in the conf (an older kiosk): dark mode"
+else
+    miss "no --force-dark-mode without KIOSK_COLOR_SCHEME"
+fi
 prefs=$(cat "$profile/Default/Preferences")
 if [[ "$prefs" == *'"exit_type":"Normal"'* && "$prefs" == *'"exited_cleanly":true'* && "$prefs" == *'"name":"x"'* ]]; then
     ok "crash marker cleared, rest of Preferences untouched"
@@ -294,6 +299,14 @@ if grep -q -- '--disable-pinch' <<<"$args"; then
     miss "touch flags added with no touchscreen present"
 else
     ok "no touchscreen: no touch flags"
+fi
+printf 'KIOSK_COLOR_SCHEME=light\n' | cat "$tmp/kiosk.conf" - >"$tmp/kiosk-light.conf"
+run_launcher "$tmp/dev/noinput" 2 "$tmp/kiosk-light.conf"
+args=$(cat "$tmp/browser-args" 2>/dev/null || true)
+if [[ -n "$args" ]] && ! grep -q -- '--force-dark-mode' <<<"$args"; then
+    ok "KIOSK_COLOR_SCHEME=light: no dark mode"
+else
+    miss "light scheme: $(tr '\n' ' ' <<<"$args")"
 fi
 
 # A server that never answers: the browser still starts after the 300s cap,
@@ -794,6 +807,7 @@ conf_has "KIOSK_BROWSER=$ebin/chromium" "conf: browser path resolved after the i
 conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service'
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed'
 conf_has 'KIOSK_SK_USER_CREATED=1'
+conf_has 'KIOSK_COLOR_SCHEME=dark' "conf: dark by default"
 for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/signalk-kiosk.slice \
          etc/pam.d/signalk-kiosk usr/local/lib/signalk-kiosk/browser \
          etc/udev/rules.d/61-signalk-kiosk-cec.rules; do
@@ -829,7 +843,7 @@ echo "  re-enable with --readwrite after the reboot"
 : >"$state/lightdm-stopped"
 : >"$state/calls"
 rm -f "$state/user-calls"
-run_enable --readwrite
+run_enable --readwrite --light
 if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readwrite"}' ]]; then
     ok "the existing kiosk user is changed to readwrite"
 else
@@ -837,6 +851,7 @@ else
 fi
 conf_has 'KIOSK_URL=http://127.0.0.1:80/@signalk/freeboard-sk/' "--readwrite: Freeboard-SK, not App Dock"
 conf_has 'KIOSK_SK_USER_TYPE=readwrite'
+conf_has 'KIOSK_COLOR_SCHEME=light' "--light: light colours"
 if grep -q 'signs in as an admin' <<<"$out"; then
     miss "--readwrite still warns about an admin sign-in"
 else

@@ -36,7 +36,7 @@ The App Store installs and the sign-in go through the server's admin API with th
 | `/etc/pam.d/signalk-kiosk` | The PAM stack the unit opens its session with. systemd never calls `pam_authenticate` for a service, so nothing asks for a password; `pam_systemd` registers the session on seat0, which is what lets cage open the display and input devices. |
 | `/etc/udev/rules.d/61-signalk-kiosk-cec.rules` | Makes the Raspberry Pi's HDMI-CEC inputs keyboards instead of pointers (see [Touchscreens](#touchscreens)). Matches nothing on other hardware. |
 | `/usr/local/lib/signalk-kiosk/browser` | The launcher cage runs: waits for the server, clears the crash marker, adds touch flags, writes the sign-in start page, starts the browser. |
-| `/etc/signalk-kiosk.conf` | The page, browser and sign-in mode the launcher uses, plus what `disable` has to undo (the desktop login unit, whether the kiosk installed or switched on signalk-autologin, whether it created the Signal K user). |
+| `/etc/signalk-kiosk.conf` | The page, browser, sign-in mode and colour scheme the launcher uses, plus what `disable` has to undo (the desktop login unit, whether the kiosk installed or switched on signalk-autologin, whether it created the Signal K user). |
 | `/etc/signalk-kiosk.token` | The kiosk's sign-in token, readable by root and the `signalk-kiosk` group only. |
 | `/var/lib/signalk-kiosk/start.html` | Written by the launcher at every start and readable by the kiosk user only: the page that hands the token to the server (next section). |
 
@@ -68,6 +68,10 @@ For a screen that should not reach the server's settings, `enable --readwrite` m
 ## TLS
 
 The kiosk talks plain HTTP to this server. With TLS enabled on the server, its HTTP port only redirects to HTTPS, where the browser would stop at a certificate warning. So `signalk kiosk enable` stops with an explanation before it changes anything, and a kiosk set up before TLS was switched on shows a page saying the same instead of that warning. A page on another host (`--url https://…`) is not affected.
+
+## Dark mode
+
+The browser starts in dark mode (`--force-dark-mode`): it tells every page it prefers a dark colour scheme (`prefers-color-scheme: dark`). Pages that have a dark theme switch to it, including Freeboard-SK, which follows the browser unless its own setting says otherwise. Pages without one are shown as they are; the kiosk does not recolour them. `enable --light` turns this off, for a screen that is easier to read in bright sunlight. The choice is kept in `/etc/signalk-kiosk.conf` (`KIOSK_COLOR_SCHEME`), shown by `signalk kiosk status`, and applies from the next browser start.
 
 ## Touchscreens
 
