@@ -2729,6 +2729,7 @@ fi
 
 if [[ -f "$DPHYS_CONF" ]]; then
     dphys_mb=$(sed -n 's/^CONF_SWAPSIZE=\([0-9][0-9]*\).*/\1/p' "$DPHYS_CONF" | tail -1 || true)
+    dphys_max=$(sed -n 's/^CONF_MAXSWAP=\([0-9][0-9]*\).*/\1/p' "$DPHYS_CONF" | tail -1 || true)
     dphys_file=$(sed -n 's/^CONF_SWAPFILE=//p' "$DPHYS_CONF" | tail -1 || true)
     dphys_file="${dphys_file:-/var/swap}"
     dphys_dir="${SWAP_ROOT}$(dirname "$dphys_file")"
@@ -2738,6 +2739,9 @@ if [[ -f "$DPHYS_CONF" ]]; then
         ok "dphys-swapfile sizes itself (CONF_SWAPSIZE unset; left as is)"
     elif (( dphys_mb >= DPHYS_WANT_MB )); then
         ok "dphys-swapfile ${dphys_mb} MB (skipping)"
+    elif [[ -n "$dphys_max" ]] && (( dphys_max < DPHYS_WANT_MB )); then
+        # dphys-swapfile would cap a larger CONF_SWAPSIZE at this anyway.
+        ok "dphys-swapfile ${dphys_mb} MB kept: CONF_MAXSWAP=${dphys_max} is set below ${DPHYS_WANT_MB}"
     elif [[ "$dphys_src" == /dev/mmcblk* ]]; then
         ok "dphys-swapfile ${dphys_mb} MB kept: it is on an SD card, which zram spares"
     elif [[ -z "$dphys_free_gb" ]] || (( dphys_free_gb < DPHYS_MIN_FREE_GB )); then

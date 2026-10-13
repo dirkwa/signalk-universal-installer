@@ -7,7 +7,8 @@
 #      default), then dev-zram0.swap is started.
 #   3. An operator's own zram config, or no sudo: left alone.
 #   4. dphys-swapfile at 200 MB on an NVMe with room: raised to 2048 and
-#      rebuilt now; on an SD card, low disk, or already 2048: left alone;
+#      rebuilt now; on an SD card, low disk, an operator's CONF_MAXSWAP below
+#      2048, or already 2048: left alone;
 #      too little free RAM to swapoff: raised, rebuilt at the next boot.
 # Run from the repo root.
 
@@ -158,6 +159,15 @@ if [[ "$(size_of lowdisk)" == 200 && -z "$log" ]]; then
     ok "under 20 GB free: kept at 200"
 else
     miss "low disk: size=$(size_of lowdisk) log=[$log]"
+fi
+
+dphys capped 200
+sed -i 's/^#CONF_MAXSWAP=2048$/CONF_MAXSWAP=1024/' "$tmp/capped/etc/dphys-swapfile"
+run_step capped ""
+if [[ "$(size_of capped)" == 200 && -z "$log" && "$out" == *"CONF_MAXSWAP=1024"* ]]; then
+    ok "operator's CONF_MAXSWAP below 2048: kept, and says why"
+else
+    miss "capped: size=$(size_of capped) log=[$log] out=[$out]"
 fi
 
 dphys big 2048
