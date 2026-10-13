@@ -146,6 +146,12 @@ if grep -qxF 'CPUWeight=50' <<<"$slice"; then
 else
     miss "slice lacks CPUWeight=50"
 fi
+rule=$(PATH="$sysbin" bash -c ". '$TMPL'; render_udev_rule")
+if grep -qxF 'ACTION!="remove", SUBSYSTEM=="input", ATTRS{name}=="vc4-hdmi-[0-9]", ENV{ID_INPUT_POINTINGSTICK}=""' <<<"$rule"; then
+    ok "udev rule: the Pi's HDMI-CEC inputs lose their pointer tag"
+else
+    miss "udev rule lacks the vc4-hdmi pointer-tag line"
+fi
 
 # ── 3b. URL resolution ────────────────────────────────────────────────────
 echo "URL resolution"
@@ -399,7 +405,16 @@ pkg="$home/.signalk/node_modules/signalk-autologin/package.json"
 dockpkg="$home/.signalk/node_modules/@signalk/app-dock/package.json"
 cfgf="$home/.signalk/plugin-config-data/signalk-autologin.json"
 mkdir -p "$ebin"
-cp "$stubs/udevadm" "$ebin/udevadm"
+# Property queries answer as the touch-detection stub; control/trigger/settle
+# are logged so the tests can see the CEC rule applied.
+cat >"$ebin/udevadm" <<'EOF'
+#!/bin/bash
+case "$1" in
+    control|trigger|settle) echo "udevadm $*" >>"$STUB_STATE/calls"; exit 0 ;;
+esac
+EOF
+cat "$stubs/udevadm" >>"$ebin/udevadm"
+chmod +x "$ebin/udevadm"
 
 # The stubs read STUB_* from the environment run_helper sets.
 cat >"$ebin/sudo" <<'EOF'
@@ -773,7 +788,8 @@ conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service'
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed'
 conf_has 'KIOSK_SK_USER_CREATED=1'
 for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/signalk-kiosk.slice \
-         etc/pam.d/signalk-kiosk usr/local/lib/signalk-kiosk/browser; do
+         etc/pam.d/signalk-kiosk usr/local/lib/signalk-kiosk/browser \
+         etc/udev/rules.d/61-signalk-kiosk-cec.rules; do
     if [[ -f "$root/$f" ]]; then
         ok "written: /$f"
     else
@@ -785,6 +801,8 @@ if [[ -x "$root/usr/local/lib/signalk-kiosk/browser" ]]; then
 else
     miss "launcher not executable"
 fi
+call_made 'udevadm trigger --action=change --subsystem-match=input' \
+    "re-tags the input devices so the CEC rule applies without a reboot"
 out_has 'the kiosk signs in as an admin: anyone at this screen' "warns that anyone at the screen is admin"
 if grep -q 'every device' <<<"$out"; then
     miss "network-wide note printed: $(grep 'every device' <<<"$out" | tr '\n' '|')"
@@ -840,6 +858,7 @@ call_made 'systemctl disable --now signalk-kiosk.service' "stops and disables th
 call_made 'systemctl enable --now lightdm.service' "gives the desktop login back"
 for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/signalk-kiosk.slice \
          etc/pam.d/signalk-kiosk etc/signalk-kiosk.conf etc/signalk-kiosk.token \
+         etc/udev/rules.d/61-signalk-kiosk-cec.rules \
          var/lib/signalk-kiosk/start.html usr/local/lib/signalk-kiosk; do
     if [[ ! -e "$root/$f" ]]; then
         ok "removed: /$f"

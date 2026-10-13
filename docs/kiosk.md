@@ -34,6 +34,7 @@ The App Store installs and the sign-in go through the server's admin API with th
 | `/etc/systemd/system/signalk-kiosk.service` | Runs cage with the launcher on tty1 as `signalk-kiosk`, restarts it whenever it exits, and takes tty1 from the console login. |
 | `/etc/systemd/system/signalk-kiosk.slice` | A top-level slice with a lower CPU weight than `user.slice`, where the Signal K server runs, so under CPU contention the browser yields to the server. |
 | `/etc/pam.d/signalk-kiosk` | The PAM stack the unit opens its session with. systemd never calls `pam_authenticate` for a service, so nothing asks for a password; `pam_systemd` registers the session on seat0, which is what lets cage open the display and input devices. |
+| `/etc/udev/rules.d/61-signalk-kiosk-cec.rules` | Makes the Raspberry Pi's HDMI-CEC inputs keyboards instead of pointers (see [Touchscreens](#touchscreens)). Matches nothing on other hardware. |
 | `/usr/local/lib/signalk-kiosk/browser` | The launcher cage runs: waits for the server, clears the crash marker, adds touch flags, writes the sign-in start page, starts the browser. |
 | `/etc/signalk-kiosk.conf` | The page, browser and sign-in mode the launcher uses, plus what `disable` has to undo (the desktop login unit, whether the kiosk installed or switched on signalk-autologin, whether it created the Signal K user). |
 | `/etc/signalk-kiosk.token` | The kiosk's sign-in token, readable by root and the `signalk-kiosk` group only. |
@@ -71,6 +72,8 @@ The kiosk talks plain HTTP to this server. With TLS enabled on the server, its H
 ## Touchscreens
 
 The launcher checks for a touchscreen (`ID_INPUT_TOUCHSCREEN=1` in udev) every time it starts, so plugging one in and running `signalk kiosk restart` is enough. With one present, the browser starts with touch events on, and with pinch-zoom and swipe-to-go-back off: a stray two-finger touch does not zoom a chart, and a sideways swipe does not navigate away from the dashboard.
+
+cage shows a mouse cursor only while a pointing device is connected. A Raspberry Pi always has one even with no mouse attached: the HDMI-CEC input of each HDMI port (`vc4-hdmi-0`, `vc4-hdmi-1`), which carries the TV remote's arrow keys and is tagged a pointing stick by udev. `enable` writes a udev rule that removes that tag, so the remote's keys still work and the cursor stays hidden until a real mouse is plugged in.
 
 The kiosk does not rotate the display (the official Raspberry Pi Touch Display 2 is portrait-native), map a touchscreen to one of several monitors, or provide an on-screen keyboard.
 
