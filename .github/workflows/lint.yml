@@ -104,6 +104,9 @@ jobs:
       - name: app.slice CPU priority drop-in
         run: bash scripts/test/check-cpu-priority-dropin.sh
 
+      - name: swap (zram + dphys-swapfile)
+        run: bash scripts/test/check-swap.sh
+
       - name: mDNS EXTERNALHOST wiring
         run: bash scripts/test/check-mdns-external-host.sh
 
