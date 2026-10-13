@@ -28,7 +28,7 @@
 # Usage:
 #   signalk-kiosk status       monitors, touchscreens and kiosk state (default)
 #   signalk-kiosk scan         monitors and touchscreens only (no sudo)
-#   signalk-kiosk enable [--url PATH|URL] [--readwrite] [--browser chromium|chrome] [--no-autologin]
+#   signalk-kiosk enable [--url PATH|URL] [--readwrite] [--browser chromium|chrome] [--no-autologin] [--light]
 #   signalk-kiosk disable [--purge]
 #   signalk-kiosk restart
 #   signalk-kiosk help
@@ -278,15 +278,17 @@ conf_get() {
 
 render_conf() {
     local url="$1" browser="$2" base="$3" signin="$4" sk_type="$5"
-    local prev_dm="$6" autologin="$7" user_created="$8"
+    local prev_dm="$6" autologin="$7" user_created="$8" scheme="${9:-}"
     cat <<EOF
 # Written by \`signalk kiosk enable\`; rewritten on every enable.
-# ${LAUNCHER} reads the KIOSK_URL, KIOSK_BROWSER, KIOSK_BASE and KIOSK_SIGNIN
-# lines. The rest records what \`signalk kiosk disable\` has to put back.
+# ${LAUNCHER} reads the KIOSK_URL, KIOSK_BROWSER, KIOSK_BASE, KIOSK_SIGNIN and
+# KIOSK_COLOR_SCHEME lines. The rest records what \`signalk kiosk disable\` has
+# to put back.
 KIOSK_URL=${url}
 KIOSK_BROWSER=${browser}
 KIOSK_BASE=${base}
 KIOSK_SIGNIN=${signin}
+KIOSK_COLOR_SCHEME=${scheme}
 KIOSK_SK_USER_TYPE=${sk_type}
 KIOSK_PREV_DISPLAY_MANAGER=${prev_dm}
 KIOSK_AUTOLOGIN_CHANGED=${autologin}
@@ -354,6 +356,13 @@ flags=(--kiosk --noerrdialogs --no-first-run --no-default-browser-check
 # sideways swipe must not navigate back off the dashboard.
 if [[ -n "$(detect_touchscreens)" ]]; then
     flags+=(--touch-events=enabled --disable-pinch --overscroll-history-navigation=0)
+fi
+# Pages see prefers-color-scheme: dark, so those with a dark theme use it
+# (Freeboard-SK by default follows the browser). Pages are not recoloured.
+# Dark unless enable was given --light; a conf from before the setting counts
+# as dark.
+if [[ "$(conf_get KIOSK_COLOR_SCHEME)" != light ]]; then
+    flags+=(--force-dark-mode)
 fi
 
 # TLS switched on after the kiosk was set up: the HTTP port now only redirects
@@ -847,7 +856,7 @@ resolve_url() {
 }
 
 cmd_enable() {
-    local want_url="" url_defaulted=0 browser=chromium autologin=1 sk_type=admin base bin pkgs=() dock_status
+    local want_url="" url_defaulted=0 browser=chromium autologin=1 sk_type=admin scheme=dark base bin pkgs=() dock_status
     local prev_dm dm_now url signin=none prev_signin changed user_created token tls_origin
     while (( $# )); do
         case "$1" in
@@ -857,6 +866,7 @@ cmd_enable() {
             --browser)      browser="${2:?--browser needs chromium or chrome}"; shift 2 ;;
             --browser=*)    browser="${1#--browser=}"; shift ;;
             --no-autologin) autologin=0; shift ;;
+            --light)        scheme=light; shift ;;
             *) err "unknown option for enable: $1"; usage; exit 2 ;;
         esac
     done
@@ -1033,7 +1043,7 @@ cmd_enable() {
     [[ -n "$prev_dm" ]] || prev_dm="$dm_now"
 
     render_launcher | install_file 0755 "$LAUNCHER_FILE"
-    render_conf "$url" "$bin" "$base" "$signin" "$sk_type" "$prev_dm" "$changed" "$user_created" \
+    render_conf "$url" "$bin" "$base" "$signin" "$sk_type" "$prev_dm" "$changed" "$user_created" "$scheme" \
         | install_file 0644 "$CONF_FILE"
     render_pam | install_file 0644 "$PAM_FILE"
     render_slice | install_file 0644 "$SLICE_FILE"
@@ -1184,6 +1194,11 @@ cmd_status() {
     printf '  %-12s %s, %s\n' "service" "${enabled:-unknown}" "${active:-unknown}"
     printf '  %-12s %s\n' "page" "$(conf_get KIOSK_URL)"
     printf '  %-12s %s\n' "browser" "$(conf_get KIOSK_BROWSER)"
+    if [[ "$(conf_get KIOSK_COLOR_SCHEME)" == light ]]; then
+        printf '  %-12s %s\n' "colours" "light (enable without --light for dark)"
+    else
+        printf '  %-12s %s\n' "colours" "dark (enable --light for light)"
+    fi
     if [[ "$(conf_get KIOSK_SIGNIN)" == token ]]; then
         printf '  %-12s %s\n' "sign-in" "token, as Signal K user ${SK_KIOSK_USER} ($(conf_get KIOSK_SK_USER_TYPE))"
     else
@@ -1210,6 +1225,8 @@ signalk kiosk — boot a connected screen straight into the Signal K GUI
                             of reach from the screen
       --browser chromium|chrome   default chromium; chrome must already be installed
       --no-autologin        no sign-in: the kiosk opens its page signed out
+      --light               light pages: the browser does not ask them for dark mode
+                            (default: dark, for the pages that have a dark theme)
   signalk kiosk disable     restore the previous boot (desktop login or console) and
                             delete the kiosk's Signal K user, revoking its token (sudo)
       --purge               also remove the kiosk's system user and its browser profile
