@@ -62,6 +62,7 @@ SLICE_FILE="${KIOSK_ROOT}/etc/systemd/system/${KIOSK_SLICE}"
 PAM_FILE="${KIOSK_ROOT}/etc/pam.d/${KIOSK_USER}"
 CONF_FILE="${KIOSK_ROOT}${CONF}"
 LAUNCHER_FILE="${KIOSK_ROOT}${LAUNCHER}"
+UDEV_RULE_FILE="${KIOSK_ROOT}/etc/udev/rules.d/61-signalk-kiosk-cec.rules"
 
 AUTOLOGIN_ID="signalk-autologin"
 # The kiosk's Signal K user is an admin by default: App Dock reads its app
@@ -402,6 +403,30 @@ account  required pam_unix.so
 session  required pam_unix.so
 session  required pam_systemd.so class=user type=wayland
 EOF
+}
+
+# The Raspberry Pi's HDMI-CEC inputs (vc4-hdmi-0, vc4-hdmi-1, one per port,
+# always present) report REL_X/REL_Y for a TV remote's cursor keys, so udev
+# tags them ID_INPUT_POINTINGSTICK, libinput makes them pointers and cage draws
+# a cursor on a screen with no mouse. Dropping the tag leaves them keyboards:
+# the remote's keys still work, and cage shows a cursor only once a real mouse
+# is plugged in. libinput reads the tag from the parent inputN node as well as
+# from eventN, hence no KERNEL match. Runs after 60-input-id.rules sets it.
+render_udev_rule() {
+    cat <<'EOF'
+# Written by `signalk kiosk enable`; removed by `signalk kiosk disable`.
+# Raspberry Pi HDMI-CEC remote: a keyboard, not a pointer, so the kiosk shows
+# no mouse cursor until a real mouse is connected.
+ACTION!="remove", SUBSYSTEM=="input", ATTRS{name}=="vc4-hdmi-[0-9]", ENV{ID_INPUT_POINTINGSTICK}=""
+EOF
+}
+
+# Re-tag the input devices already present, so the rule applies without a
+# reboot. Best effort: a container has no udev to ask.
+reload_udev_input() {
+    run_root udevadm control --reload 2>/dev/null || return 0
+    run_root udevadm trigger --action=change --subsystem-match=input 2>/dev/null || true
+    run_root udevadm settle 2>/dev/null || true
 }
 
 # A top-level slice so the weight competes with user.slice, where the Signal K
@@ -1013,6 +1038,8 @@ cmd_enable() {
     render_pam | install_file 0644 "$PAM_FILE"
     render_slice | install_file 0644 "$SLICE_FILE"
     render_unit | install_file 0644 "$UNIT_FILE"
+    render_udev_rule | install_file 0644 "$UDEV_RULE_FILE"
+    reload_udev_input
     run_root systemctl daemon-reload
     if [[ -n "$dm_now" ]]; then
         run_root systemctl disable "$dm_now"
@@ -1079,7 +1106,8 @@ cmd_disable() {
         clear_kiosk_cookies
     fi
     run_root rm -f "$UNIT_FILE" "$SLICE_FILE" "$PAM_FILE" "$CONF_FILE" "$LAUNCHER_FILE" \
-        "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
+        "$UDEV_RULE_FILE" "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
+    reload_udev_input
     run_root rmdir "${LAUNCHER_FILE%/*}" 2>/dev/null || true
     run_root systemctl daemon-reload
     # A failure here must not skip the sign-in cleanup below, which revokes
