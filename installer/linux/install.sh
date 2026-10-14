@@ -2674,6 +2674,102 @@ else
     ok "journald persistent + capped applied"
 fi
 
+# 17a. Swap.
+#
+# A Pi image ships 200 MB of swap (dphys-swapfile), so a box running the full
+# stack (signalk-server, QuestDB, a radar server, the kiosk browser) has no
+# buffer when RAM runs short: it stops responding instead of slowing down.
+# Two layers, each left alone when the operator already manages it:
+#   - zram: 2 GiB of zstd-compressed swap in RAM, used first. Idle memory
+#     (QuestDB's heap, the server's cold pages) compresses about 3-5:1.
+#   - dphys-swapfile raised to 2 GiB, but only on an SSD/NVMe with room to
+#     spare. On an SD card the file stays as it is: zram covers the peaks
+#     without wearing the card.
+# /proc/swaps is world-readable, so a re-run with nothing to do never touches
+# sudo. SWAP_ROOT prefixes every path for scripts/test/check-swap.sh.
+section "Swap"
+SWAP_ROOT="${SWAP_ROOT:-}"
+ZRAM_CONF="${SWAP_ROOT}/etc/systemd/zram-generator.conf"
+DPHYS_CONF="${SWAP_ROOT}/etc/dphys-swapfile"
+ZRAM_DESIRED='# Installed by signalk-universal-installer.
+# Compressed swap in RAM, used before any swap on disk.
+[zram0]
+zram-size = min(ram / 4, 2048)
+compression-algorithm = zstd
+swap-priority = 100'
+DPHYS_WANT_MB=2048
+DPHYS_MIN_FREE_GB=20
+
+if grep -q '^/dev/zram' "${SWAP_ROOT}/proc/swaps" 2>/dev/null; then
+    ok "zram swap active (skipping)"
+elif [[ -e "$ZRAM_CONF" && "$(cat "$ZRAM_CONF" 2>/dev/null)" != "$ZRAM_DESIRED" ]] \
+    || [[ -e "${SWAP_ROOT}/etc/default/zramswap" || -e "${SWAP_ROOT}/etc/rpi/swap.conf" ]]; then
+    ok "zram is configured by the operator or the OS (left as is)"
+elif ! command -v apt-get >/dev/null 2>&1; then
+    info "No zram swap; set one up with your distribution's zram tool"
+elif [[ "$SUDO" = "MISSING" ]]; then
+    warn "Cannot set up zram swap without sudo; a box short of RAM may stop responding."
+elif ! apt-cache show systemd-zram-generator >/dev/null 2>&1; then
+    warn "systemd-zram-generator is not in the apt sources; skipping zram swap"
+else
+    info "Setting up 2 GiB of compressed swap in RAM (zram, requires sudo)"
+    # The config goes in before the package: its postinst starts zram0 at the
+    # package default (half the RAM, up to 4 GiB) when no config exists, and
+    # an initialized zram device cannot be reconfigured in place.
+    printf '%s\n' "$ZRAM_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$ZRAM_CONF"
+    $SUDO env DEBIAN_FRONTEND=noninteractive \
+        apt-get install -y --no-install-recommends systemd-zram-generator
+    $SUDO systemctl daemon-reload
+    if $SUDO systemctl start dev-zram0.swap; then
+        ok "zram swap active ($ZRAM_CONF)"
+    else
+        warn "zram swap configured; it starts at the next boot ($ZRAM_CONF)"
+    fi
+fi
+
+if [[ -f "$DPHYS_CONF" ]]; then
+    dphys_mb=$(sed -n 's/^CONF_SWAPSIZE=\([0-9][0-9]*\).*/\1/p' "$DPHYS_CONF" | tail -1 || true)
+    dphys_max=$(sed -n 's/^CONF_MAXSWAP=\([0-9][0-9]*\).*/\1/p' "$DPHYS_CONF" | tail -1 || true)
+    dphys_file=$(sed -n 's/^CONF_SWAPFILE=//p' "$DPHYS_CONF" | tail -1 || true)
+    dphys_file="${dphys_file:-/var/swap}"
+    dphys_dir="${SWAP_ROOT}$(dirname "$dphys_file")"
+    dphys_src=$(findmnt -n -o SOURCE --target "$dphys_dir" 2>/dev/null || true)
+    dphys_free_gb=$(df -P -BG "$dphys_dir" 2>/dev/null | awk 'NR==2 {sub(/G$/, "", $4); print $4}' || true)
+    if [[ -z "$dphys_mb" ]]; then
+        ok "dphys-swapfile sizes itself (CONF_SWAPSIZE unset; left as is)"
+    elif (( dphys_mb >= DPHYS_WANT_MB )); then
+        ok "dphys-swapfile ${dphys_mb} MB (skipping)"
+    elif [[ -n "$dphys_max" ]] && (( dphys_max < DPHYS_WANT_MB )); then
+        # dphys-swapfile would cap a larger CONF_SWAPSIZE at this anyway.
+        ok "dphys-swapfile ${dphys_mb} MB kept: CONF_MAXSWAP=${dphys_max} is set below ${DPHYS_WANT_MB}"
+    elif [[ "$dphys_src" == /dev/mmcblk* ]]; then
+        ok "dphys-swapfile ${dphys_mb} MB kept: it is on an SD card, which zram spares"
+    elif [[ -z "$dphys_free_gb" ]] || (( dphys_free_gb < DPHYS_MIN_FREE_GB )); then
+        info "dphys-swapfile ${dphys_mb} MB kept: under ${DPHYS_MIN_FREE_GB} GB free on ${dphys_src:-its disk}"
+    elif [[ "$SUDO" = "MISSING" ]]; then
+        warn "Cannot raise dphys-swapfile to ${DPHYS_WANT_MB} MB without sudo"
+    else
+        info "Raising dphys-swapfile from ${dphys_mb} MB to ${DPHYS_WANT_MB} MB on ${dphys_src} (requires sudo)"
+        $SUDO sed -i "s/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=${DPHYS_WANT_MB}/" "$DPHYS_CONF"
+        # swapoff pulls what the old file holds back into RAM. Only now if it
+        # fits with room to spare; otherwise dphys-swapfile.service builds the
+        # new file at the next boot.
+        swap_used_kb=$(awk -v f="$dphys_file" '$1 == f {print $4}' "${SWAP_ROOT}/proc/swaps" 2>/dev/null || true)
+        mem_avail_kb=$(awk '/^MemAvailable:/ {print $2}' "${SWAP_ROOT}/proc/meminfo" 2>/dev/null || true)
+        if (( ${mem_avail_kb:-0} <= ${swap_used_kb:-0} + 524288 )); then
+            ok "dphys-swapfile set to ${DPHYS_WANT_MB} MB; it takes effect at the next boot"
+        elif $SUDO dphys-swapfile swapoff && $SUDO dphys-swapfile setup >/dev/null \
+            && $SUDO dphys-swapfile swapon; then
+            ok "dphys-swapfile ${DPHYS_WANT_MB} MB active"
+        else
+            # Never leave the box without the swap it had.
+            $SUDO dphys-swapfile swapon >/dev/null 2>&1 || true
+            warn "dphys-swapfile set to ${DPHYS_WANT_MB} MB but not rebuilt now; it takes effect at the next boot"
+        fi
+    fi
+fi
+# ── end of Swap ──
+
 # 17b. Host time & timezone sync agent.
 #
 # Root-side by necessity: CLOCK_REALTIME is not namespaced (a rootless
