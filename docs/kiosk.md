@@ -19,12 +19,12 @@ signalk kiosk disable          # put the boot back and revoke the kiosk's sign-i
 
 ## What `enable` does
 
-1. Installs `cage`, `chromium` (the distro package — `chromium-browser` on Raspberry Pi OS Bookworm; on Raspberry Pi OS also `rpi-chromium-mods`), `jq` and `fonts-noto-color-emoji` with apt, without Recommends, skipping what is already there.
+1. Installs `cage`, `chromium` (the distro package — `chromium-browser` on Raspberry Pi OS Bookworm; on Raspberry Pi OS also `rpi-chromium-mods`), `jq`, `fonts-noto-color-emoji` and, unless given `--no-screen-pause`, `i2c-tools` with apt, without Recommends, skipping what is already there.
 2. Creates an unprivileged system user, `signalk-kiosk`, with its home at `/var/lib/signalk-kiosk`. The browser runs as this user, not as the user that owns `~/.signalk` and the podman socket.
 3. Installs App Dock through the server's App Store when App Dock is the page and is not installed. Before its first start, `enable` writes the app list described above. An App Dock that is already installed keeps its own list; if it is switched off, `enable` says so and leaves it off. If App Dock was the default page and cannot be installed, the kiosk shows Freeboard-SK instead; one asked for with `--url` stays.
 4. Sets up the sign-in (next section): the Signal K user `signalk-kiosk`, its token, and the signalk-autologin plugin. Skip with `--no-autologin`.
 5. Restarts the server when step 3 or 4 installed something, since the server loads a newly installed package only when it starts.
-6. Writes the files in the table below and enables `signalk-kiosk.service`.
+6. Writes the files in the table below and enables `signalk-kiosk.service`, and the service that pauses the browser while the monitor is off ([Monitor off](#monitor-off)).
 7. Disables the desktop login if the box has one, and starts the kiosk — immediately on a box without a desktop, at the next reboot on one with a desktop still running.
 
 The App Store installs and the sign-in go through the server's admin API with the installer's admin token, `~/.signalk-doctor/signalk-token`. Without that file, `enable` still sets up the kiosk, which then opens its page signed out.
@@ -42,7 +42,7 @@ The App Store installs and the sign-in go through the server's admin API with th
 
 `installer/linux/signalk-kiosk.tmpl` renders all of these; the exact directives and modes are there.
 
-`enable` can be re-run at any time to change `--url`, `--readwrite` or `--browser`; it keeps what the first run recorded.
+`enable` can be re-run at any time to change `--url`, `--readwrite`, `--browser`, `--light` or `--no-screen-pause`; it keeps what the first run recorded.
 
 ## Signing in
 
@@ -72,6 +72,22 @@ The kiosk talks plain HTTP to this server. With TLS enabled on the server, its H
 ## Dark mode
 
 The browser starts in dark mode (`--force-dark-mode`): it tells every page it prefers a dark colour scheme (`prefers-color-scheme: dark`). Pages that have a dark theme switch to it, including Freeboard-SK, which follows the browser unless its own setting says otherwise. Pages without one are shown as they are; the kiosk does not recolour them. `enable --light` turns this off, for a screen that is easier to read in bright sunlight. The choice is kept in `/etc/signalk-kiosk.conf` (`KIOSK_COLOR_SCHEME`), shown by `signalk kiosk status`, and applies from the next browser start.
+
+## Monitor off
+
+While the monitor is switched off, the kiosk pauses the browser, so it stops using CPU, and resumes it when the monitor comes back on. `enable` sets this up unless given `--no-screen-pause`; `signalk kiosk status` shows which.
+
+A monitor switched off with its power button often still tells the box it is connected, so the kiosk asks the monitor itself. `signalk-kiosk-screen.service` sends a DDC/CI request (the monitor control channel in the HDMI or DisplayPort cable) to every connected monitor every 5 seconds with `i2ctransfer`. A monitor that is on acknowledges it; one that is off does not. After three checks in a row in which every monitor that has answered before stays silent, or nothing is connected at all, the service stops the browser's processes with SIGSTOP; the first answer continues them with SIGCONT. A monitor that has never answered since the kiosk started — one without DDC/CI, or one that has been off since boot — counts as on, so on such a monitor the browser keeps running. A monitor with no DDC bus (DSI panels, most touch displays) counts as on as well.
+
+While the browser is paused, the page does nothing: it plays no sounds, so alarms that sound through the kiosk's speakers stay silent until the monitor is back on, and its connection to the server drops. Most webapps reconnect by themselves on resume. For a kiosk that has to sound alarms with the monitor off, use `signalk kiosk enable --no-screen-pause`, which removes the service.
+
+| Path | Purpose |
+|---|---|
+| `/etc/systemd/system/signalk-kiosk-screen.service` | Runs the watch as root, started and stopped with `signalk-kiosk.service`. Stopping it resumes the browser. |
+| `/usr/local/lib/signalk-kiosk/screen-watch` | The watch itself. |
+| `/etc/modules-load.d/signalk-kiosk-i2c.conf` | Loads `i2c-dev`, which gives each DDC bus its `/dev/i2c-N` device. |
+
+`enable` also installs `i2c-tools`, which provides `i2ctransfer`. `journalctl -u signalk-kiosk-screen.service` shows each pause and resume.
 
 ## Touchscreens
 
@@ -114,6 +130,6 @@ signalk kiosk disable           # desktop login (or the tty1 console) back, Sign
 signalk kiosk disable --purge   # also removes the signalk-kiosk system user and its browser profile
 ```
 
-`disable` switches signalk-autologin off again when the kiosk installed it or switched it on (it stays installed, with its settings); if it was on before, `disable` leaves it on. App Dock stays installed. So do the packages (`cage`, `chromium`, `jq`, `fonts-noto-color-emoji`); remove them with apt if nothing else needs them.
+`disable` switches signalk-autologin off again when the kiosk installed it or switched it on (it stays installed, with its settings); if it was on before, `disable` leaves it on. App Dock stays installed. So do the packages (`cage`, `chromium`, `jq`, `fonts-noto-color-emoji`, `i2c-tools`); remove them with apt if nothing else needs them.
 
 Uninstalling the stack does not undo the kiosk — `signalk uninstall` runs without sudo. While the kiosk is enabled, `signalk uninstall` and `scripts/uninstall.sh` refuse to run and ask for `signalk kiosk disable --purge` first: `disable` deletes the kiosk's Signal K user through the server, which the uninstall stops.

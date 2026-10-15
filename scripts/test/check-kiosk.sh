@@ -6,6 +6,10 @@
 #   2. Touchscreen detection against a stubbed udevadm.
 #   3. The rendered unit, PAM stack and slice carry the lines the kiosk depends
 #      on (seat session on tty1, getty conflict, the low-priority slice).
+#      The screen watch, run against a fake sysfs and stubbed i2ctransfer and
+#      pkill: pauses the browser once a monitor that answered DDC/CI stays
+#      silent, resumes it on the next answer, never pauses for a monitor that
+#      has never answered.
 #   4. The rendered launcher: waits for the server, clears the crash marker a
 #      hard power-off leaves, adds touch flags only when a touchscreen exists,
 #      starts the browser anyway once the wait runs out, and with token sign-in
@@ -151,6 +155,88 @@ if grep -qxF 'ACTION!="remove", SUBSYSTEM=="input", ATTRS{name}=="vc4-hdmi-[0-9]
     ok "udev rule: the Pi's HDMI-CEC inputs lose their pointer tag"
 else
     miss "udev rule lacks the vc4-hdmi pointer-tag line"
+fi
+
+# ── 3a. screen watch ──────────────────────────────────────────────────────
+echo "screen watch"
+unit=$(PATH="$sysbin" bash -c ". '$TMPL'; render_screen_unit")
+for want in 'BindsTo=signalk-kiosk.service' 'PartOf=signalk-kiosk.service' \
+            'ExecStart=/usr/local/lib/signalk-kiosk/screen-watch' \
+            'ExecStopPost=/usr/local/lib/signalk-kiosk/screen-watch resume' \
+            'WantedBy=signalk-kiosk.service'; do
+    if grep -qxF "$want" <<<"$unit"; then
+        ok "screen unit: $want"
+    else
+        miss "screen unit lacks: $want"
+    fi
+done
+watch="$tmp/screen-watch"
+PATH="$sysbin" bash -c ". '$TMPL'; render_screen_watch" >"$watch"
+wsys="$tmp/wsys"
+wstubs="$tmp/wstubs"
+wstate="$tmp/wstate"
+mkdir -p "$wstubs"
+# Answers on the DDC bus as line <round> of $WSTATE/plan says (y or n); the
+# round is counted by the watch's own sleep between checks (7s in the tests).
+cat >"$wstubs/i2ctransfer" <<'EOF'
+#!/bin/bash
+round=$(cat "$WSTATE/round")
+[[ "$(sed -n "${round}p" "$WSTATE/plan")" == y ]]
+EOF
+cat >"$wstubs/sleep" <<'EOF'
+#!/bin/bash
+[[ "$1" == 7 ]] && echo $(( $(cat "$WSTATE/round") + 1 )) >"$WSTATE/round"
+exit 0
+EOF
+cat >"$wstubs/pkill" <<'EOF'
+#!/bin/bash
+echo "$(cat "$WSTATE/round") pkill $*" >>"$WSTATE/signals"
+EOF
+chmod +x "$wstubs"/*
+
+# run_watch <plan, one y/n per round> [connected]: the watch over one HDMI
+# connector (on DDC bus 14), connected unless the second argument is "no".
+run_watch() {
+    rm -rf "$wsys" "$wstate"
+    mkdir -p "$wsys/class/drm/card1-HDMI-A-1" "$wstate"
+    if [[ "${2:-yes}" == no ]]; then
+        echo disconnected >"$wsys/class/drm/card1-HDMI-A-1/status"
+    else
+        echo connected >"$wsys/class/drm/card1-HDMI-A-1/status"
+    fi
+    ln -s ../../../../devices/platform/soc/107d508280.i2c/i2c-14 "$wsys/class/drm/card1-HDMI-A-1/ddc"
+    tr ' ' '\n' <<<"$1" >"$wstate/plan"
+    echo 1 >"$wstate/round"
+    : >"$wstate/signals"
+    PATH="$wstubs:$sysbin" WSTATE="$wstate" KIOSK_SYSFS="$wsys" KIOSK_SCREEN_STEP=7 \
+        KIOSK_SCREEN_ROUNDS=$(wc -w <<<"$1") bash "$watch" >"$wstate/out" 2>&1
+    tr '\n' '|' <"$wstate/signals"
+}
+p='-u signalk-kiosk -x chromium|chrome|chromium-browse'
+got=$(run_watch "y y n n n n y")
+if [[ "$got" == "1 pkill -CONT $p|5 pkill -STOP $p|6 pkill -STOP $p|7 pkill -CONT $p|" ]]; then
+    ok "pauses the browser on the third silent check, resumes on the first answer"
+else
+    miss "monitor switched off and on: $got"
+fi
+got=$(run_watch "n n n n n")
+if [[ "$got" == "1 pkill -CONT $p|" ]]; then
+    ok "a monitor that has never answered DDC never pauses the browser"
+else
+    miss "monitor without DDC: $got"
+fi
+got=$(run_watch "n n n n" no)
+if [[ "$got" == "1 pkill -CONT $p|3 pkill -STOP $p|4 pkill -STOP $p|" ]]; then
+    ok "nothing connected: the browser is paused"
+else
+    miss "nothing connected: $got"
+fi
+rm -rf "$wstate"; mkdir -p "$wstate"; echo 1 >"$wstate/round"
+PATH="$wstubs:$sysbin" WSTATE="$wstate" bash "$watch" resume
+if [[ "$(cat "$wstate/signals" 2>/dev/null)" == "1 pkill -CONT $p" ]]; then
+    ok "resume continues the browser once and exits"
+else
+    miss "resume: $(cat "$wstate/signals" 2>/dev/null)"
 fi
 
 # ── 3b. URL resolution ────────────────────────────────────────────────────
@@ -472,6 +558,7 @@ if [[ "$1" == install ]]; then
             cage|chromium) printf '#!/bin/bash\n' >"$STUB_EBIN/$p"; chmod +x "$STUB_EBIN/$p" ;;
             jq) ln -sf "$STUB_JQ" "$STUB_EBIN/jq" ;;
             fonts-noto-color-emoji) : >"$STUB_STATE/emoji-font" ;;
+            i2c-tools) : >"$STUB_STATE/i2c-tools" ;;
         esac
     done
 fi
@@ -479,7 +566,11 @@ EOF
 # Installed once the apt-get stub has installed it.
 cat >"$ebin/dpkg-query" <<'EOF'
 #!/bin/bash
-[[ "${*: -1}" == fonts-noto-color-emoji && -e "$STUB_STATE/emoji-font" ]] || exit 1
+case "${*: -1}" in
+    fonts-noto-color-emoji) [[ -e "$STUB_STATE/emoji-font" ]] || exit 1 ;;
+    i2c-tools) [[ -e "$STUB_STATE/i2c-tools" ]] || exit 1 ;;
+    *) exit 1 ;;
+esac
 printf 'install ok installed'
 EOF
 cat >"$ebin/apt-cache" <<'EOF'
@@ -502,6 +593,10 @@ cat >"$ebin/userdel" <<'EOF'
 #!/bin/bash
 echo "userdel $*" >>"$STUB_STATE/calls"
 rm -f "$STUB_STATE/user-exists"
+EOF
+cat >"$ebin/modprobe" <<'EOF'
+#!/bin/bash
+echo "modprobe $*" >>"$STUB_STATE/calls"
 EOF
 cat >"$ebin/chgrp" <<'EOF'
 #!/bin/bash
@@ -739,8 +834,8 @@ run_enable() {
 echo "  fresh box, desktop running"
 reset_box
 run_enable
-call_made 'apt-get install -y --no-install-recommends cage jq fonts-noto-color-emoji chromium' \
-    "installs cage, jq, the emoji font and the distro chromium package"
+call_made 'apt-get install -y --no-install-recommends cage jq fonts-noto-color-emoji i2c-tools chromium' \
+    "installs cage, jq, the emoji font, i2c-tools and the distro chromium package"
 call_made 'useradd --system --home-dir /var/lib/signalk-kiosk --create-home --shell /usr/sbin/nologin --user-group signalk-kiosk' \
     "creates the unprivileged kiosk system user"
 if [[ -f "$dockpkg" ]]; then
@@ -810,7 +905,9 @@ conf_has 'KIOSK_SK_USER_CREATED=1'
 conf_has 'KIOSK_COLOR_SCHEME=dark' "conf: dark by default"
 for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/signalk-kiosk.slice \
          etc/pam.d/signalk-kiosk usr/local/lib/signalk-kiosk/browser \
-         etc/udev/rules.d/61-signalk-kiosk-cec.rules; do
+         etc/udev/rules.d/61-signalk-kiosk-cec.rules \
+         etc/systemd/system/signalk-kiosk-screen.service usr/local/lib/signalk-kiosk/screen-watch \
+         etc/modules-load.d/signalk-kiosk-i2c.conf; do
     if [[ -f "$root/$f" ]]; then
         ok "written: /$f"
     else
@@ -822,6 +919,14 @@ if [[ -x "$root/usr/local/lib/signalk-kiosk/browser" ]]; then
 else
     miss "launcher not executable"
 fi
+if [[ -x "$root/usr/local/lib/signalk-kiosk/screen-watch" ]]; then
+    ok "screen watch is executable"
+else
+    miss "screen watch not executable"
+fi
+call_made 'systemctl enable signalk-kiosk-screen.service' "enables the screen watch with the kiosk"
+call_made 'modprobe i2c-dev' "loads i2c-dev so the DDC buses have /dev/i2c-N nodes"
+conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on by default"
 call_made 'udevadm trigger --action=change --subsystem-match=input' \
     "re-tags the input devices so the CEC rule applies without a reboot"
 out_has 'the kiosk signs in as an admin: anyone at this screen' "warns that anyone at the screen is admin"
@@ -864,6 +969,31 @@ call_not_made 'signalk restart' "plugin already loaded: no server restart"
 call_made 'systemctl restart signalk-kiosk.service' "no desktop running: restarts the kiosk"
 no_unexpected_requests
 
+echo "  re-enable with --no-screen-pause, then without"
+: >"$state/calls"
+run_enable --readwrite --light --no-screen-pause
+call_made 'systemctl disable --now signalk-kiosk-screen.service' \
+    "--no-screen-pause stops the screen watch, which resumes the browser"
+for f in etc/systemd/system/signalk-kiosk-screen.service usr/local/lib/signalk-kiosk/screen-watch \
+         etc/modules-load.d/signalk-kiosk-i2c.conf; do
+    if [[ ! -e "$root/$f" ]]; then
+        ok "--no-screen-pause removed: /$f"
+    else
+        miss "--no-screen-pause left: /$f"
+    fi
+done
+conf_has 'KIOSK_SCREEN_PAUSE=off' "conf: screen pause off"
+status_out=$(run_helper status 2>&1)
+if grep -qF 'browser keeps running' <<<"$status_out"; then
+    ok "status: the browser keeps running while the monitor is off"
+else
+    miss "status screen-off line: $(grep 'screen off' <<<"$status_out")"
+fi
+: >"$state/calls"
+run_enable --readwrite --light
+call_made 'systemctl enable signalk-kiosk-screen.service' "a re-enable without the flag puts the screen watch back"
+conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on again"
+
 echo "  disable --purge"
 : >"$state/calls"
 rm -f "$state/user-calls" "$state/config-posts"
@@ -877,10 +1007,12 @@ else
     miss "disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
 fi
 call_made 'systemctl disable --now signalk-kiosk.service' "stops and disables the kiosk unit"
+call_made 'systemctl disable --now signalk-kiosk-screen.service' "stops and disables the screen watch"
 call_made 'systemctl enable --now lightdm.service' "gives the desktop login back"
 for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/signalk-kiosk.slice \
          etc/pam.d/signalk-kiosk etc/signalk-kiosk.conf etc/signalk-kiosk.token \
          etc/udev/rules.d/61-signalk-kiosk-cec.rules \
+         etc/systemd/system/signalk-kiosk-screen.service etc/modules-load.d/signalk-kiosk-i2c.conf \
          var/lib/signalk-kiosk/start.html usr/local/lib/signalk-kiosk; do
     if [[ ! -e "$root/$f" ]]; then
         ok "removed: /$f"
@@ -1023,7 +1155,7 @@ echo "  Raspberry Pi OS, a page on another host"
 reset_box
 : >"$state/pi-os"
 run_enable --url https://example.test/x
-call_made 'apt-get install -y --no-install-recommends cage jq fonts-noto-color-emoji chromium rpi-chromium-mods' \
+call_made 'apt-get install -y --no-install-recommends cage jq fonts-noto-color-emoji i2c-tools chromium rpi-chromium-mods' \
     "Pi OS: installs rpi-chromium-mods alongside chromium"
 out_has 'is not on this server' "another host: says the kiosk cannot sign in there"
 conf_has 'KIOSK_URL=https://example.test/x'
