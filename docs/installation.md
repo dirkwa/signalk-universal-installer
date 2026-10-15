@@ -292,6 +292,39 @@ usbipd attach --wsl --busid <BUSID>     # while the machine is running
 
 The device then shows up as `/dev/ttyUSB0` etc. inside the machine. Run `signalk hardware rescan` to re-detect and rewrite the signalk-server Quadlet's `AddDevice=` lines (re-running the installer also works, but re-pulls every image). (The Updater Console has no Hardware tab — see [docs/hardware.md](hardware.md) for the supported re-detection paths.)
 
+## Release channels
+
+The one-liners above install the latest **release**. `signalk update` follows the
+same channel, because the doctor's refresh reads the same published tree.
+
+To track `master` instead — for development or to test an unreleased fix:
+
+```bash
+# Linux
+curl -fsSL https://dirkwa.github.io/signalk-universal-installer/dev/installer/linux/install.sh | SIGNALK_CHANNEL=master bash
+
+# macOS
+curl -fsSL https://dirkwa.github.io/signalk-universal-installer/dev/installer/macos/install.sh | SIGNALK_CHANNEL=master bash
+
+# either, afterwards
+SIGNALK_CHANNEL=master signalk update
+```
+
+The variable goes on `bash`, not on `curl`: it is read by the downloaded
+installer, not by the fetch. Set on `curl` it would be silently ignored and the
+run would pull the rest of its tree from the release channel.
+
+On Windows the channel is the `-Channel` parameter, which `iwr … | iex` cannot
+carry, so the script is downloaded first; the
+[Windows section](#windows-podman-machine) has the two commands.
+
+The installed `signalk` command remembers the channel it was installed from, so
+`signalk update` on a master box stays on master. Set `SIGNALK_CHANNEL` (on
+Windows `$env:SIGNALK_CHANNEL`) to override a single run.
+
+`INSTALLER_BASE_URL` (Linux/macOS) and `-InstallerBaseUrl` (Windows) still
+override both, for mirrors, CI and local checkouts.
+
 ## Recovery
 
 If the install completes but something doesn't work, see [docs/recovery.md](recovery.md) for the full playbook. The short version, ordered by ease of use:
