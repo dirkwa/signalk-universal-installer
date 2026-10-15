@@ -25,11 +25,35 @@
 # is re-emitted by every detection, so only the per-device `enabled` is
 # carried, matched by `device`. `board` is a hardware fact, not a toggle:
 # the fresh detection always wins and nothing is carried.
+#
+# USB serial devices (matched by `byId`) and CAN interfaces (matched by
+# `interface`) carry their per-device `enabled` the same way. Before this,
+# every re-detect set each USB serial device back to the fresh default
+# (enabled), so an operator could not keep one switched off: in issue #309 a
+# touchscreen's own serial port, set to `enabled: false` because it
+# disappears with the monitor, came back on at the next `signalk hardware
+# rescan` or installer run. A device the operator switched off is also kept
+# when the fresh detection does not see it (unplugged, or a monitor that is
+# off), so the setting survives a re-detect made while it is absent. A
+# missing device that was enabled is dropped, as before: the fresh detection
+# decides which devices exist.
 
 # hardware_merge <old.json> <fresh.json> — prints merged JSON to stdout.
 # Requires jq; callers guard on `command -v jq` before invoking.
 hardware_merge() {
     jq -s '
+        # Carry the `enabled` of each prior device entry onto the fresh entry with
+        # the same key, and keep prior entries switched off that the fresh
+        # detection no longer lists.
+        def carry_toggles($prev; key):
+            . as $fresh
+            | map(. as $dev
+                  | ([$prev[] | select(key == ($dev | key))] | first) as $p
+                  | if $p == null or ($p | has("enabled") | not)
+                    then $dev else $dev + {enabled: $p.enabled} end)
+              + [ $prev[] | select(.enabled == false)
+                  | . as $p
+                  | select(any($fresh[]; key == ($p | key)) | not) ];
         .[0] as $old
         | .[1]
         | .bluetooth.enabled = ($old.bluetooth.enabled // false)
@@ -42,6 +66,12 @@ hardware_merge() {
                             else .input.enabled end)
         | if $old.socketcanCandidate != null
           then .socketcanCandidate = $old.socketcanCandidate
+          else . end
+        | if has("serial")
+          then .serial |= carry_toggles(($old.serial // []); .byId)
+          else . end
+        | if has("can")
+          then .can |= carry_toggles(($old.can // []); .interface)
           else . end
         | if has("onboardSerial")
           then .onboardSerial |= map(

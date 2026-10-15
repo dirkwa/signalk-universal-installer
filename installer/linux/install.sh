@@ -1393,10 +1393,9 @@ section "Hardware detection"
 # emits enabled=false. A re-run of the installer (the documented way to
 # refresh templates) used to silently switch off bluetooth/gpio
 # passthrough and drop the socketcan candidate. Carry those fields over
-# from the previous hardware.json. Per-device serial/can enabled flags
-# are NOT carried (the device set itself may have changed; the updater's
-# hardware apply flow owns those). The merge filter — and why audio needs
-# an explicit has() check rather than jq's `//` — lives in
+# from the previous hardware.json, and the per-device enabled flags of
+# serial, CAN and onboardSerial devices (#309). The merge filter — and why
+# audio needs an explicit has() check rather than jq's `//` — lives in
 # lib/hardware-merge.sh, shared with check-hardware-merge.sh.
 HW_FRESH=$("$HERE/detect-hardware.sh")
 if command -v jq >/dev/null 2>&1 && [[ -s "$UPDATER_DATA/hardware.json" ]]; then

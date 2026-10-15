@@ -1064,9 +1064,10 @@ cmd_hardware() {
     # device that is already plugged in.
     #
     # Toggles are carried over exactly as the installer's own detect step does:
-    # a fresh detect emits bluetooth/gpio disabled and audio at its
-    # /dev/snd-derived default, so a naive overwrite silently switches off
-    # passthrough the operator turned on. hardware_merge is the shared filter.
+    # a fresh detect emits bluetooth/gpio disabled, audio at its
+    # /dev/snd-derived default and every serial device enabled, so a naive
+    # overwrite silently switches passthrough the operator set back to the
+    # defaults. hardware_merge is the shared filter.
     # Defaults to `status`, NOT `rescan`. A bare noun command should report,
     # not act: rescan rewrites hardware.json, re-renders the live Quadlet and
     # restarts signalk-server, and someone typing `signalk hardware` to see what
