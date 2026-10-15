@@ -450,6 +450,29 @@ cmd_health() {
         fi
     fi
 
+    # A server that cannot be created never gets a container log: podman stops
+    # before the container exists, prints the reason on stderr into this
+    # unit's journal and exits 125. In #309 that was `Error: stat
+    # /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or
+    # directory`, repeated for four hours, and neither the probe above nor the
+    # log scan below showed it. Quote the line while the unit is not running.
+    local main_status sub_state start_err
+    main_status=$(systemctl --user show signalk-server.service \
+        -p ExecMainStatus --value 2>/dev/null || true)
+    sub_state=$(systemctl --user show signalk-server.service \
+        -p SubState --value 2>/dev/null || true)
+    if [[ "$main_status" == "125" && "$sub_state" != "running" ]]; then
+        start_err=$(journalctl --user -u signalk-server.service -n 200 \
+            --no-pager -o cat 2>/dev/null | grep -E '^Error: ' | tail -n 1 || true)
+        echo
+        echo "  [FAIL] podman could not create the signalk-server container (exit 125):"
+        if [[ -n "$start_err" ]]; then
+            echo "         ${start_err}"
+        else
+            echo "         journalctl --user -u signalk-server.service shows why"
+        fi
+    fi
+
     # The other failure that reads as [OK]: a plugin throwing continuously
     # WITHOUT killing the process. src/index.ts installs an uncaughtException
     # handler, so a stray throw from a timer or socket callback is logged and
@@ -462,7 +485,7 @@ cmd_health() {
     # So scan the log instead of the unit state. A handful of exceptions is
     # ordinary (a plugin probing absent hardware at startup); a rate this high
     # is a plugin stuck in a throwing callback.
-    local exc_window=120 exc_min=10 exc_count exc_log exc_plugin exc_rc=0
+    local exc_window=120 exc_min=10 exc_count exc_log exc_plugin exc_first exc_rc=0
     local -a exc_tmo=()
     command -v timeout >/dev/null 2>&1 && exc_tmo=(timeout -k 5 10)
     # --since, not --tail: with the journald driver `--tail N` scans the whole
@@ -480,11 +503,24 @@ cmd_health() {
         # escalates to SIGKILL) — a wedged runtime, not a quiet one.
         echo
         case "$exc_rc" in
-            124|137) echo "  [WARN] could not scan the server log for uncaught exceptions:" ;;
-            *)       echo "  [WARN] could not read the server log (exit ${exc_rc}):" ;;
+            124|137)
+                echo "  [WARN] could not scan the server log for uncaught exceptions:"
+                echo "         the container runtime did not answer in time, so a throwing"
+                echo "         plugin would not show up below. Retry, or read it directly:"
+                ;;
+            *)
+                # Not a timeout: podman answered with an error, for example
+                # that no signalk-server container exists because it is not
+                # running. Show podman's own first line instead of the
+                # timeout explanation, which #309 printed for exactly this.
+                echo "  [WARN] could not read the server log (exit ${exc_rc}):"
+                exc_first=$(grep -m 1 . <<<"$exc_log" || true)
+                if [[ -n "$exc_first" ]]; then
+                    echo "         ${exc_first}"
+                fi
+                echo "         A throwing plugin would not show up below. Read it directly:"
+                ;;
         esac
-        echo "         the container runtime did not answer in time, so a throwing"
-        echo "         plugin would not show up below. Retry, or read it directly:"
         echo "           signalk logs | grep -A5 'Uncaught exception'"
     else
         exc_count=$(grep -c 'Uncaught exception' <<<"$exc_log" || true)
