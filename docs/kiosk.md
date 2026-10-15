@@ -59,7 +59,9 @@ For a screen that should not reach the server's settings, `enable --readwrite` m
 
 ### Other pages and no sign-in
 
-`--url` takes a path on this server (`/@signalk/freeboard-sk/`) or a full URL. A full URL that names this server another way (`http://localhost/…`, with or without the port) counts as a path on it. The kiosk signs in only to this server; a URL on another host is shown as it is. `--no-autologin` skips the sign-in: the kiosk opens its page signed out, as a new browser would. A re-run that ends without sign-in stops the kiosk, removes the browser's session cookie, and deletes the Signal K user an earlier `enable` created. A `signalk-kiosk` user that existed before the kiosk is not deleted.
+`--url` takes a path on this server (`/@signalk/freeboard-sk/`) or a full URL. A full URL that names this server another way (`http://localhost/…`, with or without the port) counts as a path on it. The kiosk signs in only to this server; a URL on another host is shown as it is. `--no-autologin` skips the sign-in: the kiosk opens its page signed out, as a new browser would. A re-run with `--no-autologin` or a page on another host stops the kiosk, removes the browser's session cookie, and deletes the Signal K user an earlier `enable` created. A `signalk-kiosk` user that existed before the kiosk is not deleted.
+
+A re-run whose sign-in setup fails keeps what an earlier `enable` set up: the token, the session cookie and the Signal K user stay, and `enable` says to run it again. The exception is an admin kiosk re-run with `--readwrite`: its admin sign-in is removed as if the setup had never worked, so a screen meant to lose admin does not keep it. When the server does not answer at the sign-in step (it restarts after an update, for example), `enable` first waits up to 300s for it.
 
 ### Revoking the sign-in
 
