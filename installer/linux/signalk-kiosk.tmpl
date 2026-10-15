@@ -29,6 +29,7 @@
 #   signalk-kiosk status       monitors, touchscreens and kiosk state (default)
 #   signalk-kiosk scan         monitors and touchscreens only (no sudo)
 #   signalk-kiosk enable [--url PATH|URL] [--readwrite] [--browser chromium|chrome] [--no-autologin] [--light]
+#                        [--no-screen-pause]
 #   signalk-kiosk disable [--purge]
 #   signalk-kiosk restart
 #   signalk-kiosk help
@@ -63,6 +64,12 @@ PAM_FILE="${KIOSK_ROOT}/etc/pam.d/${KIOSK_USER}"
 CONF_FILE="${KIOSK_ROOT}${CONF}"
 LAUNCHER_FILE="${KIOSK_ROOT}${LAUNCHER}"
 UDEV_RULE_FILE="${KIOSK_ROOT}/etc/udev/rules.d/61-signalk-kiosk-cec.rules"
+# The screen watch: pauses the browser while the monitor is off.
+SCREEN_UNIT="signalk-kiosk-screen.service"
+SCREEN_WATCH="/usr/local/lib/signalk-kiosk/screen-watch"
+SCREEN_UNIT_FILE="${KIOSK_ROOT}/etc/systemd/system/${SCREEN_UNIT}"
+SCREEN_WATCH_FILE="${KIOSK_ROOT}${SCREEN_WATCH}"
+I2C_MODULE_FILE="${KIOSK_ROOT}/etc/modules-load.d/signalk-kiosk-i2c.conf"
 
 AUTOLOGIN_ID="signalk-autologin"
 # The kiosk's Signal K user is an admin by default: App Dock reads its app
@@ -278,17 +285,18 @@ conf_get() {
 
 render_conf() {
     local url="$1" browser="$2" base="$3" signin="$4" sk_type="$5"
-    local prev_dm="$6" autologin="$7" user_created="$8" scheme="${9:-}"
+    local prev_dm="$6" autologin="$7" user_created="$8" scheme="${9:-}" screen_pause="${10:-}"
     cat <<EOF
 # Written by \`signalk kiosk enable\`; rewritten on every enable.
 # ${LAUNCHER} reads the KIOSK_URL, KIOSK_BROWSER, KIOSK_BASE, KIOSK_SIGNIN and
-# KIOSK_COLOR_SCHEME lines. The rest records what \`signalk kiosk disable\` has
-# to put back.
+# KIOSK_COLOR_SCHEME lines; \`signalk kiosk status\` also KIOSK_SCREEN_PAUSE.
+# The rest records what \`signalk kiosk disable\` has to put back.
 KIOSK_URL=${url}
 KIOSK_BROWSER=${browser}
 KIOSK_BASE=${base}
 KIOSK_SIGNIN=${signin}
 KIOSK_COLOR_SCHEME=${scheme}
+KIOSK_SCREEN_PAUSE=${screen_pause}
 KIOSK_SK_USER_TYPE=${sk_type}
 KIOSK_PREV_DISPLAY_MANAGER=${prev_dm}
 KIOSK_AUTOLOGIN_CHANGED=${autologin}
@@ -486,6 +494,156 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+EOF
+}
+
+# The screen watch signalk-kiosk-screen.service runs as root. A monitor's
+# hotplug line is no use here: many keep it up while switched off by their
+# power button. Its DDC/CI controller is: switched on, it acknowledges a
+# request on the connector's DDC bus at address 0x37; switched off, the bus
+# answers with no acknowledgement. While every monitor that has answered
+# before stays silent, the browser gets SIGSTOP; the first answer gives it
+# SIGCONT. A monitor that has never answered (no DDC/CI, or switched off since
+# the watch started) counts as on, so it never pauses the browser.
+#
+# The browser's processes are found by user and name, not by cgroup:
+# pam_systemd moves cage into the session's scope and Chromium moves itself
+# into a scope of its own, so the unit's cgroup holds neither.
+render_screen_watch() {
+    cat <<'EOF'
+#!/usr/bin/env bash
+# Run by signalk-kiosk-screen.service as root. Written by `signalk kiosk
+# enable` and rewritten by every enable — do not edit.
+#   screen-watch          watch the monitors, pause and resume the browser
+#   screen-watch resume   resume the browser once (the unit's ExecStopPost)
+set -uo pipefail
+
+SYSFS="${KIOSK_SYSFS:-/sys}"
+STEP="${KIOSK_SCREEN_STEP:-5}"
+# Silent checks in a row before the browser is paused: 3 at 5s apart is 15s,
+# longer than the hotplug drop some monitors give while they power up.
+MISSES="${KIOSK_SCREEN_MISSES:-3}"
+# Tests stop the loop after this many checks; 0 runs it until stopped.
+ROUNDS="${KIOSK_SCREEN_ROUNDS:-0}"
+# Chromium's processes are all named chromium; Chrome's, chrome; Pi OS
+# Bookworm's chromium-browser is cut to 15 characters by the kernel.
+BROWSER_NAMES='chromium|chrome|chromium-browse'
+
+signal_browser() {
+    pkill "-$1" -u signalk-kiosk -x "$BROWSER_NAMES" 2>/dev/null || true
+}
+
+# DDC/CI "Get VCP Feature" for brightness (0x10), ending in its checksum
+# (0x6E XOR the other bytes). Only the acknowledgement of the write counts;
+# the reply is read to leave the monitor's controller idle, and is not
+# parsed: some controllers answer only with a null message. A second try
+# 200ms later covers a controller busy with an earlier request.
+ddc_answers() {
+    local try
+    for try in 1 2; do
+        if i2ctransfer -y "$1" w5@0x37 0x51 0x82 0x01 0x10 0xac >/dev/null 2>&1; then
+            sleep 0.05
+            i2ctransfer -y "$1" r11@0x37 >/dev/null 2>&1 || true
+            return 0
+        fi
+        [[ "$try" == 2 ]] || sleep 0.2
+    done
+    return 1
+}
+
+# Buses whose monitor has answered at least once since the watch started.
+declare -A answered=()
+
+# True while some connected monitor may be showing the browser: one without
+# a DDC bus, one that answers, or one that has never answered. False when
+# every connected monitor has answered before and is silent now, or when
+# nothing is connected.
+screen_visible() {
+    local c link bus
+    for c in "${SYSFS}"/class/drm/card*-*; do
+        [[ "$(cat "$c/status" 2>/dev/null)" == connected ]] || continue
+        link=$(readlink "$c/ddc" 2>/dev/null) || return 0
+        bus=${link##*/i2c-}
+        [[ "$bus" =~ ^[0-9]+$ ]] || return 0
+        if ddc_answers "$bus"; then
+            answered[$bus]=1
+            return 0
+        fi
+        [[ -n "${answered[$bus]:-}" ]] || return 0
+    done
+    return 1
+}
+
+if [[ "${1:-}" == resume ]]; then
+    signal_browser CONT
+    exit 0
+fi
+
+trap 'signal_browser CONT; exit 0' TERM INT
+# A watch restarted while the browser was paused finds it paused.
+signal_browser CONT
+paused=0
+misses=0
+round=0
+while :; do
+    if screen_visible; then
+        misses=0
+        if (( paused )); then
+            signal_browser CONT
+            paused=0
+            echo "signalk-kiosk: monitor on, browser resumed"
+        fi
+    else
+        misses=$(( misses + 1 ))
+        if (( misses >= MISSES )); then
+            (( paused )) || echo "signalk-kiosk: monitor off, browser paused"
+            # Every round: a process the browser started since is paused too.
+            signal_browser STOP
+            paused=1
+        fi
+    fi
+    round=$(( round + 1 ))
+    (( ROUNDS == 0 || round < ROUNDS )) || break
+    # In the background, so the TERM trap runs without waiting out the sleep.
+    sleep "$STEP" &
+    wait $!
+done
+EOF
+}
+
+# Started and stopped with the kiosk unit (Wants from the [Install] section,
+# BindsTo and PartOf here). ExecStopPost resumes the browser however the watch
+# ends, killed included.
+render_screen_unit() {
+    cat <<EOF
+# Written by \`signalk kiosk enable\`; removed by \`signalk kiosk disable\` and
+# by \`signalk kiosk enable --no-screen-pause\`.
+[Unit]
+Description=Signal K kiosk: pause the browser while the monitor is off
+Documentation=${DOC_URL}
+After=${KIOSK_UNIT}
+BindsTo=${KIOSK_UNIT}
+PartOf=${KIOSK_UNIT}
+
+[Service]
+Type=simple
+ExecStart=${SCREEN_WATCH}
+ExecStopPost=${SCREEN_WATCH} resume
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=${KIOSK_UNIT}
+EOF
+}
+
+# The kernel makes an I2C bus a /dev/i2c-N device only with i2c-dev loaded,
+# which Raspberry Pi OS does not do by default.
+render_i2c_module() {
+    cat <<'EOF'
+# Written by `signalk kiosk enable`; removed by `signalk kiosk disable`.
+# The kiosk's screen watch talks to monitors over their DDC bus (/dev/i2c-N).
+i2c-dev
 EOF
 }
 
@@ -800,6 +958,15 @@ clear_kiosk_cookies() {
     run_root rm -f "$d/Cookies" "$d/Cookies-journal" "$d/Network/Cookies" "$d/Network/Cookies-journal"
 }
 
+# Stopping the watch runs its ExecStopPost, which resumes a paused browser.
+# The caller runs daemon-reload.
+remove_screen_watch() {
+    if [[ -f "$SCREEN_UNIT_FILE" ]]; then
+        run_root systemctl disable --now "$SCREEN_UNIT" || true
+    fi
+    run_root rm -f "$SCREEN_UNIT_FILE" "$SCREEN_WATCH_FILE" "$I2C_MODULE_FILE"
+}
+
 # ─── commands ──────────────────────────────────────────────────────────
 refuse_root() {
     if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
@@ -829,7 +996,11 @@ browser_binary() {
 # minimal Debian or Pi OS install has no font for them: Chromium draws an
 # empty box instead.
 emoji_font_installed() {
-    dpkg-query -W -f='${Status}' fonts-noto-color-emoji 2>/dev/null | grep -q ' installed$'
+    package_installed fonts-noto-color-emoji
+}
+
+package_installed() {
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q ' installed$'
 }
 
 # Pi OS Trixie and Debian Trixie name it `chromium`; Pi OS Bookworm named it
@@ -863,7 +1034,8 @@ resolve_url() {
 }
 
 cmd_enable() {
-    local want_url="" url_defaulted=0 browser=chromium autologin=1 sk_type=admin scheme=dark base bin pkgs=() dock_status
+    local want_url="" url_defaulted=0 browser=chromium autologin=1 sk_type=admin scheme=dark screen_pause=on
+    local base bin pkgs=() dock_status
     local prev_dm dm_now url signin=none prev_signin changed user_created token tls_origin
     while (( $# )); do
         case "$1" in
@@ -874,6 +1046,7 @@ cmd_enable() {
             --browser=*)    browser="${1#--browser=}"; shift ;;
             --no-autologin) autologin=0; shift ;;
             --light)        scheme=light; shift ;;
+            --no-screen-pause) screen_pause=off; shift ;;
             *) err "unknown option for enable: $1"; usage; exit 2 ;;
         esac
     done
@@ -902,6 +1075,8 @@ cmd_enable() {
     command -v cage >/dev/null 2>&1 || pkgs+=(cage)
     command -v jq >/dev/null 2>&1 || pkgs+=(jq)
     emoji_font_installed || pkgs+=(fonts-noto-color-emoji)
+    # i2ctransfer, for the screen watch's DDC requests.
+    [[ "$screen_pause" == off ]] || package_installed i2c-tools || pkgs+=(i2c-tools)
     if ! bin=$(browser_binary "$browser"); then
         if [[ "$browser" == chrome ]]; then
             err "Google Chrome is not installed. Install google-chrome-stable from Google's"
@@ -1052,13 +1227,26 @@ cmd_enable() {
 
     render_launcher | install_file 0755 "$LAUNCHER_FILE"
     render_conf "$url" "$bin" "$base" "$signin" "$sk_type" "$prev_dm" "$changed" "$user_created" "$scheme" \
-        | install_file 0644 "$CONF_FILE"
+        "$screen_pause" | install_file 0644 "$CONF_FILE"
     render_pam | install_file 0644 "$PAM_FILE"
     render_slice | install_file 0644 "$SLICE_FILE"
     render_unit | install_file 0644 "$UNIT_FILE"
     render_udev_rule | install_file 0644 "$UDEV_RULE_FILE"
     reload_udev_input
+    if [[ "$screen_pause" == on ]]; then
+        render_screen_watch | install_file 0755 "$SCREEN_WATCH_FILE"
+        render_screen_unit | install_file 0644 "$SCREEN_UNIT_FILE"
+        render_i2c_module | install_file 0644 "$I2C_MODULE_FILE"
+        # Best effort: a container has no modules to load.
+        run_root modprobe i2c-dev 2>/dev/null || true
+    else
+        remove_screen_watch
+    fi
     run_root systemctl daemon-reload
+    if [[ "$screen_pause" == on ]]; then
+        run_root systemctl enable "$SCREEN_UNIT"
+        ok "the browser pauses while the monitor is off (--no-screen-pause to keep it running)"
+    fi
     if [[ -n "$dm_now" ]]; then
         run_root systemctl disable "$dm_now"
         ok "disabled the desktop login (${dm_now}); \`signalk kiosk disable\` re-enables it"
@@ -1112,6 +1300,7 @@ cmd_disable() {
     prev_signin=$(conf_get KIOSK_SIGNIN)
 
     section "Boot"
+    remove_screen_watch
     if [[ -f "$UNIT_FILE" ]]; then
         run_root systemctl disable --now "$KIOSK_UNIT" || true
         ok "${KIOSK_UNIT} stopped and disabled"
@@ -1207,6 +1396,13 @@ cmd_status() {
     else
         printf '  %-12s %s\n' "colours" "dark (enable --light for light)"
     fi
+    # Off only when enable was given --no-screen-pause; a conf from before the
+    # setting has no watch installed.
+    if [[ -f "$SCREEN_UNIT_FILE" ]]; then
+        printf '  %-12s %s\n' "screen off" "browser paused, $(systemctl is-active "$SCREEN_UNIT" 2>/dev/null || true) (enable --no-screen-pause to keep it running)"
+    else
+        printf '  %-12s %s\n' "screen off" "browser keeps running"
+    fi
     if [[ "$(conf_get KIOSK_SIGNIN)" == token ]]; then
         printf '  %-12s %s\n' "sign-in" "token, as Signal K user ${SK_KIOSK_USER} ($(conf_get KIOSK_SK_USER_TYPE))"
     else
@@ -1235,6 +1431,9 @@ signalk kiosk — boot a connected screen straight into the Signal K GUI
       --no-autologin        no sign-in: the kiosk opens its page signed out
       --light               light pages: the browser does not ask them for dark mode
                             (default: dark, for the pages that have a dark theme)
+      --no-screen-pause     keep the browser running while the monitor is off (default:
+                            paused, for monitors that answer DDC/CI; sounds the page
+                            plays stop while it is paused)
   signalk kiosk disable     restore the previous boot (desktop login or console) and
                             delete the kiosk's Signal K user, revoking its token (sudo)
       --purge               also remove the kiosk's system user and its browser profile
