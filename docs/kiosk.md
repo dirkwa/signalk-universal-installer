@@ -32,7 +32,7 @@ The App Store installs and the sign-in go through the server's admin API with th
 | Path | Purpose |
 |---|---|
 | `/etc/systemd/system/signalk-kiosk.service` | Runs cage with the launcher on tty1 as `signalk-kiosk`, restarts it whenever it exits, and takes tty1 from the console login. |
-| `/etc/systemd/system/signalk-kiosk.slice` | A top-level slice with a lower CPU weight than `user.slice`, where the Signal K server runs, so under CPU contention the browser yields to the server. |
+| `/etc/systemd/system/user-<uid>.slice.d/50-signalk-kiosk.conf` | `CPUWeight=50` on the `signalk-kiosk` user's slice, where cage and the browser run (logind's session scope and the kiosk user's own systemd both sit under it). The Signal K server runs in its owner's slice next to it at the default weight of 100, so under CPU contention the browser yields to the server. `enable` also applies the weight to the running slice with `systemctl set-property --runtime`. |
 | `/etc/pam.d/signalk-kiosk` | The PAM stack the unit opens its session with. systemd never calls `pam_authenticate` for a service, so nothing asks for a password; `pam_systemd` registers the session on seat0, which is what lets cage open the display and input devices. |
 | `/etc/udev/rules.d/61-signalk-kiosk-cec.rules` | Makes the Raspberry Pi's HDMI-CEC inputs keyboards instead of pointers (see [Touchscreens](#touchscreens)). Matches nothing on other hardware. |
 | `/usr/local/lib/signalk-kiosk/browser` | The launcher cage runs: waits for the server, clears the crash marker, adds touch flags, writes the sign-in start page, starts the browser. |

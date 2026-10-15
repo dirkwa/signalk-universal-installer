@@ -54,12 +54,15 @@ KIOSK_ROOT="${KIOSK_ROOT:-}"
 KIOSK_USER="signalk-kiosk"
 KIOSK_HOME="/var/lib/signalk-kiosk"
 KIOSK_UNIT="signalk-kiosk.service"
-KIOSK_SLICE="signalk-kiosk.slice"
 # Runtime paths (as the running kiosk sees them) and their written locations.
 LAUNCHER="/usr/local/lib/signalk-kiosk/browser"
 CONF="/etc/signalk-kiosk.conf"
 UNIT_FILE="${KIOSK_ROOT}/etc/systemd/system/${KIOSK_UNIT}"
-SLICE_FILE="${KIOSK_ROOT}/etc/systemd/system/${KIOSK_SLICE}"
+# Written by enable before the CPU weight moved to the kiosk user's slice;
+# removed by enable and disable.
+OLD_SLICE_FILE="${KIOSK_ROOT}/etc/systemd/system/signalk-kiosk.slice"
+# In the kiosk user's slice, user-<uid>.slice.d/ (user_slice_dropin).
+SLICE_DROPIN="50-signalk-kiosk.conf"
 PAM_FILE="${KIOSK_ROOT}/etc/pam.d/${KIOSK_USER}"
 CONF_FILE="${KIOSK_ROOT}${CONF}"
 LAUNCHER_FILE="${KIOSK_ROOT}${LAUNCHER}"
@@ -447,16 +450,17 @@ reload_udev_input() {
     run_root udevadm settle 2>/dev/null || true
 }
 
-# A top-level slice so the weight competes with user.slice, where the Signal K
-# server runs. A CPUWeight on the service alone would only rank it against
-# other system services, never against the server.
-render_slice() {
+# The kiosk's processes run in the kiosk user's slice, user-<uid>.slice, not
+# in the unit's cgroup: pam_systemd moves cage into the session's scope there,
+# and Chromium moves its main process into a scope of the kiosk user's own
+# systemd, also under that slice. The Signal K server runs in its owner's
+# user-<uid>.slice, a sibling under user.slice, so this weight ranks the kiosk
+# below the server under CPU contention.
+render_user_slice_dropin() {
     cat <<'EOF'
-# Written by `signalk kiosk enable`. Under CPU contention the kiosk browser
-# yields to the Signal K server (user.slice) rather than competing with it.
-[Unit]
-Description=Signal K kiosk (lower CPU priority than the server)
-
+# Written by `signalk kiosk enable`; removed by `signalk kiosk disable`.
+# Under CPU contention the kiosk browser yields to the Signal K server, which
+# runs in its own user's slice next to this one.
 [Slice]
 CPUWeight=50
 EOF
@@ -487,7 +491,6 @@ StandardOutput=journal
 StandardError=journal
 UtmpIdentifier=tty1
 UtmpMode=user
-Slice=${KIOSK_SLICE}
 # -s keeps Ctrl+Alt+F2 working, so a keyboard can still reach a console.
 ExecStart=/usr/bin/cage -s -d -- ${LAUNCHER}
 Restart=always
@@ -947,6 +950,26 @@ delete_kiosk_sk_user() {
 
 # The kiosk user's home as passwd has it, which is the launcher's $HOME: a
 # signalk-kiosk user that existed before enable keeps its own.
+# Empty when the user does not exist (after disable --purge).
+kiosk_uid() {
+    getent passwd "$KIOSK_USER" 2>/dev/null | cut -d: -f3 || true
+}
+
+user_slice_dropin() {
+    printf '%s/etc/systemd/system/user-%s.slice.d/%s' "$KIOSK_ROOT" "$1" "$SLICE_DROPIN"
+}
+
+# Every uid's: a kiosk user removed by --purge and created again can have
+# another uid.
+remove_user_slice_dropins() {
+    local f
+    for f in "${KIOSK_ROOT}"/etc/systemd/system/user-*.slice.d/"${SLICE_DROPIN}"; do
+        [[ -e "$f" ]] || continue
+        run_root rm -f "$f"
+        run_root rmdir "${f%/*}" 2>/dev/null || true
+    done
+}
+
 kiosk_home() {
     local h
     h=$(getent passwd "$KIOSK_USER" 2>/dev/null | cut -d: -f6)
@@ -1040,7 +1063,7 @@ resolve_url() {
 cmd_enable() {
     local want_url="" url_defaulted=0 browser=chromium autologin=1 sk_type=admin scheme=dark screen_pause=on
     local base bin pkgs=() dock_status
-    local prev_dm dm_now url signin=none prev_signin prev_type changed user_created token tls_origin
+    local prev_dm dm_now url signin=none prev_signin prev_type changed user_created token tls_origin kiosk_uid
     while (( $# )); do
         case "$1" in
             --url)          want_url="${2:?--url needs a path or URL}"; shift 2 ;;
@@ -1258,7 +1281,15 @@ cmd_enable() {
     render_conf "$url" "$bin" "$base" "$signin" "$sk_type" "$prev_dm" "$changed" "$user_created" "$scheme" \
         "$screen_pause" | install_file 0644 "$CONF_FILE"
     render_pam | install_file 0644 "$PAM_FILE"
-    render_slice | install_file 0644 "$SLICE_FILE"
+    kiosk_uid=$(kiosk_uid)
+    remove_user_slice_dropins
+    # Never with an empty uid: user-.slice.d/ would weight every user's slice.
+    if [[ "$kiosk_uid" =~ ^[0-9]+$ ]]; then
+        render_user_slice_dropin | install_file 0644 "$(user_slice_dropin "$kiosk_uid")"
+    else
+        warn "no uid for ${KIOSK_USER}; the kiosk runs without its lower CPU weight"
+    fi
+    run_root rm -f "$OLD_SLICE_FILE"
     render_unit | install_file 0644 "$UNIT_FILE"
     render_udev_rule | install_file 0644 "$UDEV_RULE_FILE"
     reload_udev_input
@@ -1272,6 +1303,11 @@ cmd_enable() {
         remove_screen_watch
     fi
     run_root systemctl daemon-reload
+    # daemon-reload loads the drop-in but leaves a running slice's cgroup at
+    # its old weight until the next boot; this sets it now.
+    if [[ "$kiosk_uid" =~ ^[0-9]+$ ]]; then
+        run_root systemctl set-property --runtime "user-${kiosk_uid}.slice" CPUWeight=50 2>/dev/null || true
+    fi
     if [[ "$screen_pause" == on ]]; then
         run_root systemctl enable "$SCREEN_UNIT"
         ok "the browser pauses while the monitor is off (--no-screen-pause to keep it running)"
@@ -1314,7 +1350,7 @@ report_kiosk_state() {
 }
 
 cmd_disable() {
-    local purge=0 prev_dm prev_signin changed user_created base token had_unit=0
+    local purge=0 prev_dm prev_signin changed user_created base token had_unit=0 kiosk_uid
     while (( $# )); do
         case "$1" in
             --purge) purge=1; shift ;;
@@ -1341,11 +1377,18 @@ cmd_disable() {
     if [[ "$prev_signin" == token ]]; then
         clear_kiosk_cookies
     fi
-    run_root rm -f "$UNIT_FILE" "$SLICE_FILE" "$PAM_FILE" "$CONF_FILE" "$LAUNCHER_FILE" \
+    kiosk_uid=$(kiosk_uid)
+    remove_user_slice_dropins
+    run_root rm -f "$UNIT_FILE" "$OLD_SLICE_FILE" "$PAM_FILE" "$CONF_FILE" "$LAUNCHER_FILE" \
         "$UDEV_RULE_FILE" "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
     reload_udev_input
     run_root rmdir "${LAUNCHER_FILE%/*}" 2>/dev/null || true
     run_root systemctl daemon-reload
+    # The running slice keeps the weight until the next boot otherwise; 100 is
+    # systemd's default.
+    if [[ "$kiosk_uid" =~ ^[0-9]+$ ]]; then
+        run_root systemctl set-property --runtime "user-${kiosk_uid}.slice" CPUWeight=100 2>/dev/null || true
+    fi
     # A failure here must not skip the sign-in cleanup below, which revokes
     # the kiosk's token.
     if [[ -n "$prev_dm" ]] && run_root systemctl enable --now "$prev_dm"; then
