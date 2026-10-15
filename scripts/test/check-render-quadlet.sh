@@ -169,6 +169,24 @@ else
     echo "  [SKIP] jq not available — enabled-bluetooth render not checked"
 fi
 
+# 4b. An enabled CAN interface renders NO line. SocketCAN interfaces are
+#     network devices with no /dev node, reachable through Network=host; the
+#     AddDevice=/dev/can0 this used to emit made podman fail every start of
+#     the server (`stat /dev/can0: no such file or directory`, exit 125).
+jq '.can = [{"interface":"can0","type":"socketcan","enabled":true}]' \
+    "$tmp/hardware.json" >"$tmp/hardware-can.json"
+out_can=$(bash "$RENDER" "$tmp/hardware-can.json" "$TEMPLATE" 2>/dev/null) || {
+    echo "  [MISS] render (CAN enabled) exited non-zero"
+    fail=1
+}
+if grep -vE '^[[:space:]]*#' <<<"$out_can" | grep -q 'can0'; then
+    echo "  [MISS] enabled CAN interface rendered a line (podman would fail on /dev/can0):"
+    grep -n 'can0' <<<"$out_can" | sed 's/^/         /'
+    fail=1
+else
+    echo "  [OK]   enabled CAN interface renders no AddDevice= line"
+fi
+
 # 5. Enabled audio renders the read-only /dev/snd view — but only while the
 #    host path exists: a Volume= with a missing source fails the whole unit
 #    at start, so a stale enabled=true must render nothing rather than brick

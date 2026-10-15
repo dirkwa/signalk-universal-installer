@@ -76,13 +76,8 @@ fi
 #
 # Scope is deliberately SERIAL ONLY — matched by the /dev/serial/by-id/
 # prefix, plus the fixed on-SoC UARTs the `onboardSerial` class emits as
-# AddDevice=/dev/tty* (HALPI2 RS-485 on /dev/ttyAMA4). CAN's
-# AddDevice=/dev/<iface> is left untouched: socketcan is a
-# network device, not a /dev node, so an existence test on /dev/<iface>
-# would strip every legitimate CAN line. (signalk-server runs Network=host,
-# so the CAN interface is reachable regardless; guarding it correctly is a
-# separate concern and out of scope here.) Volume= and every other line
-# pass through untouched. Reads stdin, writes stdout.
+# AddDevice=/dev/tty* (HALPI2 RS-485 on /dev/ttyAMA4). Volume= and every
+# other line pass through untouched. Reads stdin, writes stdout.
 guard_adddevice() {
     local line dev
     while IFS= read -r line; do
@@ -148,6 +143,12 @@ warn_input_group_skip() {
     echo "# re-run 'signalk hardware rescan' to restore the view."
 }
 
+# CAN interfaces get no line. A SocketCAN interface is a network device, not
+# a /dev node, and signalk-server runs with Network=host, so every CAN
+# interface on the host is already reachable. The AddDevice=/dev/<iface> line
+# this used to emit for an enabled interface made podman fail every start
+# (`stat /dev/can0: no such file or directory`, exit 125), since no such node
+# exists.
 hardware_block() {
     {
     if command -v jq >/dev/null 2>&1; then
@@ -161,7 +162,6 @@ hardware_block() {
             ((.serial // [])[] | select(.enabled == true)
                 | ("AddDevice=" + .byId + ":" + .byId), ("AddDevice=" + .byId)),
             ((.onboardSerial // [])[] | select(.enabled == true) | "AddDevice=" + .device),
-            ((.can // [])[] | select(.enabled == true) | "AddDevice=/dev/" + .interface),
             ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=signalk-dbus-socket:/run/dbus:rw"),
             ((.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem")
           ] | .[]
