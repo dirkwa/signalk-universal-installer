@@ -1086,8 +1086,9 @@ foreach ($k in $skEnvVars.Keys) {
 # and sending both would describe two different trees in one command line.
 #
 # This rides in $skEnv, which is spliced in AFTER the pipe, so the assignment
-# lands on bash and not on curl - the distinction README.md:46-48 calls out,
-# where a channel set on curl is read by nothing and silently ignored.
+# lands on bash and not on curl - the distinction the "Release channels"
+# section of docs/installation.md calls out, where a channel set on curl is
+# read by nothing and silently ignored.
 if (-not $SkExplicitBase) {
     $skEnv += "SIGNALK_CHANNEL='" + ($Channel -replace "'", "'\''") + "' "
 }

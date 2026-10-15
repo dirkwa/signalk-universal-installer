@@ -1,123 +1,119 @@
-# SignalK Universal Installer (v2)
+# Signal K Universal Installer
 
-Bash/PowerShell bootstrap for the SignalK container stack on Linux, macOS, and Windows (WSL2).
+One command installs the [Signal K server](https://signalk.org) on a Raspberry Pi, a Linux PC, a Mac or a Windows PC. Signal K runs in containers next to two web consoles that look after it: the **Updater Console** switches Signal K versions and rolls back to the previous one, and the **Doctor Console** checks the installation and restores the last setup that worked.
 
-## What this installs
+## Install
 
-A peer-container stack managed by `systemd --user`:
-
-- `signalk-server` — the SignalK Node Server in a container.
-- `signalk-updater-server` — image lifecycle, version switching, self-update, hardware passthrough (`:3003`). Web console with Dashboard / Versions / Logs tabs.
-- `signalk-doctor-server` — read-only diagnostics, last-known-good recovery, the offline safety net (`:3004`). Web console with Health / Drift / Logs / Snapshots / Recover / Installer tabs.
-
-All three run rootless under Podman. `signalk-updater-server` and `signalk-doctor-server` use `Restart=on-failure`; `signalk-server` uses `Restart=always` (the admin UI's "Restart" button does a clean `process.exit(0)` that `on-failure` wouldn't recover from). Both policies sit behind `StartLimitBurst=5` crashloop guards (the peers over a 300s `StartLimitIntervalSec`; `signalk-server` over 1800s, widened to match its longer `TimeoutStartSec=300` so a slow-but-recovering start on SD-card hosts isn't cut off). Recovery never depends on `signalk-server` being healthy, and never depends on the updater being healthy — the doctor is independent of both, and a host-resident bash script (`~/.local/bin/signalk-recovery`) backs both of them when neither container can respond.
-
-During bootstrap, the installer runs `npm install` for three companion SignalK plugins (`signalk-container`, `signalk-updater`, `signalk-doctor`) inside the `signalk-server` container — the container does the actual writes to its `~/.signalk/` mount — and seeds default plugin config files (if absent). User-disabled plugins are never re-enabled on re-runs.
-
-## Components
-
-| Repo                                                                                 | Role                                                                          |
-| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
-| [signalk-universal-installer](https://github.com/dirkwa/signalk-universal-installer) | This repo. Bash + PowerShell + Quadlet templates.                             |
-| [signalk-updater-server](https://github.com/dirkwa/signalk-updater-server)           | Engine container — mutates the stack (version switch, self-update, hardware). |
-| [signalk-doctor-server](https://github.com/dirkwa/signalk-doctor-server)             | Engine container — diagnoses and recovers (probes, last-known-good restore).  |
-| [signalk-updater](https://github.com/dirkwa/signalk-updater)                         | Thin-shell plugin inside signalk-server, deep-links to the updater console.   |
-| [signalk-doctor](https://github.com/dirkwa/signalk-doctor)                           | Thin-shell plugin, deep-links to the doctor console.                          |
-| [signalk-container](https://github.com/dirkwa/signalk-container)                     | Cross-plugin container-runtime substrate.                                     |
-
-## Quick start
+**Raspberry Pi and Linux**: Raspberry Pi OS (Trixie), Debian 13, Ubuntu or Kubuntu 25.04 and newer.
 
 ```bash
-# Linux (Debian 13 / trixie, Raspberry Pi OS trixie+, Ubuntu/Kubuntu 25.04+)
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
+```
 
-# macOS (Apple Silicon and Intel; Homebrew required)
+**macOS**: Apple Silicon or Intel, with [Homebrew](https://brew.sh) installed.
+
+```bash
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/macos/install.sh | bash
 ```
 
+**Windows 11**: in PowerShell, run as administrator.
+
 ```powershell
-# Windows 11 (PowerShell as administrator; enables WSL2, then Podman Machine runs the stack)
 iwr -useb https://dirkwa.github.io/signalk-universal-installer/installer/windows/install.ps1 | iex
 ```
 
-### Release channels
+The installer needs 2 GB of RAM and 5 GB of free disk space. It asks for your boat's name, MMSI and call sign (Enter skips each one) and for the admin password you will sign in to Signal K with. On Windows without WSL2, it turns WSL2 on and asks for one reboot; run the same command again after the reboot and it carries on.
 
-The one-liners above install the latest **release**. `signalk update` follows the
-same channel, because the doctor's refresh reads the same published tree.
+Running the command again on an installed box keeps your data and settings, and ends by checking that Signal K and both consoles run and answer. [docs/installation.md](docs/installation.md) describes each step on each platform.
 
-To track `master` instead — for development or to test an unreleased fix:
+## Open Signal K
+
+The installer ends by printing the box's address. Open these in a browser on any phone, tablet or laptop on the boat's network:
+
+| Address | What it is |
+|---|---|
+| `http://<address>` | Signal K: its webapps and the admin UI |
+| `http://<address>:3003` | Updater Console: Signal K versions, rollback, updates for both consoles |
+| `http://<address>:3004` | Doctor Console: health checks, snapshots, recovery |
+
+Signal K uses port 80 unless you declined the standard web ports during the install; then it is at `http://<address>:3000`.
+
+## A screen on the box (kiosk)
+
+On a Raspberry Pi or Linux box with a monitor or touchscreen:
 
 ```bash
-# Linux
-curl -fsSL https://dirkwa.github.io/signalk-universal-installer/dev/installer/linux/install.sh | SIGNALK_CHANNEL=master bash
-
-# macOS
-curl -fsSL https://dirkwa.github.io/signalk-universal-installer/dev/installer/macos/install.sh | SIGNALK_CHANNEL=master bash
-
-# either, afterwards
-SIGNALK_CHANNEL=master signalk update
+signalk kiosk enable
 ```
 
-The variable goes on `bash`, not on `curl`: it is read by the downloaded
-installer, not by the fetch. Set on `curl` it would be silently ignored and the
-run would pull the rest of its tree from the release channel.
+The screen then shows Signal K full screen at every power-on, already signed in, with no desktop, login prompt or browser bars. It opens App Dock with Freeboard-SK; double-tap the screen to switch webapps. While the monitor is switched off, the browser is paused and uses no CPU (on monitors that support DDC/CI). `signalk kiosk disable` gives you the desktop back. [docs/kiosk.md](docs/kiosk.md) has the options and touchscreen notes.
 
-On Windows the channel is a parameter rather than an environment variable, so
-`iwr … | iex` cannot carry it — `iex` has nowhere to put arguments. Download the
-script first, then invoke it:
+## Connect your instruments
 
-```powershell
-# Windows
-iwr -useb https://dirkwa.github.io/signalk-universal-installer/dev/installer/windows/install.ps1 -OutFile install.ps1
-.\install.ps1 -Channel master
-```
-
-The installed `signalk` command remembers the channel it was installed from, so
-`signalk update` on a master box stays on master. Set `$env:SIGNALK_CHANNEL` to
-override a single run.
-
-`INSTALLER_BASE_URL` (Linux/macOS) and `-InstallerBaseUrl` (Windows) still
-override both, for mirrors, CI and local checkouts.
-
-Then open:
-
-- `http://localhost` — SignalK admin UI (port 80 by default; `:3000` if you decline standard ports at install).
-- `http://localhost:3003` — Updater Console.
-- `http://localhost:3004` — Doctor Console.
-
-### Connecting NMEA hardware
-
-USB gateways (Actisense NGT-1, USB GPS, NMEA 0183 adapters) are detected and passed into the container automatically. After plugging one in:
+USB gateways (Actisense NGT-1, USB GPS, NMEA 0183 adapters) are passed to Signal K automatically. After plugging one in, run:
 
 ```bash
 signalk hardware rescan
 ```
 
-Then add the connection in the SignalK admin UI under **Server → Data Connections**, using the stable `by-id` path rather than `/dev/ttyUSB0` — with two USB serial devices the `ttyUSB` numbering can swap on reboot.
+Then add it in the Signal K admin UI under **Server → Data Connections**, choosing the `/dev/serial/by-id/…` path rather than `/dev/ttyUSB0`: with two USB serial devices, the `ttyUSB` numbers can swap at a reboot.
 
-See [docs/hardware.md](docs/hardware.md) for the walkthrough, SocketCAN, Bluetooth and audio passthrough, and what to check when a device does not appear. On a Hat Labs HALPI2 the installer also sets up the carrier board itself (Hat Labs packages, CAN, RS-485, LEDs) — [docs/halpi2.md](docs/halpi2.md).
+- **CAN HAT on a Raspberry Pi**: `signalk socketcan` detects the HAT and prints the setup steps ([docs/socketcan.md](docs/socketcan.md)).
+- **Hat Labs HALPI2**: the installer sets up the board itself: Hat Labs packages, CAN, RS-485 and LEDs ([docs/halpi2.md](docs/halpi2.md)).
+- **Bluetooth sensors**: `signalk bluetooth enable`.
 
-See [docs/installation.md](docs/installation.md) for the full per-platform walkthrough, and [docs/recovery.md](docs/recovery.md) for the recovery playbook.
+[docs/hardware.md](docs/hardware.md) covers audio and input devices, and what to check when a device does not show up.
 
-## Development
+## The `signalk` command
 
-One command gives you a complete, isolated dev environment — the stack's own pre-built signalk-server on port 4000 (clear of a production install), plugin linking, shellcheck, Playwright e2e, and AI tooling:
+| Command | What it does |
+|---|---|
+| `signalk health` | Shows whether Signal K and both consoles run, with their addresses |
+| `signalk restart` | Restarts Signal K, for example after a settings change |
+| `signalk stop`, `signalk start` | Stops Signal K until `signalk start`, reboots included; data and settings stay |
+| `signalk update` | Updates the installer's scripts and container templates |
+| `signalk resetadmin` | Sets a new admin password |
+| `signalk kiosk enable` | Boots this box's screen into Signal K (Linux) |
+| `signalk bug-report` | Packs logs and the installation's state into one file for an issue |
+| `signalk uninstall` | Removes the Signal K services and keeps your data |
+| `signalk help` | Lists every command |
 
-```bash
-devpod up github.com/dirkwa/signalk-universal-installer
-# or: clone + VS Code → "Reopen in Container"
-# or, on a box the installer already provisioned (installs devpod itself):
-signalk devpod up
-```
+On Windows, `signalk` works in any new terminal. On macOS the stack runs in a Podman machine: open a shell there with `podman machine ssh signalk` and run `~/.local/bin/signalk`.
 
-See [docs/devcontainer.md](docs/devcontainer.md) for plugin/server/installer workflows, NMEA 2000 access, and troubleshooting.
+## Updates
+
+- **Signal K**: Updater Console → Versions. Pick a version, or roll back to the previous one.
+- **Updater and Doctor**: Updater Console → Dashboard.
+- **Installer scripts**: `signalk update`.
+
+## When something goes wrong
+
+1. `signalk health` shows what is down.
+2. Updater Console → Versions → roll back to the previous Signal K version.
+3. Doctor Console → Recover restores the last setup that worked. It does not need the Updater.
+4. Over SSH, when neither console answers: `signalk recover rollback-all` restores the last working setup with no container running.
+
+Forgot the admin password: `signalk resetadmin`. To report a problem, run `signalk bug-report` and attach the file to a [GitHub issue](https://github.com/dirkwa/signalk-universal-installer/issues). [docs/recovery.md](docs/recovery.md) goes through each case.
 
 ## Known limitations
 
-- **Toggling an individual device on or off means editing `hardware.json`.** Re-*detection* is a one-liner (`signalk hardware rescan`), and the `POST /api/hardware/apply` endpoint works end-to-end, but the Updater Console doesn't expose a Hardware tab — so switching a detected device off, rather than picking up a new one, still means editing the `enabled` field directly.
-- **The signalk-container config panel does not gate Stop / Remove on `io.signalk.persistent=true`.** Engine Quadlets are stamped with the label and `signalk-container` reads it from `ContainerConfig.labels`, but the UI still offers Stop and Remove buttons for engine containers. Pressing them takes the stack down; recover via the Doctor Console or `~/.local/bin/signalk-recovery`.
-- **Real-hardware smoke tests run in front of physical devices.** Pi 5 / Pi 4 / macOS Podman Machine + USB / WSL2 + usbipd are documented in `docs/installation.md` but not part of the CI matrix.
+- **Switching a detected device off** means editing `~/.signalk-updater/hardware.json`; the Updater Console has no hardware tab yet. [docs/hardware.md](docs/hardware.md#re-running-detection) has the steps.
+- **The Stop and Remove buttons in the signalk-container plugin** are also offered for the stack's own containers, and pressing them takes Signal K down. Bring it back from the Doctor Console or with `signalk recover rollback-all`.
 
-## Predecessor
+## More
 
-The legacy "Universal Installer" with bundled Keeper, Caddy, Kopia, InfluxDB, and Grafana is preserved at [signalk-universal-installer-v1](https://github.com/dirkwa/signalk-universal-installer-v1) (archived) and locally on the `legacy-v1-keeper` branch / `v1-keeper-final` tag.
+| Document | Covers |
+|---|---|
+| [docs/installation.md](docs/installation.md) | Each install step per platform, ports, re-running, [unreleased versions](docs/installation.md#release-channels) |
+| [docs/hardware.md](docs/hardware.md) | USB, CAN, Bluetooth, audio and input passthrough |
+| [docs/socketcan.md](docs/socketcan.md) | CAN HATs on a Raspberry Pi |
+| [docs/halpi2.md](docs/halpi2.md) | Hat Labs HALPI2 |
+| [docs/kiosk.md](docs/kiosk.md) | Kiosk mode |
+| [docs/recovery.md](docs/recovery.md) | Recovery, case by case |
+| [docs/architecture.md](docs/architecture.md) | How the stack is built, and the repositories behind it |
+| [docs/development.md](docs/development.md) | Developing plugins or the server on an installed box |
+| [docs/devcontainer.md](docs/devcontainer.md) | The development container, in detail |
+
+For development, `signalk devpod up` sets up a separate Signal K server on port 4000 with plugin linking and the test tools, without touching the installed one ([docs/development.md](docs/development.md)).
+
+The older installer, with Keeper, Caddy, Kopia, InfluxDB and Grafana bundled, is archived at [signalk-universal-installer-v1](https://github.com/dirkwa/signalk-universal-installer-v1) and on this repository's `legacy-v1-keeper` branch and `v1-keeper-final` tag.
