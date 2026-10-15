@@ -803,15 +803,17 @@ autologin_has_token_signin() {
 }
 
 # Sets SIGNIN_TOKEN (the kiosk's sign-in token), SIGNIN_CHANGED (installed |
-# enabled | empty — what the kiosk did to signalk-autologin) and
-# SIGNIN_USER_CREATED (1 when this run created the Signal K user). $3 is 1
-# when an earlier enable created it. Non-zero when token sign-in is not usable;
-# the kiosk then opens its page signed out.
+# enabled | empty — what the kiosk did to signalk-autologin),
+# SIGNIN_USER_CREATED (1 when this run created the Signal K user) and
+# SIGNIN_USER_TYPE (the Signal K user's type once this run has created or
+# checked it, empty before). $3 is 1 when an earlier enable created it.
+# Non-zero when token sign-in is not usable.
 ensure_sign_in() {
     local base="$1" sk_type="$2" created_before="$3" token state users current tok code
     SIGNIN_TOKEN=""
     SIGNIN_CHANGED=""
     SIGNIN_USER_CREATED=""
+    SIGNIN_USER_TYPE=""
     if ! token=$(admin_token); then
         warn "no admin token at ${DOCTOR_DATA}/signalk-token — cannot set up the kiosk's sign-in"
         return 1
@@ -908,6 +910,7 @@ ensure_sign_in() {
             return 1
         fi
     fi
+    SIGNIN_USER_TYPE="$sk_type"
 
     tok=$(podman exec "$SK_CONTAINER" "$SK_TOKEN_BIN" -u "$SK_KIOSK_USER" -e 10y \
         -s "$SK_SECURITY_PATH" 2>/dev/null | tail -1 || true)
@@ -1037,7 +1040,7 @@ resolve_url() {
 cmd_enable() {
     local want_url="" url_defaulted=0 browser=chromium autologin=1 sk_type=admin scheme=dark screen_pause=on
     local base bin pkgs=() dock_status
-    local prev_dm dm_now url signin=none prev_signin changed user_created token tls_origin
+    local prev_dm dm_now url signin=none prev_signin prev_type changed user_created token tls_origin
     while (( $# )); do
         case "$1" in
             --url)          want_url="${2:?--url needs a path or URL}"; shift 2 ;;
@@ -1187,6 +1190,13 @@ cmd_enable() {
             warn "settings, plugins and users (--readwrite for a screen that should not)."
             warn "Other devices still log in."
         fi
+        # The server restarts on its own now and then (an update, the
+        # updater's self-heal); a sign-in set up against one that is down
+        # fails.
+        if ! curl -fsS -m 3 -o /dev/null "${base}/signalk" 2>/dev/null; then
+            info "the Signal K server is not answering; waiting up to 300s for it"
+            wait_for_server "$base" || warn "the Signal K server did not answer within 300s"
+        fi
         # Recorded even when a later step fails, so disable still undoes it.
         ensure_sign_in "$base" "$sk_type" "$user_created" && signin=token
         [[ -z "$SIGNIN_CHANGED" ]] || changed="$SIGNIN_CHANGED"
@@ -1197,7 +1207,25 @@ cmd_enable() {
             run_root chgrp "$KIOSK_USER" "$TOKEN_FILE"
             ok "the kiosk signs in as Signal K user ${SK_KIOSK_USER} (${sk_type}); other devices are unaffected"
         else
-            warn "the kiosk will open its page signed out"
+            # A failed setup says nothing about the token an earlier enable
+            # wrote, so the kiosk keeps it — unless it is an admin's and this
+            # run asked for readwrite: a screen meant to lose admin must not
+            # keep it. The user's type as it is now: changed by this run, or
+            # as the earlier enable left it.
+            prev_type=$(conf_get KIOSK_SK_USER_TYPE)
+            prev_type="${SIGNIN_USER_TYPE:-${prev_type:-$sk_type}}"
+            if [[ "$prev_signin" == token && -s "$TOKEN_FILE" ]] \
+                    && [[ "$prev_type" == "$sk_type" || "$prev_type" == readwrite ]]; then
+                signin=token
+                sk_type="$prev_type"
+                warn "the kiosk keeps the sign-in an earlier enable set up; run \`signalk kiosk enable\`"
+                warn "again once the server answers to finish this one"
+            else
+                if [[ "$prev_signin" == token ]]; then
+                    warn "the kiosk's ${prev_type} sign-in could not be switched to ${sk_type}, so it is removed"
+                fi
+                warn "the kiosk will open its page signed out"
+            fi
         fi
     fi
     if [[ "$signin" != token ]]; then

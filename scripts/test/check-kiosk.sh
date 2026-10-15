@@ -650,8 +650,17 @@ cfg="$HOME/.signalk/plugin-config-data/signalk-autologin.json"
 # file holds.
 admin="$STUB_ADMIN"
 echo "$method $url" >>"$s/requests"
-# A stopped server: connection refused.
-[[ -e "$s/server-down" && "$url" == "$sk/"* ]] && exit 7
+# A stopped server: connection refused. A number in server-down is how many
+# more requests it refuses before it is back.
+if [[ -e "$s/server-down" && "$url" == "$sk/"* ]]; then
+    n=$(cat "$s/server-down")
+    [[ -n "$n" ]] || exit 7
+    if (( n > 0 )); then
+        echo $(( n - 1 )) >"$s/server-down"
+        exit 7
+    fi
+    rm -f "$s/server-down"
+fi
 if [[ -e "$s/old-answers" ]]; then
     n=$(cat "$s/old-answers")
     if (( n > 0 )); then
@@ -1125,6 +1134,65 @@ if grep -q 'getty@tty1\|lightdm' "$state/calls"; then
 else
     ok "the second disable leaves tty1 and the desktop alone"
 fi
+
+echo "  re-enable while the server is down"
+reset_box
+run_helper enable >/dev/null 2>&1 || true
+: >"$state/server-down"
+: >"$state/calls"
+rm -f "$state/user-calls" "$state/session-tokens"
+run_enable
+out_has 'the Signal K server is not answering; waiting up to 300s' "waits for the server before the sign-in"
+out_has 'the kiosk keeps the sign-in an earlier enable set up' "says the earlier sign-in stays"
+if [[ "$(cat "$tokfile" 2>/dev/null)" == "$JWT" ]]; then
+    ok "the token file stays"
+else
+    miss "token file after a failed re-enable: $(cat "$tokfile" 2>/dev/null)"
+fi
+conf_has 'KIOSK_SIGNIN=token' "conf: still token sign-in"
+conf_has 'KIOSK_SK_USER_TYPE=admin' "conf: the user's type as it is"
+conf_has 'KIOSK_SK_USER_CREATED=1' "conf: still records the user the kiosk created"
+call_not_made 'systemctl stop signalk-kiosk.service' "the browser's session cookie is not cleared"
+if [[ -s "$state/user-calls" ]]; then
+    miss "Signal K user calls with the server down: $(tr '\n' '|' <"$state/user-calls")"
+else
+    ok "no attempt to delete the kiosk's Signal K user"
+fi
+
+echo "  re-enable --readwrite while the server is down"
+# An admin kiosk asked to drop to readwrite must not stay admin.
+: >"$state/server-down"
+: >"$state/calls"
+rm -f "$state/user-calls"
+run_enable --readwrite
+out_has "the kiosk's admin sign-in could not be switched to readwrite, so it is removed" \
+    "says the admin sign-in goes"
+if [[ ! -e "$tokfile" ]]; then
+    ok "the admin token file is removed"
+else
+    miss "the admin token file stays after a failed switch to readwrite"
+fi
+conf_has 'KIOSK_SIGNIN=none' "conf: no sign-in"
+call_made 'systemctl stop signalk-kiosk.service' "the browser is stopped so its admin session cookie can be cleared"
+conf_has 'KIOSK_SK_USER_CREATED=1' "conf: the user it could not delete stays recorded for disable"
+rm -f "$state/server-down"
+run_helper enable >/dev/null 2>&1 || true
+
+echo "  re-enable while the server restarts"
+# Refuses the next 5 requests: the TLS probe and App Dock's status before the
+# sign-in step, then the sign-in step's first probe and two of its waits.
+echo 5 >"$state/server-down"
+: >"$state/calls"
+rm -f "$state/session-tokens"
+run_enable
+out_has 'the Signal K server is not answering; waiting up to 300s' "waits for the server before the sign-in"
+if [[ "$(cat "$state/session-tokens" 2>/dev/null)" == "$JWT" ]] && ! grep -q 'keeps the sign-in' <<<"$out"; then
+    ok "the server came back during the wait: a fresh token, checked against it"
+else
+    miss "after the wait: session POSTs $(tr '\n' '|' <"$state/session-tokens" 2>/dev/null), output $(grep -e 'keeps' -e 'signed out' <<<"$out" | tr '\n' '|')"
+fi
+conf_has 'KIOSK_SIGNIN=token' "conf: token sign-in"
+no_unexpected_requests
 
 echo "  disable after the desktop was uninstalled"
 reset_box
