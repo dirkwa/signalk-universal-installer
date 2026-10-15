@@ -4,8 +4,9 @@
 #
 #   1. Monitor scan against a fake sysfs tree, including the EDID name decode.
 #   2. Touchscreen detection against a stubbed udevadm.
-#   3. The rendered unit, PAM stack and slice carry the lines the kiosk depends
-#      on (seat session on tty1, getty conflict, the low-priority slice).
+#   3. The rendered unit, PAM stack and user-slice drop-in carry the lines the
+#      kiosk depends on (seat session on tty1, getty conflict, the low CPU
+#      weight).
 #      The screen watch, run against a fake sysfs and stubbed i2ctransfer and
 #      pkill: pauses the browser once a monitor that answered DDC/CI stays
 #      silent, resumes it on the next answer, never pauses for a monitor that
@@ -126,10 +127,10 @@ else
 fi
 
 # ── 3. rendered files ─────────────────────────────────────────────────────
-echo "rendered unit, PAM stack and slice"
+echo "rendered unit, PAM stack and user-slice drop-in"
 unit=$(PATH="$sysbin" bash -c ". '$TMPL'; render_unit")
 for want in 'User=signalk-kiosk' 'PAMName=signalk-kiosk' 'TTYPath=/dev/tty1' \
-            'Conflicts=getty@tty1.service' 'Slice=signalk-kiosk.slice' \
+            'Conflicts=getty@tty1.service' \
             'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' \
             'Restart=always' 'WantedBy=multi-user.target'; do
     if grep -qxF "$want" <<<"$unit"; then
@@ -138,17 +139,24 @@ for want in 'User=signalk-kiosk' 'PAMName=signalk-kiosk' 'TTYPath=/dev/tty1' \
         miss "unit lacks: $want"
     fi
 done
+# The kiosk's processes leave the unit's cgroup for the kiosk user's slice,
+# so a Slice= here would weight an empty cgroup.
+if grep -q '^Slice=' <<<"$unit"; then
+    miss "unit sets a slice its processes never run in: $(grep '^Slice=' <<<"$unit")"
+else
+    ok "unit: no Slice= (the processes run in the kiosk user's slice)"
+fi
 pam=$(PATH="$sysbin" bash -c ". '$TMPL'; render_pam")
 if grep -qE '^session +required +pam_systemd\.so class=user type=wayland$' <<<"$pam"; then
     ok "PAM: pam_systemd registers a user-class seat session"
 else
     miss "PAM stack lacks the pam_systemd session line"
 fi
-slice=$(PATH="$sysbin" bash -c ". '$TMPL'; render_slice")
-if grep -qxF 'CPUWeight=50' <<<"$slice"; then
-    ok "slice: CPUWeight below the default 100 of user.slice"
+slice=$(PATH="$sysbin" bash -c ". '$TMPL'; render_user_slice_dropin")
+if grep -qxF '[Slice]' <<<"$slice" && grep -qxF 'CPUWeight=50' <<<"$slice"; then
+    ok "user-slice drop-in: CPUWeight below the default 100 of the server's user slice"
 else
-    miss "slice lacks CPUWeight=50"
+    miss "user-slice drop-in lacks [Slice] CPUWeight=50"
 fi
 rule=$(PATH="$sysbin" bash -c ". '$TMPL'; render_udev_rule")
 if grep -qxF 'ACTION!="remove", SUBSYSTEM=="input", ATTRS{name}=="vc4-hdmi-[0-9]", ENV{ID_INPUT_POINTINGSTICK}=""' <<<"$rule"; then
@@ -903,7 +911,7 @@ conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service'
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed'
 conf_has 'KIOSK_SK_USER_CREATED=1'
 conf_has 'KIOSK_COLOR_SCHEME=dark' "conf: dark by default"
-for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/signalk-kiosk.slice \
+for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/user-999.slice.d/50-signalk-kiosk.conf \
          etc/pam.d/signalk-kiosk usr/local/lib/signalk-kiosk/browser \
          etc/udev/rules.d/61-signalk-kiosk-cec.rules \
          etc/systemd/system/signalk-kiosk-screen.service usr/local/lib/signalk-kiosk/screen-watch \
@@ -919,6 +927,8 @@ if [[ -x "$root/usr/local/lib/signalk-kiosk/browser" ]]; then
 else
     miss "launcher not executable"
 fi
+call_made 'systemctl set-property --runtime user-999.slice CPUWeight=50' \
+    "applies the weight to the running kiosk user's slice"
 if [[ -x "$root/usr/local/lib/signalk-kiosk/screen-watch" ]]; then
     ok "screen watch is executable"
 else
@@ -939,7 +949,21 @@ no_unexpected_requests
 
 echo "  re-enable before the reboot, desktop still running"
 : >"$state/calls"
+# What an enable before the weight moved to the user's slice wrote.
+printf '[Slice]\nCPUWeight=50\n' >"$root/etc/systemd/system/signalk-kiosk.slice"
+mkdir -p "$root/etc/systemd/system/user-998.slice.d"
+printf '[Slice]\nCPUWeight=50\n' >"$root/etc/systemd/system/user-998.slice.d/50-signalk-kiosk.conf"
 run_enable
+if [[ ! -e "$root/etc/systemd/system/signalk-kiosk.slice" ]]; then
+    ok "removes the old signalk-kiosk.slice"
+else
+    miss "the old signalk-kiosk.slice stays"
+fi
+if [[ ! -e "$root/etc/systemd/system/user-998.slice.d" && -f "$root/etc/systemd/system/user-999.slice.d/50-signalk-kiosk.conf" ]]; then
+    ok "removes a drop-in left for an earlier kiosk user's uid, writes the current one"
+else
+    miss "user-slice drop-ins: $(cd "$root/etc/systemd/system" && ls -d user-*.slice.d 2>/dev/null | tr '\n' ' ')"
+fi
 call_not_made 'systemctl restart signalk-kiosk.service' \
     "the disabled desktop still holds the screen: no kiosk restart"
 out_has 'the desktop is still running; reboot' "says to reboot"
@@ -1009,7 +1033,9 @@ fi
 call_made 'systemctl disable --now signalk-kiosk.service' "stops and disables the kiosk unit"
 call_made 'systemctl disable --now signalk-kiosk-screen.service' "stops and disables the screen watch"
 call_made 'systemctl enable --now lightdm.service' "gives the desktop login back"
-for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/signalk-kiosk.slice \
+call_made 'systemctl set-property --runtime user-999.slice CPUWeight=100' \
+    "puts the running kiosk user's slice back to the default weight"
+for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/user-999.slice.d \
          etc/pam.d/signalk-kiosk etc/signalk-kiosk.conf etc/signalk-kiosk.token \
          etc/udev/rules.d/61-signalk-kiosk-cec.rules \
          etc/systemd/system/signalk-kiosk-screen.service etc/modules-load.d/signalk-kiosk-i2c.conf \
