@@ -97,6 +97,8 @@ The launcher checks for a touchscreen (`ID_INPUT_TOUCHSCREEN=1` in udev) every t
 
 cage shows a mouse cursor only while a pointing device is connected. A Raspberry Pi always has one even with no mouse attached: the HDMI-CEC input of each HDMI port (`vc4-hdmi-0`, `vc4-hdmi-1`), which carries the TV remote's arrow keys and is tagged a pointing stick by udev. `enable` writes a udev rule that removes that tag, so the remote's keys still work and the cursor stays hidden until a real mouse is plugged in.
 
+Some touchscreens carry a USB hub with a serial port of their own beside the touch controller, for example an NXP `VCOM Port` used for the display's own control. Hardware detection passes it to the server like any USB serial device. The hub disconnects whenever the monitor is switched off, and `signalk-server` then starts without that port ([#309](https://github.com/dirkwa/signalk-universal-installer/issues/309)).
+
 The kiosk does not rotate the display (the official Raspberry Pi Touch Display 2 is portrait-native), map a touchscreen to one of several monitors, or provide an on-screen keyboard.
 
 ## Power cuts and boot order

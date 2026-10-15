@@ -65,16 +65,10 @@ fi
 # lifecycle, not the block contents. cmd_render_server reads it from
 # $HOME/.signalk-updater/hardware.json, so it must live there under $root.
 #
-# Serial devices are existence-guarded at render time, so the fixture's by-id
-# path must exist for the AddDevice= line to render (otherwise the block would
-# be empty and the lifecycle assertions, while still valid, wouldn't exercise
-# a serial device at all). Point SERIAL_DIR at a seeded temp node; the export
-# reaches both canonical() and the renderer spawned inside run_render.
-serialdir="$root/serial-by-id"
-mkdir -p "$serialdir"
-serial_byid="$serialdir/usb-FTDI_TEST-if00-port0"
-: >"$serial_byid"
-export SERIAL_DIR="$serialdir"
+# The renderer lists serial devices without checking that they exist (the
+# template's ExecStartPre checks at each start), so the by-id path is a name
+# only.
+serial_byid="$root/serial-by-id/usb-FTDI_TEST-if00-port0"
 
 mkdir -p "$root/.signalk-updater"
 hw="$root/.signalk-updater/hardware.json"

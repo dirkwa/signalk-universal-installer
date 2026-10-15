@@ -16,36 +16,11 @@ AUDIO_DIR="${AUDIO_DIR:-/dev/snd}"
 # Host path probed/mounted for the input class; overridable for the same
 # reason as AUDIO_DIR.
 INPUT_DIR="${INPUT_DIR:-/dev/input}"
-# Each serial device is emitted TWICE, deliberately.
-#
-#   AddDevice=<by-id>:<by-id>   the stable name, present inside the container
-#   AddDevice=<by-id>           podman resolves the symlink -> /dev/ttyUSB0
-#
-# The mapped form alone is not enough. It is the better path to configure --
-# a boat with two USB serial devices (an NGT-1 and a GPS) can have them swap
-# on reboot, and SignalK would read the wrong one from a config that still
-# looks correct -- but /dev/ttyUSB0 is what the SignalK UI offers and what
-# every existing config and forum post already says. Publishing only the
-# by-id name replaces "permission denied" with "No such file or directory"
-# for those users: a different error, not a fixed install. Emitting both
-# leaves existing configs working while making the stable name available.
-#
-# The existence guard below copes with both forms: it strips from the FIRST
-# colon to get the host path.
-#
-# Directory the serial AddDevice= existence guard stats against. Real serial
-# by-id symlinks live under /dev/serial/by-id; overridable (like AUDIO_DIR)
-# so the render test can seed present/absent device nodes deterministically
-# without touching the host's /dev.
-SERIAL_DIR="${SERIAL_DIR:-/dev/serial/by-id}"
 # Host directory of the halpid socket (HALPI2 power/watchdog daemon,
 # docs/halpi2.md). Mounted for the `signalk-halpi` plugin only when the
 # board is a HALPI2 and the socket exists at render time; overridable for
 # the render tests, same as AUDIO_DIR.
 HALPID_RUN_DIR="${HALPID_RUN_DIR:-/run/halpid}"
-# Prefix that marks an `onboardSerial` AddDevice= line for the existence
-# guard (fixed UARTs are /dev/ttyAMA*, /dev/ttyS*); overridable for tests.
-TTY_PREFIX="${TTY_PREFIX:-/dev/tty}"
 
 if [[ -z "$TEMPLATE" ]]; then
     # Default: look next to this script (../../quadlets/...)
@@ -62,56 +37,55 @@ if [[ ! -f "$HW_FILE" ]]; then
     exit 1
 fi
 
-# Drop serial AddDevice= lines whose device node is absent at render time.
-# hardware.json records what detect-hardware.sh saw at DETECT time, but a
-# USB-serial adapter can disappear between detect and render — physically
-# unplugged, or a flaky device that re-enumerates (a CH340/ACM adapter drops
-# its /dev/serial/by-id symlink while it re-enumerates). An AddDevice= pointing
-# at a path podman can't stat fails container creation hard (exit 125) BEFORE
-# the app starts, so one absent optional serial device crashloops the whole
-# server. This mirrors the render-time existence guard the audio (/dev/snd)
-# and avahi-socket lines below already have: emit the line only when the
-# device node exists, otherwise silently drop it (the server still starts;
-# that one input source is just absent) rather than bricking.
+# Serial devices (USB `serial` by-id paths and the fixed `onboardSerial`
+# UARTs) are NOT AddDevice= lines. Quadlet bakes an AddDevice= into the unit's
+# ExecStart as `--device`, and podman fails container creation (exit 125)
+# when that path is missing at start. A render-time existence check cannot
+# cover it: a device present at render can be gone at a later start. Issue
+# #309 is the case: a touchscreen whose USB hub, and the serial port behind
+# it, disconnects whenever the monitor is switched off, so every server start
+# with the monitor off failed and the server stayed down for hours.
 #
-# Scope is deliberately SERIAL ONLY — matched by the /dev/serial/by-id/
-# prefix, plus the fixed on-SoC UARTs the `onboardSerial` class emits as
-# AddDevice=/dev/tty* (HALPI2 RS-485 on /dev/ttyAMA4). CAN's
-# AddDevice=/dev/<iface> is left untouched: socketcan is a
-# network device, not a /dev node, so an existence test on /dev/<iface>
-# would strip every legitimate CAN line. (signalk-server runs Network=host,
-# so the CAN interface is reachable regardless; guarding it correctly is a
-# separate concern and out of scope here.) Volume= and every other line
-# pass through untouched. Reads stdin, writes stdout.
-guard_adddevice() {
-    local line dev
-    while IFS= read -r line; do
-        case "$line" in
-            "AddDevice=${SERIAL_DIR}/"*|"AddDevice=${TTY_PREFIX}"*)
-                # Strip the "AddDevice=" prefix, then any ":perms" suffix
-                # (e.g. AddDevice=/dev/foo:rwm) to get the host path to stat.
-                dev=${line#AddDevice=}
-                dev=${dev%%:*}
-                # Explicit if, not `[ -e ] && printf`: the guard runs in a
-                # `... | guard_adddevice` pipe under set -euo pipefail, and a
-                # short-circuited && leaves the loop (and the function) with
-                # status 1 on a skipped device — the very case this exists to
-                # handle — which would abort rendering. An if makes the skip a
-                # success.
-                if [ -e "$dev" ]; then
-                    printf '%s\n' "$line"
-                fi
-                ;;
-            *)
-                printf '%s\n' "$line"
-                ;;
-        esac
-    done
+# Instead this renders the [Service] SERIAL DEVICES block: one
+# Environment="SIGNALK_SERIAL_DEVICES=<path> <path> ..." line listing the
+# enabled devices. The template's ExecStartPre turns the devices that exist
+# at THAT start into --device arguments (see the template for the wait, the
+# two forms per by-id device, and the log line for absent ones). Absent
+# devices are listed anyway, so a device that comes back is passed at the
+# next start without a re-render.
+#
+# A path is listed only if it is made of characters that survive the unit
+# file and the ExecStartPre word split unchanged; udev's by-id names
+# (usb-<vendor>_<model>_<serial>-if<NN>[-port<N>]) and /dev/ttyAMA* do. A
+# rejected path is named in a comment in the block rather than on stderr,
+# for the same reason as warn_input_group_skip below.
+serial_devices_block() {
+    local paths path list=""
+    if command -v jq >/dev/null 2>&1; then
+        paths=$(jq -r '
+            ((.serial // [])[] | select(.enabled == true) | .byId // empty),
+            ((.onboardSerial // [])[] | select(.enabled == true) | .device // empty)
+        ' "$HW_FILE")
+    else
+        # No jq — minimal grep/sed parser: by-id paths only, and the enabled
+        # flag is not read.
+        paths=$(grep -oE '"byId":"[^"]+"' "$HW_FILE" | sed 's/.*"byId":"\(.*\)"$/\1/')
+    fi
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        if [[ "$path" =~ ^/[A-Za-z0-9._/:+@,=-]+$ ]]; then
+            list="${list:+$list }$path"
+        else
+            echo "# serial device not passed (unsupported characters): $path"
+        fi
+    done <<<"$paths"
+    if [ -n "$list" ]; then
+        echo "Environment=\"SIGNALK_SERIAL_DEVICES=$list\""
+    fi
 }
 
-# Build the AddDevice/Volume block from hardware.json. We use jq if present
-# (best); otherwise fall back to a sed-based extractor that handles the
-# narrow shape detect-hardware.sh emits.
+# Build the AddDevice/Volume block from hardware.json. The CAN/BLE/GPIO lines
+# need jq; the audio and input lines below have a grep fallback.
 # Bluetooth note: the volume is the signalk-dbus-proxy sidecar's named
 # socket volume, NOT a bind mount of the host's /run/dbus. A direct bind
 # mount cannot work under rootless podman on hosts where the SignalK user
@@ -149,30 +123,22 @@ warn_input_group_skip() {
 }
 
 hardware_block() {
-    {
+    # Serial devices are not in this block; serial_devices_block above
+    # renders them. Without jq, CAN/BLE/GPIO are not rendered at all.
     if command -v jq >/dev/null 2>&1; then
         # Each clause is parenthesized so its `|` pipeline stays local to
         # the array element. Without the parens, jq's `|` binds across the
-        # whole comma-list: the serial stream gets piped into the next
+        # whole comma-list: one clause's stream gets piped into the next
         # clause's `select(.enabled ...)`, which indexes the already-built
         # "AddDevice=..." string and errors with "Cannot index string".
         jq -r '
           [
-            ((.serial // [])[] | select(.enabled == true)
-                | ("AddDevice=" + .byId + ":" + .byId), ("AddDevice=" + .byId)),
-            ((.onboardSerial // [])[] | select(.enabled == true) | "AddDevice=" + .device),
             ((.can // [])[] | select(.enabled == true) | "AddDevice=/dev/" + .interface),
             ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=signalk-dbus-socket:/run/dbus:rw"),
             ((.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem")
           ] | .[]
         ' "$HW_FILE"
-    else
-        # No jq — minimal grep/sed parser. Handles serial-by-id only;
-        # CAN/BLE/GPIO require jq.
-        grep -oE '"byId":"[^"]+"' "$HW_FILE" \
-            | sed 's/.*"byId":"\(.*\)"$/AddDevice=\1:\1\nAddDevice=\1/'
     fi
-    } | guard_adddevice
 
     # ALSA /dev/snd view (the `audio` class in hardware.json). This is NOT
     # audio access for signalk-server itself: signalk-container runs INSIDE
@@ -260,10 +226,22 @@ hardware_block() {
     fi
 }
 
-# Stream the template, replacing the HARDWARE block.
-awk -v hw_block="$(hardware_block)" '
-    BEGIN { in_hw = 0 }
-    /^# === BEGIN HARDWARE/ { print; print hw_block; in_hw = 1; next }
-    /^# === END HARDWARE/   { in_hw = 0; print; next }
-    !in_hw                  { print }
+serial_block=$(serial_devices_block)
+
+# A template from before the SERIAL DEVICES block has no place for the list,
+# and its ExecStart would not read it: rendering against it would drop every
+# serial device without a word. Refuse instead, so `signalk render-server`
+# leaves the live Quadlet as it is.
+if [ -n "$serial_block" ] && ! grep -q '^# === BEGIN SERIAL DEVICES' "$TEMPLATE"; then
+    echo "render-server-quadlet: $TEMPLATE has no SERIAL DEVICES block; refusing to drop the serial devices in $HW_FILE" >&2
+    exit 1
+fi
+
+# Stream the template, replacing the HARDWARE and SERIAL DEVICES blocks.
+awk -v hw_block="$(hardware_block)" -v serial_block="$serial_block" '
+    BEGIN { skip = 0 }
+    /^# === BEGIN HARDWARE/       { print; print hw_block; skip = 1; next }
+    /^# === BEGIN SERIAL DEVICES/ { print; print serial_block; skip = 1; next }
+    /^# === END (HARDWARE|SERIAL DEVICES)/ { skip = 0; print; next }
+    !skip                         { print }
 ' "$TEMPLATE"

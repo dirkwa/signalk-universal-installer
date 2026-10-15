@@ -208,6 +208,12 @@ Label=io.signalk.role=server
 # /api/hardware/apply. Do not edit by hand.
 # === END HARDWARE ===
 
+# Serial devices reach podman here, not through AddDevice= lines: the second
+# ExecStartPre in [Service] writes --device arguments for the devices in
+# SIGNALK_SERIAL_DEVICES that exist at this start, and systemd splits the
+# value into separate arguments. Unset or empty, it adds none.
+PodmanArgs=$SIGNALK_DEVICE_ARGS
+
 [Service]
 # Restart=always rather than on-failure: the SignalK admin UI's "Restart"
 # button calls process.exit(0) on the server, which is a CLEAN exit
@@ -235,6 +241,46 @@ RestartSec=10
 # recreates the server once DNS configuration appears. Counts against
 # TimeoutStartSec=300 below, well inside that budget.
 ExecStartPre=/bin/sh -c 'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -qs "^nameserver" /etc/resolv.conf && break; sleep 1; done; exit 0'
+# Serial devices (USB by-id paths and onboard UARTs), rendered from
+# ~/.signalk-updater/hardware.json by render-server-quadlet.sh as
+# SIGNALK_SERIAL_DEVICES. Do not edit by hand.
+# === BEGIN SERIAL DEVICES (managed by signalk-universal-installer) ===
+# === END SERIAL DEVICES ===
+# Pass only the serial devices that exist at this start. podman fails
+# container creation (exit 125) on a --device path that is missing, and
+# with AddDevice= lines one absent device kept the whole server down: in
+# issue #309 a touchscreen's serial port disappeared whenever the monitor
+# was switched off, and every start with the monitor off failed for hours.
+# This writes PodmanArgs=$SIGNALK_DEVICE_ARGS (in [Container]) into the
+# EnvironmentFile below, which systemd reads again for ExecStart.
+#
+# A by-id symlink is passed twice: as <by-id>:<by-id>, the stable name inside
+# the container, and bare, which podman resolves to the real node
+# (/dev/ttyUSB0), the name existing connection configs use. A plain node
+# (/dev/ttyAMA4) is passed once.
+#
+# An absent device is waited for up to 15s (SIGNALK_DEVICE_WAIT) before the
+# server starts without it, so a USB device that enumerates after the user
+# manager started at boot is still passed; the AddDevice= failure and its 10s
+# restart used to do that by accident. No wait when every device is present.
+# Devices left out are named in this unit's journal. Always exits 0, and the
+# file is replaced on every start, so no start reuses an earlier list.
+EnvironmentFile=-%t/signalk-server-devices.env
+ExecStartPre=/bin/sh -c 'f=%t/signalk-server-devices.env; n=$${SIGNALK_DEVICE_WAIT:-15}; \
+    while :; do \
+        missing=; \
+        for d in $$SIGNALK_SERIAL_DEVICES; do [ -e "$$d" ] || missing="$$missing $$d"; done; \
+        if [ -z "$$missing" ] || [ "$$n" -le 0 ]; then break; fi; \
+        n=$$((n - 1)); sleep 1; \
+    done; \
+    args=; \
+    for d in $$SIGNALK_SERIAL_DEVICES; do \
+        [ -e "$$d" ] || continue; \
+        if [ -L "$$d" ]; then args="$$args --device $$d:$$d --device $$d"; else args="$$args --device $$d"; fi; \
+    done; \
+    if [ -n "$$missing" ]; then echo "starting without absent serial device(s):$$missing" >&2; fi; \
+    echo "SIGNALK_DEVICE_ARGS=$$args" >"$$f.tmp" && mv -f "$$f.tmp" "$$f"; \
+    exit 0'
 # 300s (was 180): on an SD-card host `podman run --replace --rm` can take
 # minutes just to CREATE the container under concurrent I/O (the cold plugin
 # `npm install` runs in the same window) — observed timing out at 180s, getting

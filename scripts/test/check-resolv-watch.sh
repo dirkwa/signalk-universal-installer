@@ -245,11 +245,14 @@ fi
 
 # ── 5. Server Quadlet template carries the bounded pre-start wait ───────────
 
-# One directive, and that same directive must be a BOUNDED wait (a finite
-# `for` list, not an open-ended loop) that always exits 0 — an unbounded or
-# non-fail-safe variant would block server startup on offline boats.
-prestart_count=$(grep -c '^ExecStartPre=' "$QUADLET_TMPL" || true)
-prestart=$(grep '^ExecStartPre=' "$QUADLET_TMPL" || true)
+# One resolver-wait directive, and that same directive must be a BOUNDED wait
+# (a finite `for` list, not an open-ended loop) that always exits 0 — an
+# unbounded or non-fail-safe variant would block server startup on offline
+# boats. Only ExecStartPre= lines that read /etc/resolv.conf are counted: the
+# template has a second ExecStartPre for the serial devices (#309), which
+# check-render-quadlet.sh covers.
+prestart_count=$(grep -c '^ExecStartPre=.*/etc/resolv\.conf' "$QUADLET_TMPL" || true)
+prestart=$(grep '^ExecStartPre=.*/etc/resolv\.conf' "$QUADLET_TMPL" || true)
 if [[ "$prestart_count" == "1" ]] \
     && printf '%s' "$prestart" | grep -Eq \
         'for _ in [0-9 ]+; do grep -qs "\^nameserver" /etc/resolv\.conf && break; sleep 1; done; exit 0'; then
