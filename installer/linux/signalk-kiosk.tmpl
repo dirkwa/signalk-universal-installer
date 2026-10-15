@@ -289,8 +289,9 @@ render_conf() {
     cat <<EOF
 # Written by \`signalk kiosk enable\`; rewritten on every enable.
 # ${LAUNCHER} reads the KIOSK_URL, KIOSK_BROWSER, KIOSK_BASE, KIOSK_SIGNIN and
-# KIOSK_COLOR_SCHEME lines; \`signalk kiosk status\` also KIOSK_SCREEN_PAUSE.
-# The rest records what \`signalk kiosk disable\` has to put back.
+# KIOSK_COLOR_SCHEME lines. KIOSK_SCREEN_PAUSE records whether enable installed
+# the screen watch (\`signalk kiosk status\` checks its unit file). The rest
+# records what \`signalk kiosk disable\` has to put back.
 KIOSK_URL=${url}
 KIOSK_BROWSER=${browser}
 KIOSK_BASE=${base}
