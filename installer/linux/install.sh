@@ -3044,6 +3044,15 @@ elif [[ "$ADMIN_UNSECURED" = "1" ]]; then
   Admin login      : NONE — server is UNSECURED; create an admin in the UI now"
 fi
 
+# Advertise the kiosk only where `signalk kiosk enable` can run: its
+# need_debian_family check refuses a box without apt-get, which includes the
+# Fedora podman-machine VM that macOS and Windows install into.
+KIOSK_SUMMARY=""
+if command -v apt-get >/dev/null 2>&1; then
+    KIOSK_SUMMARY="
+  signalk kiosk enable   boot this box's screen straight into Signal K"
+fi
+
 cat <<EOF
 
 ${SUMMARY_HEADLINE}
@@ -3059,9 +3068,8 @@ Auth tokens are at:
   Doctor  : ${DOCTOR_DATA}/token   (mode 0600)
 
 The 'signalk' command:
-  signalk health         show stack health
+  signalk health         show stack health${KIOSK_SUMMARY}
   signalk recover        delegate to the SSH-only recovery script
-  signalk socketcan      Pi CAN-HAT detection + setup recipe
   signalk update         refresh installer scripts + Quadlet templates via doctor
   signalk resetadmin     reset (or create) the Admin UI login password
   signalk bug-report     bundle logs + state for an issue report
