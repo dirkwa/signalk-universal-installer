@@ -445,10 +445,10 @@ scan_fails_case "log scan error quotes podman, no timeout claim" 125 \
 
 # A server podman cannot create (#309: a --device path missing at start) has
 # no container log; the reason is the `Error:` line podman wrote to the unit's
-# journal before exiting 125. cmd_health must quote it while the unit is not
-# running, and stay quiet about it once the unit runs again.
+# journal before exiting 125. cmd_health must quote it while the server is
+# down, and stay quiet about it once the server answers again.
 start_error_case() {
-    local label="$1" sub_state="$2" want="$3" forbid="${4:-}"
+    local label="$1" probe="$2" want="$3" forbid="${4:-}"
     local out home="$tmp/home" crc=0
     rm -rf "$home"; mkdir -p "$home/.cache"
     out=$(
@@ -460,9 +460,9 @@ start_error_case() {
             export SIGNALK_URL="http://stub" UPDATER_URL="http://stub" DOCTOR_URL="http://stub"
             unset XDG_RUNTIME_DIR
             mkdir -p "$QUADLET_DIR"
-            export SIM_SUB="$sub_state"
+            export SIM_PROBE="$probe"
             # shellcheck disable=SC2317  # invoked from the eval'd function
-            health_probe() { printf 'down 0\n'; }
+            health_probe() { printf '%s 0.1\n' "$SIM_PROBE"; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             pub_url() { printf '%s' "$1"; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
@@ -470,7 +470,7 @@ start_error_case() {
                 case "$*" in
                     *NRestarts*) printf '0\n' ;;
                     *ExecMainStatus*) printf '125\n' ;;
-                    *SubState*) printf '%s\n' "$SIM_SUB" ;;
+                    *Result*) printf 'exit-code\n' ;;
                     *) : ;;
                 esac
             }
@@ -506,12 +506,12 @@ start_error_case() {
         ok "$label"
     fi
 }
-start_error_case "exit 125 while not running -> [FAIL] quoting the last Error: line" \
-    auto-restart 'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file'
+start_error_case "exit 125 while down -> quotes the last Error: line" \
+    down 'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file'
 start_error_case "exit 125 quotes only the newest Error: line" \
-    auto-restart '\[FAIL\] podman could not create' 'usb-OLD-if00'
-start_error_case "exit 125 recorded but running again -> no [FAIL] create line" \
-    running '=== SignalK Stack Health ===' 'podman could not create'
+    down 'podman could not create the signalk-server container' 'usb-OLD-if00'
+start_error_case "exit 125 recorded but the server answers -> no create line" \
+    ok '=== SignalK Stack Health ===' 'podman could not create'
 
 run_throw_case "quiet log -> no [THROW]" \
     "signalk-server running at 0.0.0.0:3000" \

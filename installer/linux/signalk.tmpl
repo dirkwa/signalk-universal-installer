@@ -315,7 +315,7 @@ cmd_health() {
     # recorded in the KERNEL journal). Best-effort — `show` on a missing
     # unit just yields empty values and prints nothing.
     if (( server_down )); then
-        local result main_status
+        local result main_status start_err
         result=$(systemctl --user show signalk-server.service \
             -p Result --value 2>/dev/null || true)
         main_status=$(systemctl --user show signalk-server.service \
@@ -342,6 +342,21 @@ cmd_health() {
             echo
             echo "  signalk-server is durably stopped (via 'signalk stop'). Start it"
             echo "  again with:  signalk start"
+        elif [[ "$main_status" == "125" ]]; then
+            # podman could not create the container, so there is no container
+            # log to read: podman wrote the reason to this unit's journal and
+            # exited 125. In #309 that was `Error: stat
+            # /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or
+            # directory`, repeated for four hours, and nothing here showed it.
+            start_err=$(journalctl --user -u signalk-server.service -n 200 \
+                --no-pager -o cat 2>/dev/null | grep -E '^Error: ' | tail -n 1 || true)
+            echo
+            echo "  podman could not create the signalk-server container (exit 125):"
+            if [[ -n "$start_err" ]]; then
+                echo "    ${start_err}"
+            else
+                echo "    journalctl --user -u signalk-server.service shows why"
+            fi
         elif [[ "$result" == "exit-code" && "$main_status" == "137" ]] \
             || [[ "$result" == "signal" && "$main_status" == "9" ]]; then
             # Two SIGKILL shapes, both typical of the kernel OOM killer under
@@ -447,29 +462,6 @@ cmd_health() {
                 echo "  signalk-server restart count: ${nrestarts} (run 'signalk health'"
                 echo "  again in a minute — a climbing count means a crash loop)"
             fi
-        fi
-    fi
-
-    # A server that cannot be created never gets a container log: podman stops
-    # before the container exists, prints the reason on stderr into this
-    # unit's journal and exits 125. In #309 that was `Error: stat
-    # /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or
-    # directory`, repeated for four hours, and neither the probe above nor the
-    # log scan below showed it. Quote the line while the unit is not running.
-    local main_status sub_state start_err
-    main_status=$(systemctl --user show signalk-server.service \
-        -p ExecMainStatus --value 2>/dev/null || true)
-    sub_state=$(systemctl --user show signalk-server.service \
-        -p SubState --value 2>/dev/null || true)
-    if [[ "$main_status" == "125" && "$sub_state" != "running" ]]; then
-        start_err=$(journalctl --user -u signalk-server.service -n 200 \
-            --no-pager -o cat 2>/dev/null | grep -E '^Error: ' | tail -n 1 || true)
-        echo
-        echo "  [FAIL] podman could not create the signalk-server container (exit 125):"
-        if [[ -n "$start_err" ]]; then
-            echo "         ${start_err}"
-        else
-            echo "         journalctl --user -u signalk-server.service shows why"
         fi
     fi
 
