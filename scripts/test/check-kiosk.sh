@@ -971,7 +971,7 @@ fi
 if [[ ! -e "$root/etc/systemd/system/user-998.slice.d" && -f "$root/etc/systemd/system/user-999.slice.d/50-signalk-kiosk.conf" ]]; then
     ok "removes a drop-in left for an earlier kiosk user's uid, writes the current one"
 else
-    miss "user-slice drop-ins: $(cd "$root/etc/systemd/system" && ls -d user-*.slice.d 2>/dev/null | tr '\n' ' ')"
+    miss "user-slice drop-ins: $(cd "$root/etc/systemd/system" && printf '%s ' user-*.slice.d)"
 fi
 call_not_made 'systemctl restart signalk-kiosk.service' \
     "the disabled desktop still holds the screen: no kiosk restart"
