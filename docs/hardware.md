@@ -45,7 +45,7 @@ signalk hardware status    # what was detected, and when
 signalk hardware rescan    # re-detect, re-render the Quadlet, restart if it changed
 ```
 
-`rescan` carries your operator toggles across the re-detect — a fresh detection reports bluetooth and GPIO as disabled, audio and input at their `/dev/snd`- and `/dev/input`-derived defaults, and every USB serial device as enabled, so a naive overwrite would switch passthrough back to those defaults. The `enabled` of each USB serial device (matched by its `by-id` path) and CAN interface (matched by name) is carried too, and a device you switched off stays in the file, still off, while it is unplugged. If it cannot merge (no `jq`, or the payload is incomplete) it refuses to write rather than clobbering them. `--no-render` stops before touching the Quadlet.
+`rescan` carries your operator toggles across the re-detect: the bluetooth, GPIO, audio, input and on-board serial switches, and the `enabled` of each USB serial device (matched by its `by-id` path) and CAN interface (matched by name). A device you switched off stays in the file, still off, while it is unplugged. A device seen for the first time gets the detection default (see `installer/linux/detect-hardware.sh`). If it cannot merge (no `jq`, or the payload is incomplete) it refuses to write rather than clobbering your toggles. `--no-render` stops before touching the Quadlet.
 
 Re-running the bash installer also works and is idempotent, but it re-pulls every image as well; on an SD-card host that is minutes and a restarted server to pick up a device that is already plugged in.
 
