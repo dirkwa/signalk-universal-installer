@@ -545,7 +545,11 @@ nojq_bin="$tmp/nojq-bin"
 mkdir -p "$nojq_bin"
 IFS=: read -ra path_dirs <<<"$PATH"
 for d in "${path_dirs[@]}"; do
-    [[ -d "$d" ]] && ln -s "$d"/* "$nojq_bin"/ 2>/dev/null || true
+    if [[ -d "$d" ]]; then
+        # Names already linked from an earlier PATH entry fail; that is the
+        # PATH order the render would see.
+        ln -s "$d"/* "$nojq_bin"/ 2>/dev/null || true
+    fi
 done
 rm -f "$nojq_bin/jq"
 bash_bin=$(command -v bash)
