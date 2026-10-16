@@ -1397,13 +1397,37 @@ section "Hardware detection"
 # serial, CAN and onboardSerial devices (#309). The merge filter — and why
 # audio needs an explicit has() check rather than jq's `//` — lives in
 # lib/hardware-merge.sh, shared with check-hardware-merge.sh.
+#
+# When an existing file cannot be merged (no jq, or the merge fails or prints
+# nothing) it is kept as it is: writing the fresh detection would reset its
+# toggles to the detection defaults. The install goes on, since jq is
+# optional here (see the jq step above). A file that is not valid JSON (a
+# write cut short) holds no toggles to keep, so the fresh detection replaces
+# it and the old file is kept as hardware.json.bak.
+HW_FILE="$UPDATER_DATA/hardware.json"
 HW_FRESH=$("$HERE/detect-hardware.sh")
-if command -v jq >/dev/null 2>&1 && [[ -s "$UPDATER_DATA/hardware.json" ]]; then
-    HW_MERGED=$(hardware_merge "$UPDATER_DATA/hardware.json" <(printf '%s' "$HW_FRESH") 2>/dev/null) \
-        && [[ -n "$HW_MERGED" ]] && HW_FRESH="$HW_MERGED"
+HW_WRITE=1
+HW_KEPT=""
+if [[ -s "$HW_FILE" ]]; then
+    if ! command -v jq >/dev/null 2>&1; then
+        HW_WRITE=0
+        warn "jq unavailable: kept $HW_FILE unchanged so its toggles stay; devices attached since it was written are not added. Install jq and run 'signalk hardware rescan' to add them."
+    elif ! jq empty "$HW_FILE" >/dev/null 2>&1; then
+        cp -p "$HW_FILE" "$HW_FILE.bak"
+        warn "$HW_FILE is not valid JSON; replacing it with the fresh detection (old file: $HW_FILE.bak)"
+    elif HW_MERGED=$(hardware_merge "$HW_FILE" <(printf '%s' "$HW_FRESH") 2>/dev/null) \
+        && [[ -n "$HW_MERGED" ]]; then
+        HW_FRESH="$HW_MERGED"
+        HW_KEPT=" (operator toggles preserved)"
+    else
+        HW_WRITE=0
+        warn "could not merge the toggles in $HW_FILE into the fresh detection; kept it unchanged"
+    fi
 fi
-printf '%s\n' "$HW_FRESH" >"$UPDATER_DATA/hardware.json"
-ok "wrote $UPDATER_DATA/hardware.json (operator toggles preserved)"
+if (( HW_WRITE )); then
+    printf '%s\n' "$HW_FRESH" >"$HW_FILE"
+    ok "wrote $HW_FILE$HW_KEPT"
+fi
 
 # 9. Pull images
 section "Image pulls"

@@ -45,9 +45,9 @@ signalk hardware status    # what was detected, and when
 signalk hardware rescan    # re-detect, re-render the Quadlet, restart if it changed
 ```
 
-`rescan` carries your operator toggles across the re-detect: the bluetooth, GPIO, audio, input and on-board serial switches, and the `enabled` of each USB serial device (matched by its `by-id` path) and CAN interface (matched by name). A device you switched off stays in the file, still off, while it is unplugged. A device seen for the first time gets the detection default (see `installer/linux/detect-hardware.sh`). If it cannot merge (no `jq`, or the payload is incomplete) it refuses to write rather than clobbering your toggles. `--no-render` stops before touching the Quadlet.
+`rescan` carries your operator toggles across the re-detect: the bluetooth, GPIO, audio, input and on-board serial switches, and the `enabled` of each USB serial device (matched by its `by-id` path) and CAN interface (matched by name). A device you switched off stays in the file, still off, while it is unplugged. A device seen for the first time gets the detection default (see `installer/linux/detect-hardware.sh`). If it cannot merge (no `jq`, the payload is incomplete, or the merge fails) it refuses to write and leaves the file as it is. A `hardware.json` that is not valid JSON has no toggles left to keep, so it is replaced by the fresh detection and the old file is kept as `hardware.json.bak`. `--no-render` stops before touching the Quadlet.
 
-Re-running the bash installer also works and is idempotent, but it re-pulls every image as well; on an SD-card host that is minutes and a restarted server to pick up a device that is already plugged in.
+Re-running the bash installer also works and is idempotent, but it re-pulls every image as well; on an SD-card host that is minutes and a restarted server to pick up a device that is already plugged in. It merges the same way. When it cannot merge, it keeps the existing file unchanged and goes on with the install, so a device attached since that file was written is not added until a `rescan` with `jq` installed.
 
 ```bash
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash

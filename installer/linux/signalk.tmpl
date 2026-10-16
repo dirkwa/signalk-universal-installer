@@ -1124,7 +1124,7 @@ cmd_hardware() {
         return 1
     fi
 
-    local fresh
+    local fresh kept=""
     if ! fresh=$("$detect" 2>/dev/null) || [[ -z "$fresh" ]]; then
         echo "[ERR] hardware detection failed" >&2
         return 1
@@ -1132,15 +1132,25 @@ cmd_hardware() {
 
     # Merge only when we can: without jq (optional per install.sh) a fresh
     # write would clobber the toggles, so refuse rather than silently disable
-    # bluetooth or GPIO passthrough behind the operator's back.
+    # bluetooth or GPIO passthrough behind the operator's back. The same goes
+    # for a merge that fails or prints nothing. A file that is not valid JSON
+    # (a write cut short) holds no toggles to keep, so the fresh detection
+    # replaces it; the copy below keeps the old file as ${hw}.bak.
     if [[ -s "$hw" ]]; then
         if [[ -r "$merge" ]] && command -v jq >/dev/null 2>&1; then
             # shellcheck disable=SC1090
             . "$merge"
             local merged
-            if merged=$(hardware_merge "$hw" <(printf '%s' "$fresh") 2>/dev/null) \
+            if ! jq empty "$hw" >/dev/null 2>&1; then
+                echo "[WARN] $hw is not valid JSON; replacing it with the fresh detection (old file: ${hw}.bak)." >&2
+            elif merged=$(hardware_merge "$hw" <(printf '%s' "$fresh") 2>/dev/null) \
                 && [[ -n "$merged" ]]; then
                 fresh="$merged"
+                kept=" (operator toggles preserved)"
+            else
+                echo "[ERR] could not merge the toggles in $hw into the fresh detection." >&2
+                echo "      Refusing to overwrite $hw and reset them to the detection defaults." >&2
+                return 1
             fi
         else
             echo "[ERR] cannot merge operator toggles (needs jq + ${merge})." >&2
@@ -1151,7 +1161,7 @@ cmd_hardware() {
 
     cp -p "$hw" "${hw}.bak" 2>/dev/null || true
     printf '%s\n' "$fresh" >"$hw"
-    echo "[OK] wrote $hw (operator toggles preserved)"
+    echo "[OK] wrote $hw${kept}"
     if command -v jq >/dev/null 2>&1; then
         jq -r '(.serial // [])[] | "  serial: \(.byId)"' "$hw" 2>/dev/null || true
     fi
