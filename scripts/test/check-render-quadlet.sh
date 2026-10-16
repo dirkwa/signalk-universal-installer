@@ -537,6 +537,54 @@ else
     echo "  [OK]   fixture without board renders no HALPI2 lines"
 fi
 
+# 10. Without jq the renderer reads by-id paths with grep. It lists only an
+#     object that holds "enabled":true on its own line: the disabled entry
+#     and the entry spread over several lines are left out. PATH for this
+#     render is a directory of links to every command on PATH except jq.
+nojq_bin="$tmp/nojq-bin"
+mkdir -p "$nojq_bin"
+IFS=: read -ra path_dirs <<<"$PATH"
+for d in "${path_dirs[@]}"; do
+    [[ -d "$d" ]] && ln -s "$d"/* "$nojq_bin"/ 2>/dev/null || true
+done
+rm -f "$nojq_bin/jq"
+bash_bin=$(command -v bash)
+cat >"$tmp/hardware-nojq.json" <<JSON
+{
+  "serial": [
+    {"byId":"$serialdir/usb-ON-if00","vendor":"A","product":"B","enabled":true},
+    {"byId":"$serialdir/usb-OFF-if00","vendor":"A","product":"B","enabled":false},
+    {
+      "byId": "$serialdir/usb-SPLIT-if00",
+      "enabled": true
+    }
+  ],
+  "can": []
+}
+JSON
+if PATH="$nojq_bin" "$bash_bin" -c 'command -v jq' >/dev/null 2>&1; then
+    echo "  [MISS] could not hide jq for the no-jq render"
+    fail=1
+else
+    err_nojq="$tmp/stderr-nojq.log"
+    out_nojq=$(PATH="$nojq_bin" "$bash_bin" "$RENDER" "$tmp/hardware-nojq.json" "$TEMPLATE" 2>"$err_nojq") || {
+        echo "  [MISS] render (no jq) exited non-zero"
+        fail=1
+    }
+    if [[ -s "$err_nojq" ]]; then
+        echo "  [MISS] render (no jq) wrote to stderr:"
+        sed 's/^/         /' "$err_nojq"
+        fail=1
+    fi
+    if serial_block <<<"$out_nojq" | grep -qxF "Environment=\"SIGNALK_SERIAL_DEVICES=$serialdir/usb-ON-if00\""; then
+        echo "  [OK]   without jq only the enabled one-line entry is listed"
+    else
+        echo "  [MISS] without jq the serial list is not the enabled one-line entry alone:"
+        serial_block <<<"$out_nojq" | sed 's/^/         /'
+        fail=1
+    fi
+fi
+
 if (( fail )); then
     echo
     echo "[ERR] render-server-quadlet hardware block is broken — see entries above." >&2

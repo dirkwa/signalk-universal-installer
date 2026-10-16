@@ -67,9 +67,14 @@ serial_devices_block() {
             ((.onboardSerial // [])[] | select(.enabled == true) | .device // empty)
         ' "$HW_FILE")
     else
-        # No jq — minimal grep/sed parser: by-id paths only, and the enabled
-        # flag is not read.
-        paths=$(grep -oE '"byId":"[^"]+"' "$HW_FILE" | sed 's/.*"byId":"\(.*\)"$/\1/')
+        # No jq — minimal grep/sed parser: by-id paths only. An entry is
+        # listed only when the whole object, "enabled":true included, is on
+        # one line, the form detect-hardware.sh writes. An object spread over
+        # several lines (the Updater writes hardware.json pretty-printed) is
+        # not listed, because grep cannot tie its enabled flag to its path.
+        paths=$(grep -oE '\{[^{}]*"byId": *"[^"]+"[^{}]*\}' "$HW_FILE" \
+            | grep -E '"enabled": *true' \
+            | sed -E 's/.*"byId": *"([^"]+)".*/\1/')
     fi
     while IFS= read -r path; do
         [ -n "$path" ] || continue
