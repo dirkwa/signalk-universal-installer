@@ -1401,9 +1401,11 @@ section "Hardware detection"
 # When an existing file cannot be merged (no jq, or the merge fails or prints
 # nothing) it is kept as it is: writing the fresh detection would reset its
 # toggles to the detection defaults. The install goes on, since jq is
-# optional here (see the jq step above). A file that is not valid JSON (a
-# write cut short) holds no toggles to keep, so the fresh detection replaces
-# it and the old file is kept as hardware.json.bak.
+# optional here (see the jq step above). A file that is not one JSON object
+# (a write cut short, or two writes run together) holds no toggles to keep,
+# so the fresh detection replaces it once a copy is in hardware.json.bak.
+# hardware_merge slurps its inputs (`jq -s`), so a file with two objects
+# would pass its second one off as the fresh detection.
 HW_FILE="$UPDATER_DATA/hardware.json"
 HW_FRESH=$("$HERE/detect-hardware.sh")
 HW_WRITE=1
@@ -1412,12 +1414,12 @@ if [[ -s "$HW_FILE" ]]; then
     if ! command -v jq >/dev/null 2>&1; then
         HW_WRITE=0
         warn "jq unavailable: kept $HW_FILE unchanged so its toggles stay; devices attached since it was written are not added. Install jq and run 'signalk hardware rescan' to add them."
-    elif ! jq empty "$HW_FILE" >/dev/null 2>&1; then
+    elif ! jq -se 'length == 1 and (.[0] | type == "object")' "$HW_FILE" >/dev/null 2>&1; then
         if cp -p "$HW_FILE" "$HW_FILE.bak"; then
-            warn "$HW_FILE is not valid JSON; replacing it with the fresh detection (old file: $HW_FILE.bak)"
+            warn "$HW_FILE is not one JSON object; replacing it with the fresh detection (old file: $HW_FILE.bak)"
         else
             HW_WRITE=0
-            warn "$HW_FILE is not valid JSON and could not be copied to $HW_FILE.bak; kept it unchanged"
+            warn "$HW_FILE is not one JSON object and could not be copied to $HW_FILE.bak; kept it unchanged"
         fi
     elif HW_MERGED=$(hardware_merge "$HW_FILE" <(printf '%s' "$HW_FRESH") 2>/dev/null) \
         && [[ -n "$HW_MERGED" ]]; then

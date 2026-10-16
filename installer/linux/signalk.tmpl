@@ -1133,20 +1133,22 @@ cmd_hardware() {
     # Merge only when we can: without jq (optional per install.sh) a fresh
     # write would clobber the toggles, so refuse rather than silently disable
     # bluetooth or GPIO passthrough behind the operator's back. The same goes
-    # for a merge that fails or prints nothing. A file that is not valid JSON
-    # (a write cut short) holds no toggles to keep, so the fresh detection
-    # replaces it; the copy below keeps the old file as ${hw}.bak.
+    # for a merge that fails or prints nothing. A file that is not one JSON
+    # object (a write cut short, or two writes run together) holds no toggles
+    # to keep, so the fresh detection replaces it once a copy is in
+    # ${hw}.bak. hardware_merge slurps its inputs (`jq -s`), so a file with
+    # two objects would pass its second one off as the fresh detection.
     if [[ -s "$hw" ]]; then
         if [[ -r "$merge" ]] && command -v jq >/dev/null 2>&1; then
             # shellcheck disable=SC1090
             . "$merge"
             local merged
-            if ! jq empty "$hw" >/dev/null 2>&1; then
+            if ! jq -se 'length == 1 and (.[0] | type == "object")' "$hw" >/dev/null 2>&1; then
                 if ! cp -p "$hw" "${hw}.bak"; then
-                    echo "[ERR] $hw is not valid JSON and could not be copied to ${hw}.bak; refusing to replace it." >&2
+                    echo "[ERR] $hw is not one JSON object and could not be copied to ${hw}.bak; refusing to replace it." >&2
                     return 1
                 fi
-                echo "[WARN] $hw is not valid JSON; replacing it with the fresh detection (old file: ${hw}.bak)." >&2
+                echo "[WARN] $hw is not one JSON object; replacing it with the fresh detection (old file: ${hw}.bak)." >&2
             elif merged=$(hardware_merge "$hw" <(printf '%s' "$fresh") 2>/dev/null) \
                 && [[ -n "$merged" ]]; then
                 fresh="$merged"
