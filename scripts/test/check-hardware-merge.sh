@@ -159,7 +159,10 @@ cat >"$tmp/old-serial.json" <<'JSON'
     { "byId": "/dev/serial/by-id/usb-GONE_OFF-if00", "enabled": false },
     { "byId": "/dev/serial/by-id/usb-GONE_ON-if00", "enabled": true }
   ],
-  "can": [ { "interface": "can0", "type": "socketcan", "enabled": true } ]
+  "can": [
+    { "interface": "can0", "type": "socketcan", "enabled": true },
+    { "interface": "can1", "type": "socketcan", "enabled": false }
+  ]
 }
 JSON
 merge "$tmp/old-serial.json" "$tmp/fresh-serial.json" >"$tmp/merged.json"
@@ -175,6 +178,9 @@ check "enabled device absent from the fresh detection is dropped" \
     '[.serial[] | select(.byId == "/dev/serial/by-id/usb-GONE_ON-if00")] | length' "0"
 check "serial list is the fresh devices plus the kept switched-off one" '.serial | length' "4"
 check "operator-enabled CAN interface survives re-detect" '.can[0].enabled' "true"
+check "switched-off CAN interface absent from the fresh detection is kept, off" \
+    '.can[] | select(.interface == "can1") | .enabled' "false"
+check "CAN list is the fresh interface plus the kept switched-off one" '.can | length' "2"
 merge "$tmp/old-noaudio.json" "$tmp/fresh-serial.json" >"$tmp/merged.json"
 check "old file without serial keeps every fresh default" '[.serial[].enabled] | all' "true"
 
