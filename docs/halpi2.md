@@ -19,7 +19,7 @@ Fresh install on a HALPI2:
 
 1. Run the usual one-liner. On a Compute Module 5 the installer probes the HALPI2 controller at I2C address `0x6d`, installs the Hat Labs packages, shows the proposed `config.txt` change, and stops with a "Reboot required" block listing what it wrote.
 2. `sudo reboot`.
-3. Run the one-liner again. `can0`, `/dev/ttyAMA4` and `halpid` are live now; the normal hardware detection records them, the server Quadlet gets `AddDevice=/dev/ttyAMA4` and the `/run/halpid` mount, and step 15c creates the two Signal K connections.
+3. Run the one-liner again. `can0`, `/dev/ttyAMA4` and `halpid` are live now; the normal hardware detection records them, the server Quadlet lists `/dev/ttyAMA4` among its serial devices and gets the `/run/halpid` mount, and step 15c creates the two Signal K connections.
 
 One reboot, not two. Preflight may also need a kernel cmdline patch on a Pi (`cgroup_enable=memory cgroup_memory=1`, for the memory controller). It used to stop the run on the spot, so a fresh HALPI2 rebooted once for `cmdline.txt` and again for `config.txt`. Both patches now land in the same pass and the run exits once, listing every pending reason. The installer asks for vessel identity and admin credentials only *after* those gates, so a run that ends in a reboot never prompts — before, each cycle discarded what was typed and asked again.
 
@@ -65,7 +65,7 @@ dtparam=sd=off
 
 `signalk halpi2 apply` runs the same ladder after installing `i2c-tools`, and when `/dev/i2c-1` is missing it brings I2C up live first, so a first run can confirm the board before the reboot. `modprobe i2c-dev` is what creates the device node and runs on any Debian; `dtparam i2c_arm=on` sets the pin mux and runs only where `dtparam` exists (Raspberry Pi OS). `dtparam` runs first where it exists, since on a Pi it brings in `i2c-dev` itself; `modprobe` is the fallback for hosts without it. Where the firmware cannot apply `i2c_arm` at runtime the bus stays off until the reboot, so a first run may still fall through to the candidate prompt.
 
-hardware.json then carries a `board` object and an `onboardSerial` list (shapes in [docs/hardware.md](hardware.md)). `onboardSerial` is listed whenever `/dev/ttyAMA4` exists (the node only appears once the `uart4-pi5` overlay is active), is opt-out like USB serial, and its `enabled` survives a re-detect. `board` is a hardware fact and is regenerated every time. The renderer passes the RS-485 port into the container (existence-guarded, like USB serial) and bind-mounts `/run/halpid` read-only while `halpid.sock` exists, so the `signalk-halpi` plugin from the App Store can read the controller's voltages, temperatures and state.
+hardware.json then carries a `board` object and an `onboardSerial` list (shapes in [docs/hardware.md](hardware.md)). `onboardSerial` is listed whenever `/dev/ttyAMA4` exists (the node only appears once the `uart4-pi5` overlay is active), is opt-out like USB serial, and its `enabled` survives a re-detect. `board` is a hardware fact and is regenerated every time. The renderer lists the RS-485 port among the server's serial devices, which are passed into the container at each start while the node exists ([docs/hardware.md](hardware.md)) and bind-mounts `/run/halpid` read-only while `halpid.sock` exists, so the `signalk-halpi` plugin from the App Store can read the controller's voltages, temperatures and state.
 
 ## Why this helper edits config.txt when `signalk socketcan` only prints a recipe
 
