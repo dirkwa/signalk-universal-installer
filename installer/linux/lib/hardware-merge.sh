@@ -42,9 +42,6 @@
 # Requires jq; callers guard on `command -v jq` before invoking.
 hardware_merge() {
     jq -s '
-        # Carry the `enabled` of each prior device entry onto the fresh entry with
-        # the same key, and keep prior entries switched off that the fresh
-        # detection no longer lists.
         def carry_toggles($prev; key):
             . as $fresh
             | map(. as $dev

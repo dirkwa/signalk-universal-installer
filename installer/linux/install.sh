@@ -1413,8 +1413,12 @@ if [[ -s "$HW_FILE" ]]; then
         HW_WRITE=0
         warn "jq unavailable: kept $HW_FILE unchanged so its toggles stay; devices attached since it was written are not added. Install jq and run 'signalk hardware rescan' to add them."
     elif ! jq empty "$HW_FILE" >/dev/null 2>&1; then
-        cp -p "$HW_FILE" "$HW_FILE.bak"
-        warn "$HW_FILE is not valid JSON; replacing it with the fresh detection (old file: $HW_FILE.bak)"
+        if cp -p "$HW_FILE" "$HW_FILE.bak"; then
+            warn "$HW_FILE is not valid JSON; replacing it with the fresh detection (old file: $HW_FILE.bak)"
+        else
+            HW_WRITE=0
+            warn "$HW_FILE is not valid JSON and could not be copied to $HW_FILE.bak; kept it unchanged"
+        fi
     elif HW_MERGED=$(hardware_merge "$HW_FILE" <(printf '%s' "$HW_FRESH") 2>/dev/null) \
         && [[ -n "$HW_MERGED" ]]; then
         HW_FRESH="$HW_MERGED"

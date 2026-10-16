@@ -1142,6 +1142,10 @@ cmd_hardware() {
             . "$merge"
             local merged
             if ! jq empty "$hw" >/dev/null 2>&1; then
+                if ! cp -p "$hw" "${hw}.bak"; then
+                    echo "[ERR] $hw is not valid JSON and could not be copied to ${hw}.bak; refusing to replace it." >&2
+                    return 1
+                fi
                 echo "[WARN] $hw is not valid JSON; replacing it with the fresh detection (old file: ${hw}.bak)." >&2
             elif merged=$(hardware_merge "$hw" <(printf '%s' "$fresh") 2>/dev/null) \
                 && [[ -n "$merged" ]]; then
