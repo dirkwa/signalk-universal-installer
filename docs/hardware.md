@@ -1,6 +1,6 @@
 # Hardware passthrough
 
-The installer detects host hardware at install time and passes it through to the `signalk-server` container via Quadlet `AddDevice=` and `Volume=` lines. The detection runs in `installer/linux/detect-hardware.sh` and the result is persisted to `~/.signalk-updater/hardware.json`.
+The installer detects host hardware at install time and passes it through to the `signalk-server` container: serial devices at each start of the server, everything else via Quadlet `AddDevice=` and `Volume=` lines. The detection runs in `installer/linux/detect-hardware.sh` and the result is persisted to `~/.signalk-updater/hardware.json`.
 
 ## What's detected
 
@@ -15,7 +15,9 @@ The installer detects host hardware at install time and passes it through to the
 | **ALSA audio** | Presence of `/dev/snd` | **Enabled when present** — the mount is a read-only *metadata view* for signalk-container's device probe, not direct audio access (see [Audio passthrough](#audio-passthrough)); the low risk doesn't warrant install-time friction for voice-stack users | `{ present, enabled }` |
 | **Input devices** | Presence of `/dev/input` | **Enabled when present** — same read-only *metadata view* as audio, for encoders and keypads (see [Input passthrough](#input-passthrough)) | `{ present, enabled }` |
 
-For each enabled entry the renderer (`render-server-quadlet.sh`) emits an `AddDevice=` line (USB serial, onboard serial) or a `Volume=` line (DBus, GPIO, audio, input, halpid socket) inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. Anything outside that block — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
+For each enabled entry the renderer (`render-server-quadlet.sh`) emits a `Volume=` line (DBus, GPIO, audio, input, halpid socket) inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. Enabled serial devices (USB serial and onboard serial) go into a second managed block in the `[Service]` section, `# === BEGIN SERIAL DEVICES / END SERIAL DEVICES ===`, as one `Environment="SIGNALK_SERIAL_DEVICES=…"` line. Anything outside those blocks — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
+
+Serial devices are checked at every start of `signalk-server`, not when the Quadlet is rendered. podman refuses to create the container (exit 125) when a `--device` path is missing, so with `AddDevice=` lines one unplugged device kept the whole server down ([#309](https://github.com/dirkwa/signalk-universal-installer/issues/309): a touchscreen's serial port that disappears whenever the monitor is switched off). Instead, an `ExecStartPre` in the server unit waits up to 15 seconds for any listed device that is missing, then writes `--device` arguments for the devices that exist to `$XDG_RUNTIME_DIR/signalk-server-devices.env`, which `PodmanArgs=$SIGNALK_DEVICE_ARGS` hands to podman. A device that is still missing is left out, and the server starts without it; `journalctl --user -u signalk-server` shows `starting without absent serial device(s): …`. A device that comes back is passed at the next start of the server, without a re-render.
 
 ## Group memberships
 
@@ -87,6 +89,7 @@ Both work — each device is passed into the container twice, once mapped to its
 | Symptom | Cause |
 |---|---|
 | `Error: No such file or directory, cannot open /dev/ttyUSB0` | The device is not in the Quadlet. Run `signalk hardware status` — if it is not listed, `signalk hardware rescan`. |
+| Same error, and the device is listed | It was missing when the server last started (`journalctl --user -u signalk-server \| grep 'absent serial'`). Plug it in and run `signalk restart`. |
 | Connection shows as down, no error | Permissions. Check `GroupAdd=keep-groups` is in `~/.config/containers/systemd/signalk-server.container`, and that `id -nG` includes `dialout`. |
 | `spawn udevadm ENOENT` in the log | Harmless. The serial library shells out to `udevadm` for metadata; it is absent from the image and the port still opens. |
 

@@ -12,8 +12,10 @@
 #
 # This test renders against a fixture with one enabled serial device plus a
 # disabled CAN/BLE/GPIO mix, and asserts: (1) jq emits nothing on stderr,
-# (2) the enabled device appears, (3) disabled devices do not. Requires jq.
-# Run from the repo root.
+# (2) the enabled serial device is listed in the SERIAL DEVICES block, (3)
+# disabled devices do not appear. Cases 6-8 cover serial devices that are
+# absent at render or at start, and the template's start-time device script
+# (issue #309). Requires jq. Run from the repo root.
 
 set -euo pipefail
 
@@ -36,16 +38,12 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# Serial devices are existence-guarded at render time (a missing device node
-# would fail container creation with exit 125), so the fixture's by-id path
-# must actually exist for the "emitted" assertions to hold. Point SERIAL_DIR
-# at a temp dir and create the node there; the fixture byId lives under it.
-# All render invocations below inherit this export.
+# The renderer does not stat serial devices -- the template's ExecStartPre
+# does, at each start (case 7 runs it) -- so the fixture's by-id path does not
+# have to exist.
 serialdir="$tmp/serial-by-id"
 mkdir -p "$serialdir"
 serial_byid="$serialdir/usb-FTDI_TEST-if00-port0"
-: >"$serial_byid"
-export SERIAL_DIR="$serialdir"
 
 # Fixture mirroring the real detect-hardware.sh shape: an enabled serial
 # device, plus disabled CAN/BLE/GPIO. The comma-list bug fired regardless of
@@ -83,39 +81,31 @@ else
     echo "  [OK]   render produced no stderr output"
 fi
 
-# 2. The enabled serial device is present (its node exists under SERIAL_DIR).
-# Each serial device must be emitted in BOTH forms, and the pair is the point.
-#
-#   mapped (<by-id>:<by-id>)  the stable name, so two USB serial devices cannot
-#                             swap on reboot and have SignalK read the wrong one
-#   bare   (<by-id>)          podman resolves it to /dev/ttyUSB0, which is what
-#                             the SignalK UI offers and what every existing
-#                             config already says
-#
-# Publishing only the mapped form replaces "permission denied" with "No such
-# file or directory" for anyone with an existing config -- a different error,
-# not a fixed install. That regression was shipped once and caught on a live
-# boat; both assertions exist so it cannot be shipped again.
-if grep -qF "AddDevice=${serial_byid}:${serial_byid}" <<<"$out"; then
-    echo "  [OK]   serial device is mapped host:container (stable name inside)"
+# 2. The enabled serial device is listed in the [Service] SERIAL DEVICES
+#    block as SIGNALK_SERIAL_DEVICES, and NOT as an AddDevice= line: Quadlet
+#    bakes AddDevice= into ExecStart, and podman fails the start (exit 125)
+#    when that path is missing at that start (issue #309). The rendered unit
+#    must also carry the PodmanArgs= line that hands the ExecStartPre's
+#    arguments to podman.
+serial_block() { sed -n '/^# === BEGIN SERIAL DEVICES/,/^# === END SERIAL DEVICES/p'; }
+if serial_block <<<"$out" | grep -qxF "Environment=\"SIGNALK_SERIAL_DEVICES=$serial_byid\""; then
+    echo "  [OK]   enabled serial device listed in SIGNALK_SERIAL_DEVICES"
 else
-    echo "  [MISS] serial AddDevice= is not mapped to a stable in-container path"
-    grep -F 'AddDevice=' <<<"$out" | sed 's/^/         /'
+    echo "  [MISS] enabled serial device missing from the SERIAL DEVICES block"
+    serial_block <<<"$out" | sed 's/^/         /'
     fail=1
 fi
-
-if grep -qxF "AddDevice=${serial_byid}" <<<"$out"; then
-    echo "  [OK]   serial device is also emitted bare (resolves to /dev/ttyUSB0)"
-else
-    echo "  [MISS] no bare AddDevice= — existing /dev/ttyUSB0 configs would break"
-    grep -F 'AddDevice=' <<<"$out" | sed 's/^/         /'
-    fail=1
-fi
-
 if grep -qF "AddDevice=$serial_byid" <<<"$out"; then
-    echo "  [OK]   enabled serial device emitted"
+    echo "  [MISS] serial device rendered as AddDevice= (a node missing at start fails it, exit 125)"
+    fail=1
 else
-    echo "  [MISS] enabled serial device missing from output"
+    echo "  [OK]   no AddDevice= line for the serial device"
+fi
+# shellcheck disable=SC2016 # the literal unit-file line, $ included
+if grep -qxF 'PodmanArgs=$SIGNALK_DEVICE_ARGS' <<<"$out"; then
+    echo "  [OK]   PodmanArgs= passes the start-time device arguments"
+else
+    echo "  [MISS] PodmanArgs=\$SIGNALK_DEVICE_ARGS missing from the rendered unit"
     fail=1
 fi
 
@@ -341,21 +331,22 @@ else
     fail=1
 fi
 
-# 6. Serial existence guard: an enabled serial device whose node has vanished
-#    between detect and render (unplugged / re-enumerating flaky ACM adapter)
-#    must be DROPPED, not emitted. An AddDevice= pointing at a missing node
-#    fails container creation with exit 125 and crashloops the whole server,
-#    so one absent optional serial device must never brick it. Fixture: a
-#    second by-id path under SERIAL_DIR that we never create.
+# 6. An enabled serial device whose node is absent at RENDER time is still
+#    listed: the ExecStartPre decides at each start, so a device that comes
+#    back is passed without a re-render. A disabled device is not listed, and
+#    a path with characters the unit file would mangle is named in a comment
+#    in the block instead of being listed.
 missing_byid="$serialdir/usb-GONE_ADAPTER-if00-port0"
-# The absent device is listed LAST so the guard's final loop iteration is a
-# skip — the shape that trips the exit-status trap checked directly in case 7.
+off_byid="$serialdir/usb-OFF_ADAPTER-if00-port0"
+odd_byid="$serialdir/usb-ODD ADAPTER-if00"
 cat >"$tmp/hardware-serial-missing.json" <<JSON
 {
   "detectedAt": "2026-01-01T00:00:00Z",
   "serial": [
     {"byId":"$serial_byid","vendor":"FTDI","product":"UART","enabled":true},
-    {"byId":"$missing_byid","vendor":"GONE","product":"UART","enabled":true}
+    {"byId":"$missing_byid","vendor":"GONE","product":"UART","enabled":true},
+    {"byId":"$off_byid","vendor":"OFF","product":"UART","enabled":false},
+    {"byId":"$odd_byid","vendor":"ODD","product":"UART","enabled":true}
   ],
   "can": [],
   "bluetooth": { "dbusAvailable": false, "enabled": false },
@@ -373,58 +364,125 @@ if [[ -s "$err_missing" ]]; then
     sed 's/^/         /' "$err_missing"
     fail=1
 fi
-if grep -qF "AddDevice=$missing_byid" <<<"$out_missing"; then
-    echo "  [MISS] absent serial device leaked into output (would crashloop the server, exit 125)"
+if serial_block <<<"$out_missing" \
+    | grep -qxF "Environment=\"SIGNALK_SERIAL_DEVICES=$serial_byid $missing_byid\""; then
+    echo "  [OK]   absent device listed with the present one; disabled and odd paths left out"
+else
+    echo "  [MISS] SIGNALK_SERIAL_DEVICES does not list exactly the enabled, well-formed devices:"
+    serial_block <<<"$out_missing" | sed 's/^/         /'
     fail=1
-else
-    echo "  [OK]   absent serial device dropped (server not bricked)"
 fi
-# The present device must still survive the same render — the guard drops only
-# the missing one, never the whole serial class.
-if grep -qF "AddDevice=$serial_byid" <<<"$out_missing"; then
-    echo "  [OK]   present serial device kept alongside the dropped one"
+if serial_block <<<"$out_missing" \
+    | grep -qxF "# serial device not passed (unsupported characters): $odd_byid"; then
+    echo "  [OK]   a path with a space is named in a comment, not listed"
 else
-    echo "  [MISS] guard dropped the present serial device too"
+    echo "  [MISS] no comment naming the path that was not passed"
     fail=1
 fi
 
-# 7. guard_adddevice must EXIT 0 when its last action is skipping an absent
-#    device. It runs as `... | guard_adddevice` under set -euo pipefail; a
-#    short-circuited `[ -e ] && printf` leaves the function at status 1 on a
-#    trailing skip, failing the pipeline. (The renderer's own call site happens
-#    to mask this — hardware_block runs inside a command substitution where
-#    set -e doesn't propagate — so this asserts the function contract directly,
-#    the level where the trap actually bites and a refactor would expose it.)
-guard_fn="$tmp/guard.sh"
-# Extract the guard_adddevice function definition from the renderer verbatim.
-sed -n '/^guard_adddevice() {/,/^}/p' "$RENDER" >"$guard_fn"
-if ! grep -q '^guard_adddevice() {' "$guard_fn"; then
-    echo "  [MISS] could not extract guard_adddevice from $RENDER (renamed?)"
+# 7. The template's ExecStartPre, run as systemd hands it to the shell:
+#    continuation lines joined, $$ -> $, %t -> a temp dir. It must write
+#    --device arguments only for devices that exist now, in BOTH forms for a
+#    by-id symlink, and the pair is the point:
+#
+#      mapped (<by-id>:<by-id>)  the stable name, so two USB serial devices
+#                                cannot swap on reboot and have SignalK read
+#                                the wrong one
+#      bare   (<by-id>)          podman resolves it to /dev/ttyUSB0, which is
+#                                what the SignalK UI offers and what every
+#                                existing config already says
+#
+#    Publishing only the mapped form replaces "permission denied" with "No
+#    such file or directory" for anyone with an existing config -- a different
+#    error, not a fixed install. That regression was shipped once and caught
+#    on a live boat. A plain node (an onboard UART) is passed once. An absent
+#    device is left out and named on stderr (the unit's journal), a stale file
+#    from an earlier start is replaced, and a device that appears during the
+#    wait is passed.
+pre_line=$(awk '/^ExecStartPre=\/bin\/sh -c .f=%t\/signalk-server-devices\.env/ { grab = 1 }
+    grab { if (sub(/\\$/, "")) { buf = buf $0; next } print buf $0; exit }' "$TEMPLATE")
+pre_script=${pre_line#"ExecStartPre=/bin/sh -c '"}
+pre_script=${pre_script%"'"}
+pre_script=${pre_script//\$\$/\$}
+rt="$tmp/run"
+pre_script=${pre_script//%t/$rt}
+devs="$tmp/devs"
+mkdir -p "$rt" "$devs"
+link="$devs/usb-LINK_TEST-if00"
+node="$devs/ttyAMA4"
+absent="$devs/usb-ABSENT_TEST-if00"
+ln -s /dev/null "$link"
+: >"$node"
+env_file="$rt/signalk-server-devices.env"
+if [[ -z "$pre_line" || "$pre_script" == "$pre_line" ]]; then
+    echo "  [MISS] could not extract the device ExecStartPre from $TEMPLATE (changed?)"
     fail=1
 else
-    guard_rc=0
-    SERIAL_DIR="$serialdir" bash -c '
-        set -euo pipefail
-        # shellcheck source=/dev/null
-        . "'"$guard_fn"'"
-        # Present line, then an absent one LAST — the failing shape.
-        printf "AddDevice=%s\nAddDevice=%s\n" "'"$serial_byid"'" "'"$missing_byid"'" \
-            | guard_adddevice >/dev/null
-    ' || guard_rc=$?
-    if [[ "$guard_rc" -eq 0 ]]; then
-        echo "  [OK]   guard_adddevice exits 0 after a trailing skip (no set -e abort)"
+    echo "SIGNALK_DEVICE_ARGS=--device /stale/from/an/earlier/start" >"$env_file"
+    pre_rc=0
+    SIGNALK_SERIAL_DEVICES="$link $node $absent" SIGNALK_DEVICE_WAIT=0 \
+        sh -c "$pre_script" 2>"$tmp/pre.err" || pre_rc=$?
+    want="SIGNALK_DEVICE_ARGS= --device $link:$link --device $link --device $node"
+    if [[ "$pre_rc" -eq 0 && "$(cat "$env_file")" == "$want" ]]; then
+        echo "  [OK]   start script passes the by-id link in both forms and the node once"
     else
-        echo "  [MISS] guard_adddevice exited $guard_rc on a trailing skip — would abort rendering under set -e"
+        echo "  [MISS] start script (rc=$pre_rc) wrote:"
+        sed 's/^/         /' "$env_file"
+        echo "         expected: $want"
+        fail=1
+    fi
+    if grep -qF "starting without absent serial device(s): $absent" "$tmp/pre.err"; then
+        echo "  [OK]   the absent device is named on stderr"
+    else
+        echo "  [MISS] the absent device is not named on stderr:"
+        sed 's/^/         /' "$tmp/pre.err"
+        fail=1
+    fi
+    (sleep 1; ln -s /dev/null "$absent") &
+    SIGNALK_SERIAL_DEVICES="$absent" SIGNALK_DEVICE_WAIT=5 sh -c "$pre_script" 2>/dev/null || true
+    wait
+    if [[ "$(cat "$env_file")" == "SIGNALK_DEVICE_ARGS= --device $absent:$absent --device $absent" ]]; then
+        echo "  [OK]   a device that appears during the wait is passed"
+    else
+        echo "  [MISS] the device that appeared during the wait was not passed:"
+        sed 's/^/         /' "$env_file"
+        fail=1
+    fi
+    SIGNALK_SERIAL_DEVICES="" sh -c "$pre_script" 2>"$tmp/pre-empty.err" || true
+    if [[ "$(cat "$env_file")" == "SIGNALK_DEVICE_ARGS=" && ! -s "$tmp/pre-empty.err" ]]; then
+        echo "  [OK]   no serial devices: empty arguments, nothing logged"
+    else
+        echo "  [MISS] empty device list did not give empty arguments"
         fail=1
     fi
 fi
 
-# 7. HALPI2 classes (docs/halpi2.md). `onboardSerial` renders a single
-#    AddDevice=<device> line, existence-guarded like USB serial (TTY_PREFIX
-#    points the guard at the fixture tree); the halpid socket directory is
-#    mounted only when board.model is halpi2 AND the socket exists at render
-#    time (HALPID_RUN_DIR points the probe at the fixture). A fixture without
-#    `board` must render exactly as before.
+# 8. A template without the SERIAL DEVICES block (from before #309) must make
+#    the render fail while serial devices are enabled: its ExecStart would
+#    not read the list, so rendering would drop every serial device silently.
+#    Without serial devices the old template still renders.
+old_template="$tmp/old.template"
+sed '/^# === BEGIN SERIAL DEVICES/,/^# === END SERIAL DEVICES/d' "$TEMPLATE" >"$old_template"
+if bash "$RENDER" "$tmp/hardware.json" "$old_template" >/dev/null 2>"$tmp/old.err"; then
+    echo "  [MISS] render against a template without SERIAL DEVICES succeeded with a serial device enabled"
+    fail=1
+else
+    echo "  [OK]   render refuses a template without SERIAL DEVICES while a serial device is enabled"
+fi
+jq '.serial = []' "$tmp/hardware.json" >"$tmp/hardware-noserial.json"
+if bash "$RENDER" "$tmp/hardware-noserial.json" "$old_template" >/dev/null 2>&1; then
+    echo "  [OK]   the same template renders when no serial device is enabled"
+else
+    echo "  [MISS] render failed on the old template with no serial devices"
+    fail=1
+fi
+
+# 9. HALPI2 classes (docs/halpi2.md). An enabled `onboardSerial` device is
+#    listed in SIGNALK_SERIAL_DEVICES after the USB serial devices, present
+#    or not, like USB serial; a disabled one is not. The halpid socket
+#    directory is mounted only when board.model is halpi2 AND the socket
+#    exists at render time (HALPID_RUN_DIR points the probe at the fixture).
+#    A fixture without `board` must render exactly as before.
 mkdir -p "$tmp/tty" "$tmp/halpid"
 : >"$tmp/tty/ttyAMA4"
 # A unix socket node for the existence guard. Bash cannot create one; use
@@ -442,7 +500,7 @@ jq --arg dev "$tmp/tty/ttyAMA4" --arg gone "$tmp/tty/ttyAMA9" '
                          {device:$dev, label:"disabled", enabled:false} ]
 ' "$tmp/hardware.json" >"$tmp/hardware-halpi2.json"
 err_halpi2="$tmp/stderr-halpi2.log"
-out_halpi2=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/halpid" bash "$RENDER" "$tmp/hardware-halpi2.json" "$TEMPLATE" 2>"$err_halpi2") || {
+out_halpi2=$(HALPID_RUN_DIR="$tmp/halpid" bash "$RENDER" "$tmp/hardware-halpi2.json" "$TEMPLATE" 2>"$err_halpi2") || {
     echo "  [MISS] render (halpi2) exited non-zero"
     fail=1
 }
@@ -451,17 +509,19 @@ if [[ -s "$err_halpi2" ]]; then
     sed 's/^/         /' "$err_halpi2"
     fail=1
 fi
-if [[ "$(grep -cxF "AddDevice=$tmp/tty/ttyAMA4" <<<"$out_halpi2")" == 1 ]]; then
-    echo "  [OK]   enabled onboardSerial emits one AddDevice line"
+if serial_block <<<"$out_halpi2" | grep -qxF \
+    "Environment=\"SIGNALK_SERIAL_DEVICES=$serial_byid $tmp/tty/ttyAMA4 $tmp/tty/ttyAMA9\""; then
+    echo "  [OK]   enabled onboardSerial devices listed once each, the disabled one not"
 else
-    echo "  [MISS] enabled onboardSerial AddDevice missing or duplicated"
+    echo "  [MISS] onboardSerial devices not listed as expected:"
+    serial_block <<<"$out_halpi2" | sed 's/^/         /'
     fail=1
 fi
-if grep -q "ttyAMA9" <<<"$out_halpi2"; then
-    echo "  [MISS] absent onboardSerial node was not guarded out"
+if grep -q "AddDevice=$tmp/tty/" <<<"$out_halpi2"; then
+    echo "  [MISS] onboardSerial rendered as AddDevice="
     fail=1
 else
-    echo "  [OK]   absent onboardSerial node is dropped by the existence guard"
+    echo "  [OK]   no AddDevice= line for onboardSerial"
 fi
 if [[ -S "$tmp/halpid/halpid.sock" ]]; then
     if grep -qxF "Volume=$tmp/halpid:/run/halpid:ro" <<<"$out_halpi2"; then
@@ -474,7 +534,7 @@ else
     echo "  [MISS] could not create the halpid socket fixture (python3/perl missing or bind failed)"
     fail=1
 fi
-out_halpi2_nosock=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-halpi2.json" "$TEMPLATE" 2>/dev/null) || {
+out_halpi2_nosock=$(HALPID_RUN_DIR="$tmp/no-such-dir" bash "$RENDER" "$tmp/hardware-halpi2.json" "$TEMPLATE" 2>/dev/null) || {
     echo "  [MISS] render (halpi2, socket missing) exited non-zero"
     fail=1
 }
@@ -484,7 +544,7 @@ if grep -q ':/run/halpid:' <<<"$out_halpi2_nosock"; then
 else
     echo "  [OK]   missing halpid socket suppresses the volume"
 fi
-out_noboard=$(TTY_PREFIX="$tmp/tty/" HALPID_RUN_DIR="$tmp/halpid" bash "$RENDER" "$tmp/hardware.json" "$TEMPLATE" 2>/dev/null) || {
+out_noboard=$(HALPID_RUN_DIR="$tmp/halpid" bash "$RENDER" "$tmp/hardware.json" "$TEMPLATE" 2>/dev/null) || {
     echo "  [MISS] render (no board) exited non-zero"
     fail=1
 }
@@ -493,6 +553,58 @@ if grep -vE '^[[:space:]]*#' <<<"$out_noboard" | grep -q 'halpid\|ttyAMA'; then
     fail=1
 else
     echo "  [OK]   fixture without board renders no HALPI2 lines"
+fi
+
+# 10. Without jq the renderer reads by-id paths with grep. It lists only an
+#     object that holds "enabled":true on its own line: the disabled entry
+#     and the entry spread over several lines are left out. PATH for this
+#     render is a directory of links to every command on PATH except jq.
+nojq_bin="$tmp/nojq-bin"
+mkdir -p "$nojq_bin"
+IFS=: read -ra path_dirs <<<"$PATH"
+for d in "${path_dirs[@]}"; do
+    if [[ -d "$d" ]]; then
+        # Names already linked from an earlier PATH entry fail; that is the
+        # PATH order the render would see.
+        ln -s "$d"/* "$nojq_bin"/ 2>/dev/null || true
+    fi
+done
+rm -f "$nojq_bin/jq"
+bash_bin=$(command -v bash)
+cat >"$tmp/hardware-nojq.json" <<JSON
+{
+  "serial": [
+    {"byId":"$serialdir/usb-ON-if00","vendor":"A","product":"B","enabled":true},
+    {"byId":"$serialdir/usb-OFF-if00","vendor":"A","product":"B","enabled":false},
+    {
+      "byId": "$serialdir/usb-SPLIT-if00",
+      "enabled": true
+    }
+  ],
+  "can": []
+}
+JSON
+if PATH="$nojq_bin" "$bash_bin" -c 'command -v jq' >/dev/null 2>&1; then
+    echo "  [MISS] could not hide jq for the no-jq render"
+    fail=1
+else
+    err_nojq="$tmp/stderr-nojq.log"
+    out_nojq=$(PATH="$nojq_bin" "$bash_bin" "$RENDER" "$tmp/hardware-nojq.json" "$TEMPLATE" 2>"$err_nojq") || {
+        echo "  [MISS] render (no jq) exited non-zero"
+        fail=1
+    }
+    if [[ -s "$err_nojq" ]]; then
+        echo "  [MISS] render (no jq) wrote to stderr:"
+        sed 's/^/         /' "$err_nojq"
+        fail=1
+    fi
+    if serial_block <<<"$out_nojq" | grep -qxF "Environment=\"SIGNALK_SERIAL_DEVICES=$serialdir/usb-ON-if00\""; then
+        echo "  [OK]   without jq only the enabled one-line entry is listed"
+    else
+        echo "  [MISS] without jq the serial list is not the enabled one-line entry alone:"
+        serial_block <<<"$out_nojq" | sed 's/^/         /'
+        fail=1
+    fi
 fi
 
 if (( fail )); then
