@@ -1064,9 +1064,10 @@ cmd_hardware() {
     # device that is already plugged in.
     #
     # Toggles are carried over exactly as the installer's own detect step does:
-    # a fresh detect emits bluetooth/gpio disabled and audio at its
-    # /dev/snd-derived default, so a naive overwrite silently switches off
-    # passthrough the operator turned on. hardware_merge is the shared filter.
+    # a fresh detect emits bluetooth/gpio disabled, audio at its
+    # /dev/snd-derived default and every serial device enabled, so a naive
+    # overwrite silently switches passthrough the operator set back to the
+    # defaults. hardware_merge is the shared filter.
     # Defaults to `status`, NOT `rescan`. A bare noun command should report,
     # not act: rescan rewrites hardware.json, re-renders the live Quadlet and
     # restarts signalk-server, and someone typing `signalk hardware` to see what
@@ -1123,7 +1124,7 @@ cmd_hardware() {
         return 1
     fi
 
-    local fresh
+    local fresh kept=""
     if ! fresh=$("$detect" 2>/dev/null) || [[ -z "$fresh" ]]; then
         echo "[ERR] hardware detection failed" >&2
         return 1
@@ -1131,15 +1132,31 @@ cmd_hardware() {
 
     # Merge only when we can: without jq (optional per install.sh) a fresh
     # write would clobber the toggles, so refuse rather than silently disable
-    # bluetooth or GPIO passthrough behind the operator's back.
+    # bluetooth or GPIO passthrough behind the operator's back. The same goes
+    # for a merge that fails or prints nothing. A file that is not one JSON
+    # object (a write cut short, or two writes run together) holds no toggles
+    # to keep, so the fresh detection replaces it once a copy is in
+    # ${hw}.bak. hardware_merge slurps its inputs (`jq -s`), so a file with
+    # two objects would pass its second one off as the fresh detection.
     if [[ -s "$hw" ]]; then
         if [[ -r "$merge" ]] && command -v jq >/dev/null 2>&1; then
             # shellcheck disable=SC1090
             . "$merge"
             local merged
-            if merged=$(hardware_merge "$hw" <(printf '%s' "$fresh") 2>/dev/null) \
+            if ! jq -se 'length == 1 and (.[0] | type == "object")' "$hw" >/dev/null 2>&1; then
+                if ! cp -p "$hw" "${hw}.bak"; then
+                    echo "[ERR] $hw is not one JSON object and could not be copied to ${hw}.bak; refusing to replace it." >&2
+                    return 1
+                fi
+                echo "[WARN] $hw is not one JSON object; replacing it with the fresh detection (old file: ${hw}.bak)." >&2
+            elif merged=$(hardware_merge "$hw" <(printf '%s' "$fresh") 2>/dev/null) \
                 && [[ -n "$merged" ]]; then
                 fresh="$merged"
+                kept=" (operator toggles preserved)"
+            else
+                echo "[ERR] could not merge the toggles in $hw into the fresh detection." >&2
+                echo "      Refusing to overwrite $hw and reset them to the detection defaults." >&2
+                return 1
             fi
         else
             echo "[ERR] cannot merge operator toggles (needs jq + ${merge})." >&2
@@ -1150,7 +1167,7 @@ cmd_hardware() {
 
     cp -p "$hw" "${hw}.bak" 2>/dev/null || true
     printf '%s\n' "$fresh" >"$hw"
-    echo "[OK] wrote $hw (operator toggles preserved)"
+    echo "[OK] wrote $hw${kept}"
     if command -v jq >/dev/null 2>&1; then
         jq -r '(.serial // [])[] | "  serial: \(.byId)"' "$hw" 2>/dev/null || true
     fi

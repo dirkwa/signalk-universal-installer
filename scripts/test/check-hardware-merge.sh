@@ -131,6 +131,59 @@ merge "$tmp/old-halpi2.json" "$tmp/fresh.json" >"$tmp/merged.json"
 check "onboardSerial not resurrected when the fresh detection lacks it" 'has("onboardSerial")' "false"
 check "board not resurrected when the fresh detection lacks it" 'has("board")' "false"
 
+# Case 5: per-device toggles of USB serial (matched by byId) and CAN (matched
+# by interface), issue #309. The fresh detection emits every serial device
+# enabled; an operator's `enabled: false` must survive, a device the old file
+# lacks keeps the fresh default, and a switched-off device the fresh detection
+# no longer sees (unplugged, or a monitor that is off) is kept, still off, so
+# the setting outlives a re-detect made while it is absent. A missing device
+# that was enabled is dropped.
+cat >"$tmp/fresh-serial.json" <<'JSON'
+{
+  "serial": [
+    { "byId": "/dev/serial/by-id/usb-NGT1-if00", "enabled": true },
+    { "byId": "/dev/serial/by-id/usb-VCOM-if00", "enabled": true },
+    { "byId": "/dev/serial/by-id/usb-NEW-if00", "enabled": true }
+  ],
+  "can": [ { "interface": "can0", "type": "socketcan", "enabled": false } ],
+  "bluetooth": { "dbusAvailable": false, "enabled": false },
+  "audio": { "present": false, "enabled": false },
+  "gpio": { "platform": "rpi5", "enabled": false }
+}
+JSON
+cat >"$tmp/old-serial.json" <<'JSON'
+{
+  "serial": [
+    { "byId": "/dev/serial/by-id/usb-NGT1-if00", "enabled": true },
+    { "byId": "/dev/serial/by-id/usb-VCOM-if00", "enabled": false },
+    { "byId": "/dev/serial/by-id/usb-GONE_OFF-if00", "enabled": false },
+    { "byId": "/dev/serial/by-id/usb-GONE_ON-if00", "enabled": true }
+  ],
+  "can": [
+    { "interface": "can0", "type": "socketcan", "enabled": true },
+    { "interface": "can1", "type": "socketcan", "enabled": false }
+  ]
+}
+JSON
+merge "$tmp/old-serial.json" "$tmp/fresh-serial.json" >"$tmp/merged.json"
+check "operator-disabled serial device survives re-detect" \
+    '.serial[] | select(.byId == "/dev/serial/by-id/usb-VCOM-if00") | .enabled' "false"
+check "enabled serial device stays enabled" \
+    '.serial[] | select(.byId == "/dev/serial/by-id/usb-NGT1-if00") | .enabled' "true"
+check "newly detected serial device keeps the fresh default" \
+    '.serial[] | select(.byId == "/dev/serial/by-id/usb-NEW-if00") | .enabled' "true"
+check "switched-off device absent from the fresh detection is kept, off" \
+    '.serial[] | select(.byId == "/dev/serial/by-id/usb-GONE_OFF-if00") | .enabled' "false"
+check "enabled device absent from the fresh detection is dropped" \
+    '[.serial[] | select(.byId == "/dev/serial/by-id/usb-GONE_ON-if00")] | length' "0"
+check "serial list is the fresh devices plus the kept switched-off one" '.serial | length' "4"
+check "operator-enabled CAN interface survives re-detect" '.can[0].enabled' "true"
+check "switched-off CAN interface absent from the fresh detection is kept, off" \
+    '.can[] | select(.interface == "can1") | .enabled' "false"
+check "CAN list is the fresh interface plus the kept switched-off one" '.can | length' "2"
+merge "$tmp/old-noaudio.json" "$tmp/fresh-serial.json" >"$tmp/merged.json"
+check "old file without serial keeps every fresh default" '[.serial[].enabled] | all' "true"
+
 if (( fail )); then
     echo
     echo "[ERR] hardware.json merge contract broken — see entries above." >&2

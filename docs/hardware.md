@@ -47,15 +47,15 @@ signalk hardware status    # what was detected, and when
 signalk hardware rescan    # re-detect, re-render the Quadlet, restart if it changed
 ```
 
-`rescan` carries your operator toggles across the re-detect — a fresh detection reports bluetooth and GPIO as disabled, and audio and input at their `/dev/snd`- and `/dev/input`-derived defaults, so a naive overwrite would switch off passthrough you had turned on. If it cannot merge (no `jq`, or the payload is incomplete) it refuses to write rather than clobbering them. `--no-render` stops before touching the Quadlet.
+`rescan` carries your operator toggles across the re-detect: the bluetooth, GPIO, audio, input and on-board serial switches, and the `enabled` of each USB serial device (matched by its `by-id` path) and CAN interface (matched by name). A USB serial device or CAN interface you switched off stays in the file, still off, while it is unplugged; an on-board serial port missing from the detection is dropped with its setting. A device seen for the first time gets the detection default (see `installer/linux/detect-hardware.sh`). If it cannot merge (no `jq`, the payload is incomplete, or the merge fails) it refuses to write and leaves the file as it is. A `hardware.json` that is not one JSON object has no toggles left to keep, so it is replaced by the fresh detection once the old file is copied to `hardware.json.bak`; if that copy fails, `rescan` refuses. `--no-render` stops before touching the Quadlet.
 
-Re-running the bash installer also works and is idempotent, but it re-pulls every image as well; on an SD-card host that is minutes and a restarted server to pick up a device that is already plugged in.
+Re-running the bash installer also works and is idempotent, but it re-pulls every image as well; on an SD-card host that is minutes and a restarted server to pick up a device that is already plugged in. It merges the same way. When it cannot merge, it keeps the existing file unchanged and goes on with the install, so a device attached since that file was written is not added until a `rescan` with `jq` installed.
 
 ```bash
 curl -fsSL https://dirkwa.github.io/signalk-universal-installer/installer/linux/install.sh | bash
 ```
 
-The `hardware.json` file is the source of truth: if you want to disable a USB-serial device you'd otherwise pass through, edit the `enabled` field directly and either re-run the installer (which calls `render-server-quadlet.sh` for you) or POST the new payload to `/api/hardware/apply` on the Updater (bearer-token-gated).
+The `hardware.json` file is the source of truth: if you want to disable a USB-serial device you'd otherwise pass through, set its `enabled` field to `false` and run `signalk render-server`, re-run the installer (which calls `render-server-quadlet.sh` for you), or POST the new payload to `/api/hardware/apply` on the Updater (bearer-token-gated). The setting survives later `signalk hardware rescan` and installer runs.
 
 ## Connecting a USB NMEA gateway
 
