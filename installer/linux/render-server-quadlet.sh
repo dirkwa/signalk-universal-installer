@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Usage: render-server-quadlet.sh <hardware.json> [<template_path>]
-# Emits the final signalk-server.container Quadlet on stdout, with
-# AddDevice= / Volume= lines populated from the hardware.json file.
+# Emits the final signalk-server.container Quadlet on stdout, with the
+# HARDWARE Volume= lines and the SERIAL DEVICES list populated from the
+# hardware.json file.
 #
 # Pure stdout — caller is responsible for atomic-writing to the
 # ~/.config/containers/systemd/ directory.
@@ -89,8 +90,8 @@ serial_devices_block() {
     fi
 }
 
-# Build the AddDevice/Volume block from hardware.json. The CAN/BLE/GPIO lines
-# need jq; the audio and input lines below have a grep fallback.
+# Build the Volume block from hardware.json. The BLE/GPIO lines need jq; the
+# audio and input lines below have a grep fallback.
 # Bluetooth note: the volume is the signalk-dbus-proxy sidecar's named
 # socket volume, NOT a bind mount of the host's /run/dbus. A direct bind
 # mount cannot work under rootless podman on hosts where the SignalK user
@@ -127,18 +128,23 @@ warn_input_group_skip() {
     echo "# re-run 'signalk hardware rescan' to restore the view."
 }
 
+# CAN interfaces get no line. A SocketCAN interface is a network device, not
+# a /dev node, and signalk-server runs with Network=host, so every CAN
+# interface on the host is already reachable. The AddDevice=/dev/<iface> line
+# this used to emit for an enabled interface made podman fail every start
+# (`stat /dev/can0: no such file or directory`, exit 125), since no such node
+# exists.
 hardware_block() {
     # Serial devices are not in this block; serial_devices_block above
-    # renders them. Without jq, CAN/BLE/GPIO are not rendered at all.
+    # renders them. Without jq, BLE/GPIO are not rendered at all.
     if command -v jq >/dev/null 2>&1; then
         # Each clause is parenthesized so its `|` pipeline stays local to
         # the array element. Without the parens, jq's `|` binds across the
         # whole comma-list: one clause's stream gets piped into the next
         # clause's `select(.enabled ...)`, which indexes the already-built
-        # "AddDevice=..." string and errors with "Cannot index string".
+        # "Volume=..." string and errors with "Cannot index string".
         jq -r '
           [
-            ((.can // [])[] | select(.enabled == true) | "AddDevice=/dev/" + .interface),
             ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=signalk-dbus-socket:/run/dbus:rw"),
             ((.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem")
           ] | .[]
