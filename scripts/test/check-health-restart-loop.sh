@@ -443,12 +443,14 @@ scan_fails_case "log scan error quotes podman, no timeout claim" 125 \
     'Error: no container with name or ID "signalk-server" found: no such container' \
     'did not answer in time'
 
-# A server podman cannot create (#309: a --device path missing at start) has
+# A server podman cannot start (#309: a --device path missing at start) has
 # no container log; the reason is the `Error:` line podman wrote to the unit's
 # journal before exiting 125. cmd_health must quote it while the server is
-# down, and stay quiet about it once the server answers again.
+# down, and stay quiet about it once the server answers again. The journal is
+# `podman` (podman's lines, then the server's own `Error:` line as the newest,
+# so only a query with _COMM=podman skips it) or `empty`.
 start_error_case() {
-    local label="$1" probe="$2" want="$3" forbid="${4:-}"
+    local label="$1" probe="$2" journal="$3" want="$4" forbid="${5:-}"
     local out home="$tmp/home" crc=0
     rm -rf "$home"; mkdir -p "$home/.cache"
     out=$(
@@ -460,7 +462,7 @@ start_error_case() {
             export SIGNALK_URL="http://stub" UPDATER_URL="http://stub" DOCTOR_URL="http://stub"
             unset XDG_RUNTIME_DIR
             mkdir -p "$QUADLET_DIR"
-            export SIM_PROBE="$probe"
+            export SIM_PROBE="$probe" SIM_JOURNAL="$journal"
             # shellcheck disable=SC2317  # invoked from the eval'd function
             health_probe() { printf '%s 0.1\n' "$SIM_PROBE"; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
@@ -476,11 +478,22 @@ start_error_case() {
             }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             journalctl() {
-                printf '%s\n' \
-                    'Starting signalk-server.service - SignalK Server...' \
-                    'Error: stat /dev/serial/by-id/usb-OLD-if00: no such file or directory' \
-                    'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or directory' \
-                    'signalk-server.service: Main process exited, code=exited, status=125/n/a'
+                [[ "$SIM_JOURNAL" == empty ]] && return 0
+                case " $* " in
+                    *" _COMM=podman "*)
+                        printf '%s\n' \
+                            'Error: stat /dev/serial/by-id/usb-OLD-if00: no such file or directory' \
+                            'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or directory'
+                        ;;
+                    *)
+                        printf '%s\n' \
+                            'Starting signalk-server.service - SignalK Server...' \
+                            'Error: stat /dev/serial/by-id/usb-OLD-if00: no such file or directory' \
+                            'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or directory' \
+                            'signalk-server.service: Main process exited, code=exited, status=125/n/a' \
+                            'Error: Failed to report to https://api.openwaters.io/bathymetry/: The operation was aborted due to timeout'
+                        ;;
+                esac
             }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             podman() { case "$*" in logs*) return 125 ;; *) : ;; esac; }
@@ -507,11 +520,15 @@ start_error_case() {
     fi
 }
 start_error_case "exit 125 while down -> quotes the last Error: line" \
-    down 'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file'
+    down podman 'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file'
 start_error_case "exit 125 quotes only the newest Error: line" \
-    down 'podman could not create the signalk-server container' 'usb-OLD-if00'
-start_error_case "exit 125 recorded but the server answers -> no create line" \
-    ok '=== SignalK Stack Health ===' 'podman could not create'
+    down podman 'podman could not start the signalk-server container' 'usb-OLD-if00'
+start_error_case "exit 125 quotes podman, not the server's own Error: line" \
+    down podman 'usb-NXP_VCOM_Port_HD-XX-if00' 'Failed to report'
+start_error_case "exit 125 with no Error: line -> points at the journal" \
+    down empty 'journalctl --user -u signalk-server.service shows why'
+start_error_case "exit 125 recorded but the server answers -> no start line" \
+    ok podman '=== SignalK Stack Health ===' 'podman could not start'
 
 run_throw_case "quiet log -> no [THROW]" \
     "signalk-server running at 0.0.0.0:3000" \

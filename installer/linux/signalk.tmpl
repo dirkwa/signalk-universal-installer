@@ -343,15 +343,18 @@ cmd_health() {
             echo "  signalk-server is durably stopped (via 'signalk stop'). Start it"
             echo "  again with:  signalk start"
         elif [[ "$main_status" == "125" ]]; then
-            # podman could not create the container, so there is no container
-            # log to read: podman wrote the reason to this unit's journal and
-            # exited 125. In #309 that was `Error: stat
+            # podman exited 125 before signalk-server ran, so there is no
+            # container log to read: podman wrote the reason to this unit's
+            # journal. In #309 that was `Error: stat
             # /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or
             # directory`, repeated for four hours, and nothing here showed it.
-            start_err=$(journalctl --user -u signalk-server.service -n 200 \
+            # _COMM=podman keeps the server's own output out of the match: it
+            # reaches the same unit journal through conmon, and a plugin's
+            # `Error: Failed to report to ...` line starts the same way.
+            start_err=$(journalctl --user -u signalk-server.service _COMM=podman -n 200 \
                 --no-pager -o cat 2>/dev/null | grep -E '^Error: ' | tail -n 1 || true)
             echo
-            echo "  podman could not create the signalk-server container (exit 125):"
+            echo "  podman could not start the signalk-server container (exit 125):"
             if [[ -n "$start_err" ]]; then
                 echo "    ${start_err}"
             else
