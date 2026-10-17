@@ -480,7 +480,7 @@ cmd_health() {
     # So scan the log instead of the unit state. A handful of exceptions is
     # ordinary (a plugin probing absent hardware at startup); a rate this high
     # is a plugin stuck in a throwing callback.
-    local exc_window=120 exc_min=10 exc_count exc_log exc_plugin exc_first exc_rc=0
+    local exc_window=120 exc_min=10 exc_count exc_log exc_plugin exc_last exc_rc=0
     local -a exc_tmo=()
     command -v timeout >/dev/null 2>&1 && exc_tmo=(timeout -k 5 10)
     # --since, not --tail: with the journald driver `--tail N` scans the whole
@@ -506,12 +506,13 @@ cmd_health() {
             *)
                 # Not a timeout: podman answered with an error, for example
                 # that no signalk-server container exists because it is not
-                # running. Show podman's own first line instead of the
-                # timeout explanation, which #309 printed for exactly this.
+                # running. Show podman's error instead of the timeout
+                # explanation, which #309 printed for exactly this. podman
+                # prints it last; `WARN[0000] ...` lines come before it.
                 echo "  [WARN] could not read the server log (exit ${exc_rc}):"
-                exc_first=$(grep -m 1 . <<<"$exc_log" || true)
-                if [[ -n "$exc_first" ]]; then
-                    echo "         ${exc_first}"
+                exc_last=$(grep . <<<"$exc_log" | tail -n 1 || true)
+                if [[ -n "$exc_last" ]]; then
+                    echo "         ${exc_last}"
                 fi
                 echo "         A throwing plugin would not show up below. Read it directly:"
                 ;;

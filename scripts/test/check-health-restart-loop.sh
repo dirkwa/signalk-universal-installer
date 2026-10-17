@@ -442,6 +442,12 @@ scan_fails_case "log scan error quotes podman, no timeout claim" 125 \
     'no container with name or ID "signalk-server" found' \
     'Error: no container with name or ID "signalk-server" found: no such container' \
     'did not answer in time'
+# podman prints its warnings before the error, for example when there is no
+# systemd user session. The error is the line to quote.
+scan_fails_case "log scan error quotes podman's error, not its warning" 125 \
+    'no container with name or ID "signalk-server" found' \
+    $'WARN[0000] The cgroupv2 manager is set to systemd but there is no systemd user session available\nError: no container with name or ID "signalk-server" found: no such container' \
+    'cgroupv2 manager'
 
 # A server podman cannot start (#309: a --device path missing at start) has
 # no container log; the reason is the `Error:` line podman wrote to the unit's
