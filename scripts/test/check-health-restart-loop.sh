@@ -384,7 +384,7 @@ run_throw_case "11 exceptions -> [THROW]" \
 # exceptions — indistinguishable from a healthy server. It must say so rather
 # than reporting a clean bill of health it did not establish.
 scan_fails_case() {
-    local label="$1" rc="$2" want="$3"
+    local label="$1" rc="$2" want="$3" msg="${4:-}" forbid="${5:-}"
     local out home="$tmp/home" crc=0
     rm -rf "$home"; mkdir -p "$home/.cache"
     out=$(
@@ -396,16 +396,22 @@ scan_fails_case() {
             export SIGNALK_URL="http://stub" UPDATER_URL="http://stub" DOCTOR_URL="http://stub"
             unset XDG_RUNTIME_DIR
             mkdir -p "$QUADLET_DIR"
-            export SIM_RC="$rc"
+            export SIM_RC="$rc" SIM_MSG="$msg"
             # shellcheck disable=SC2317  # invoked from the eval'd function
             health_probe() { printf 'ok 0.1\n'; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             pub_url() { printf '%s' "$1"; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
-            # A wedged runtime: no output, non-zero status.
+            # A wedged runtime (no output) or a podman error message, then a
+            # non-zero status.
             # shellcheck disable=SC2317  # invoked from the eval'd function
-            podman() { case "$*" in logs*) return "$SIM_RC" ;; *) : ;; esac; }
+            podman() {
+                case "$*" in
+                    logs*) [[ -n "$SIM_MSG" ]] && printf '%s\n' "$SIM_MSG" >&2; return "$SIM_RC" ;;
+                    *) : ;;
+                esac
+            }
             # shellcheck disable=SC2317  # invoked from the eval'd function
             timeout() { timeout_stub "$@"; }
             # shellcheck disable=SC2317  # invoked from the eval'd function
@@ -421,12 +427,114 @@ scan_fails_case() {
     elif ! grep -qE "$want" <<<"$out"; then
         miss "$label: output did not match /$want/ — a failed scan read as healthy"
         printf '         %s\n' "$(tr '\n' '|' <<<"$out")" >&2
+    elif [[ -n "$forbid" ]] && grep -qE "$forbid" <<<"$out"; then
+        miss "$label: output unexpectedly matched /$forbid/"
+        printf '         %s\n' "$(tr '\n' '|' <<<"$out")" >&2
     else
         ok "$label"
     fi
 }
 scan_fails_case "log scan times out -> [WARN], not silence" 124 '\[WARN\] could not scan the server log'
 scan_fails_case "log scan errors -> [WARN] with the exit code" 125 '\[WARN\] could not read the server log \(exit 125\)'
+# #309: with no container, podman logs answers at once with an error. The
+# warning must quote it and must not blame a slow runtime.
+scan_fails_case "log scan error quotes podman, no timeout claim" 125 \
+    'no container with name or ID "signalk-server" found' \
+    'Error: no container with name or ID "signalk-server" found: no such container' \
+    'did not answer in time'
+# podman prints its warnings before the error, for example when there is no
+# systemd user session. The error is the line to quote.
+scan_fails_case "log scan error quotes podman's error, not its warning" 125 \
+    'no container with name or ID "signalk-server" found' \
+    $'WARN[0000] The cgroupv2 manager is set to systemd but there is no systemd user session available\nError: no container with name or ID "signalk-server" found: no such container' \
+    'cgroupv2 manager'
+
+# A server podman cannot start (#309: a --device path missing at start) has
+# no container log; the reason is the `Error:` line podman wrote to the unit's
+# journal before exiting 125. cmd_health must quote it while the server is
+# down, and stay quiet about it once the server answers again. The journal is
+# `podman` (podman's lines, then the server's own `Error:` line as the newest,
+# so only a query with _COMM=podman skips it) or `empty`.
+start_error_case() {
+    local label="$1" probe="$2" journal="$3" want="$4" forbid="${5:-}"
+    local out home="$tmp/home" crc=0
+    rm -rf "$home"; mkdir -p "$home/.cache"
+    out=$(
+        {
+            set -uo pipefail
+            # shellcheck disable=SC2030,SC2031
+            export HOME="$home" QUADLET_DIR="$home/quadlets"
+            # shellcheck disable=SC2030,SC2031
+            export SIGNALK_URL="http://stub" UPDATER_URL="http://stub" DOCTOR_URL="http://stub"
+            unset XDG_RUNTIME_DIR
+            mkdir -p "$QUADLET_DIR"
+            export SIM_PROBE="$probe" SIM_JOURNAL="$journal"
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            health_probe() { printf '%s 0.1\n' "$SIM_PROBE"; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            pub_url() { printf '%s' "$1"; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            systemctl() {
+                case "$*" in
+                    *NRestarts*) printf '0\n' ;;
+                    *ExecMainStatus*) printf '125\n' ;;
+                    *Result*) printf 'exit-code\n' ;;
+                    *) : ;;
+                esac
+            }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            journalctl() {
+                [[ "$SIM_JOURNAL" == empty ]] && return 0
+                case " $* " in
+                    *" _COMM=podman "*)
+                        printf '%s\n' \
+                            'Error: stat /dev/serial/by-id/usb-OLD-if00: no such file or directory' \
+                            'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or directory'
+                        ;;
+                    *)
+                        printf '%s\n' \
+                            'Starting signalk-server.service - SignalK Server...' \
+                            'Error: stat /dev/serial/by-id/usb-OLD-if00: no such file or directory' \
+                            'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or directory' \
+                            'signalk-server.service: Main process exited, code=exited, status=125/n/a' \
+                            'Error: Failed to report to https://api.openwaters.io/bathymetry/: The operation was aborted due to timeout'
+                        ;;
+                esac
+            }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            podman() { case "$*" in logs*) return 125 ;; *) : ;; esac; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            timeout() { timeout_stub "$@"; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            docker() { : ; }
+            # shellcheck disable=SC2317  # invoked from the eval'd function
+            signalk_all_containers() { : ; }
+            eval "$body"
+            cmd_health
+        } 2>&1
+    ) || crc=$?
+    if (( crc != 0 )); then
+        miss "$label: cmd_health exited rc=$crc"
+    elif ! grep -qE "$want" <<<"$out"; then
+        miss "$label: output did not match /$want/"
+        printf '         %s\n' "$(tr '\n' '|' <<<"$out")" >&2
+    elif [[ -n "$forbid" ]] && grep -qE "$forbid" <<<"$out"; then
+        miss "$label: output unexpectedly matched /$forbid/"
+        printf '         %s\n' "$(tr '\n' '|' <<<"$out")" >&2
+    else
+        ok "$label"
+    fi
+}
+start_error_case "exit 125 while down -> quotes the last Error: line" \
+    down podman 'Error: stat /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file'
+start_error_case "exit 125 quotes only the newest Error: line" \
+    down podman 'podman could not start the signalk-server container' 'usb-OLD-if00'
+start_error_case "exit 125 quotes podman, not the server's own Error: line" \
+    down podman 'usb-NXP_VCOM_Port_HD-XX-if00' 'Failed to report'
+start_error_case "exit 125 with no Error: line -> points at the journal" \
+    down empty 'journalctl --user -u signalk-server.service shows why'
+start_error_case "exit 125 recorded but the server answers -> no start line" \
+    ok podman '=== SignalK Stack Health ===' 'podman could not start'
 
 run_throw_case "quiet log -> no [THROW]" \
     "signalk-server running at 0.0.0.0:3000" \

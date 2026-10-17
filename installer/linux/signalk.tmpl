@@ -315,7 +315,7 @@ cmd_health() {
     # recorded in the KERNEL journal). Best-effort — `show` on a missing
     # unit just yields empty values and prints nothing.
     if (( server_down )); then
-        local result main_status
+        local result main_status start_err
         result=$(systemctl --user show signalk-server.service \
             -p Result --value 2>/dev/null || true)
         main_status=$(systemctl --user show signalk-server.service \
@@ -342,6 +342,24 @@ cmd_health() {
             echo
             echo "  signalk-server is durably stopped (via 'signalk stop'). Start it"
             echo "  again with:  signalk start"
+        elif [[ "$main_status" == "125" ]]; then
+            # podman exited 125 before signalk-server ran, so there is no
+            # container log to read: podman wrote the reason to this unit's
+            # journal. In #309 that was `Error: stat
+            # /dev/serial/by-id/usb-NXP_VCOM_Port_HD-XX-if00: no such file or
+            # directory`, repeated for four hours, and nothing here showed it.
+            # _COMM=podman keeps the server's own output out of the match: it
+            # reaches the same unit journal through conmon, and a plugin's
+            # `Error: Failed to report to ...` line starts the same way.
+            start_err=$(journalctl --user -u signalk-server.service _COMM=podman -n 200 \
+                --no-pager -o cat 2>/dev/null | grep -E '^Error: ' | tail -n 1 || true)
+            echo
+            echo "  podman could not start the signalk-server container (exit 125):"
+            if [[ -n "$start_err" ]]; then
+                echo "    ${start_err}"
+            else
+                echo "    journalctl --user -u signalk-server.service shows why"
+            fi
         elif [[ "$result" == "exit-code" && "$main_status" == "137" ]] \
             || [[ "$result" == "signal" && "$main_status" == "9" ]]; then
             # Two SIGKILL shapes, both typical of the kernel OOM killer under
@@ -462,7 +480,7 @@ cmd_health() {
     # So scan the log instead of the unit state. A handful of exceptions is
     # ordinary (a plugin probing absent hardware at startup); a rate this high
     # is a plugin stuck in a throwing callback.
-    local exc_window=120 exc_min=10 exc_count exc_log exc_plugin exc_rc=0
+    local exc_window=120 exc_min=10 exc_count exc_log exc_plugin exc_last exc_rc=0
     local -a exc_tmo=()
     command -v timeout >/dev/null 2>&1 && exc_tmo=(timeout -k 5 10)
     # --since, not --tail: with the journald driver `--tail N` scans the whole
@@ -480,11 +498,25 @@ cmd_health() {
         # escalates to SIGKILL) — a wedged runtime, not a quiet one.
         echo
         case "$exc_rc" in
-            124|137) echo "  [WARN] could not scan the server log for uncaught exceptions:" ;;
-            *)       echo "  [WARN] could not read the server log (exit ${exc_rc}):" ;;
+            124|137)
+                echo "  [WARN] could not scan the server log for uncaught exceptions:"
+                echo "         the container runtime did not answer in time, so a throwing"
+                echo "         plugin would not show up below. Retry, or read it directly:"
+                ;;
+            *)
+                # Not a timeout: podman answered with an error, for example
+                # that no signalk-server container exists because it is not
+                # running. Show podman's error instead of the timeout
+                # explanation, which #309 printed for exactly this. podman
+                # prints it last; `WARN[0000] ...` lines come before it.
+                echo "  [WARN] could not read the server log (exit ${exc_rc}):"
+                exc_last=$(grep . <<<"$exc_log" | tail -n 1 || true)
+                if [[ -n "$exc_last" ]]; then
+                    echo "         ${exc_last}"
+                fi
+                echo "         A throwing plugin would not show up below. Read it directly:"
+                ;;
         esac
-        echo "         the container runtime did not answer in time, so a throwing"
-        echo "         plugin would not show up below. Retry, or read it directly:"
         echo "           signalk logs | grep -A5 'Uncaught exception'"
     else
         exc_count=$(grep -c 'Uncaught exception' <<<"$exc_log" || true)
