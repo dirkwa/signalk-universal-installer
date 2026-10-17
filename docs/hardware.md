@@ -1,6 +1,6 @@
 # Hardware passthrough
 
-The installer detects host hardware at install time and passes it through to the `signalk-server` container: serial devices at each start of the server, everything else via Quadlet `AddDevice=` and `Volume=` lines. The detection runs in `installer/linux/detect-hardware.sh` and the result is persisted to `~/.signalk-updater/hardware.json`.
+The installer detects host hardware at install time and passes it through to the `signalk-server` container: serial devices at each start of the server, the other classes via Quadlet `Volume=` lines. SocketCAN needs no passthrough: signalk-server shares the host's network, which includes its CAN interfaces. The detection runs in `installer/linux/detect-hardware.sh` and the result is persisted to `~/.signalk-updater/hardware.json`.
 
 ## What's detected
 
