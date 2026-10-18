@@ -166,31 +166,24 @@ Environment=PORT=__SK_HTTP_PORT__
 # where the host owns its own name and nothing collides.
 Environment=EXTERNALHOST=__SK_EXTERNAL_HOST__
 
-# Cut podman's SIGTERM → SIGKILL grace from the default 10s to 5s.
+# Give the server's own shutdown time to finish before podman's SIGKILL.
 #
-# The container's PID 1 is signalk-server itself (startup.sh execs), and it
-# installs no application-level SIGTERM handler — none in src/ or
-# bin/signalk-server upstream. Whatever Node's runtime does internally, the
-# observable result as PID 1 is that SIGTERM does not stop the process, so
-# every stop ends when podman gives up and sends SIGKILL.
+# Since SignalK/signalk-server#3075 (released in 2.34.0) the server handles
+# SIGTERM: it stops its plugins, interfaces and providers and exits 0, or
+# exits 1 if that has not finished after 8s (SHUTDOWN_TIMEOUT_MS in
+# src/index.ts). podman sends SIGKILL StopTimeout seconds after its SIGTERM,
+# so a StopTimeout below 8s cuts a slow shutdown short. With the earlier
+# StopTimeout=5, two stops on 2026-10-18 logged "SIGTERM received, shutting
+# down" and ended 5.2s later in podman's SIGKILL with ExecMainStatus=137.
+# 12s is 4s past the server's own limit, so a stop that still ends in SIGKILL
+# means the process did not exit after its own deadline.
 #
-# Measured against this stack's own image, stopping on SIGTERM alone:
-#   node as PID 1, explicit SIGTERM handler ...   184ms
-#   node as PID 1, no handler ................. 12763ms  (podman's SIGKILL)
-#   `sleep` as PID 1, no handler .............. 12798ms  (same)
-#   signalk-server, empty config .............. 25742ms  (same)
-#   the SAME node process as PID 3, no handler .. 321ms  (control)
-# The last line is the control: identical image, process and signal, and
-# the only difference is not being PID 1 — as PID 3 it dies on SIGTERM
-# within 2s, as PID 1 it is still running 3s later. The plugins are not
-# involved either — an empty config behaves the same as a full one.
-#
-# Since no grace period ever reaches a clean exit, the shorter one only
-# stops the user waiting twice as long for the same SIGKILL. Every stop
-# therefore records ExecMainStatus=137; that is this stack's normal stop
-# path, not a crash. An upstream SIGTERM handler would fix it properly.
+# A server without that handler (before 2.34.0) does not stop on SIGTERM
+# when it is the container's PID 1: the kernel discards a signal that PID 1
+# has no handler for. Each of its stops waits the full 12s and ends in
+# SIGKILL, ExecMainStatus=137.
 # Maps to podman's --stop-timeout flag.
-StopTimeout=5
+StopTimeout=12
 
 Label=io.signalk.managed-by=updater
 Label=io.signalk.role=server
@@ -309,8 +302,8 @@ TimeoutStartSec=300
 #
 # Matching 300s rather than a smaller bump: the budgets have to be equal or the
 # same race just reopens at the new seam. The cost is bounded — the normal stop
-# path is `podman rm -f` against a container with StopTimeout=5 and returns in
-# seconds; this budget is only ever reached when podman is mid-storage-write,
+# path is `podman rm -f` against a container with StopTimeout=12 and returns
+# within those 12s; this budget is only ever reached when podman is mid-storage-write,
 # which is exactly the case worth waiting out. A `systemctl restart` landing on
 # a slow create can now block for start+stop, which is the intended trade: a
 # slow version switch beats a nav server that needs SSH to come back.
