@@ -117,7 +117,7 @@ sudo systemctl restart systemd-journald
 
 ## Hardware watchdog (Raspberry Pi)
 
-On a Pi the installer writes `/etc/systemd/system.conf.d/50-signalk-watchdog.conf` with `RuntimeWatchdogSec=15`: when the kernel or systemd hangs, the watchdog resets the Pi 15 s after systemd's last ping. A box that reboots by itself with no shutdown lines at the end of the previous boot's journal (`journalctl -b -1 -n 20`) was reset by the watchdog or lost power; `signalk bug-report` captures both the watchdog state and those lines.
+On a Pi the installer writes `/etc/systemd/system.conf.d/50-signalk-watchdog.conf` with `RuntimeWatchdogSec=15`: when the kernel or systemd hangs, the watchdog resets the Pi 15 s after systemd's last ping. systemd disarms it on `poweroff` and `halt`, so a Pi that was shut down stays down. A box that reboots by itself with no shutdown lines at the end of the previous boot's journal (`journalctl -b -1 -n 20`) was reset by the watchdog or lost power; `signalk bug-report` captures both the watchdog state and those lines.
 
 Check that systemd drives it:
 
