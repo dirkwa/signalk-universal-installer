@@ -115,6 +115,31 @@ EOF
 sudo systemctl restart systemd-journald
 ```
 
+## Hardware watchdog (Raspberry Pi)
+
+On a Pi the installer arms the hardware watchdog with the systemd drop-in in the recipe below: when the kernel or systemd hangs, systemd's pings stop and the watchdog resets the Pi. systemd disarms it on `poweroff` and `halt`, so a Pi that was shut down stays down; that holds while the driver runs without `nowayout`, which the Pi kernel does not set. A box that reboots by itself with no shutdown lines at the end of the previous boot's journal (`journalctl -b -1 -n 20`) was reset by the watchdog or lost power; `signalk bug-report` captures both the watchdog state and those lines.
+
+Check that systemd drives it:
+
+```bash
+systemctl show -p RuntimeWatchdogUSec -p WatchdogLastPingTimestamp   # RuntimeWatchdogUSec=15s
+```
+
+If you skipped that step (sudo unavailable at install time), apply it later:
+
+```bash
+sudo install -d -m 0755 /etc/systemd/system.conf.d
+printf '[Manager]\nRuntimeWatchdogSec=15\n' | sudo install -m 0644 /dev/stdin /etc/systemd/system.conf.d/50-signalk-watchdog.conf
+sudo systemctl daemon-reload
+```
+
+To turn it off, re-run the installer with `SIGNALK_NO_WATCHDOG=1` on `bash`, or by hand:
+
+```bash
+sudo rm /etc/systemd/system.conf.d/50-signalk-watchdog.conf
+sudo systemctl daemon-reload
+```
+
 ## When even SSH is gone
 
 If you can't even SSH:
