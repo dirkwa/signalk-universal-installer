@@ -35,6 +35,7 @@
 #  15. Wait for signalk-server health
 #  16. Append a PATH snippet to the user's login-shell rc
 #  17. Journald drop-in (sudo)
+#  17c. Hardware watchdog drop-in on a Raspberry Pi (sudo)
 #  18. Mark bootstrap-complete in last-good.json
 #  18b. (re-runs only) Verification pass: report healthy/broken checkpoints
 #  19. Print success URLs
@@ -2853,6 +2854,79 @@ else
         warn "Re-run the installer with sudo available to add it."
     fi
 fi
+
+# 17c. Hardware watchdog (Raspberry Pi).
+#
+# systemd pings the SoC watchdog (/dev/watchdog0, driver bcm2835_wdt) every
+# 7.5 s. If the kernel or systemd hangs, the pings stop and the watchdog resets
+# the board 15 s later, so a frozen Pi boots again without anyone at the power
+# switch. systemd disarms it on poweroff and halt, so a Pi that was shut down
+# stays down. daemon-reload applies the drop-in; no reboot.
+#
+# 15 s is the most the hardware holds: bcm2835_wdt writes the timeout, shifted
+# left 16, into a 20-bit counter of 1/65536 s ticks, so 16 s programs 0 ticks
+# (raspberrypi/linux rpi-6.12.y, drivers/watchdog/bcm2835_wdt.c).
+#
+# Left alone when RuntimeWatchdogSec is already set elsewhere, or when another
+# program (the watchdog daemon) holds the device. SIGNALK_NO_WATCHDOG=1 removes
+# the drop-in again. systemctl show and the drop-in are world-readable, so a
+# re-run with nothing to do never touches sudo. WATCHDOG_ROOT prefixes every
+# path for scripts/test/check-watchdog.sh.
+section "Hardware watchdog"
+WATCHDOG_ROOT="${WATCHDOG_ROOT:-}"
+WATCHDOG_DROPIN="${WATCHDOG_ROOT}/etc/systemd/system.conf.d/50-signalk-watchdog.conf"
+WATCHDOG_DESIRED='# Installed by signalk-universal-installer.
+# systemd pings /dev/watchdog0 every 7.5 s; after 15 s without a ping the Pi
+# resets. bcm2835_wdt holds at most 15 s.
+[Manager]
+RuntimeWatchdogSec=15'
+watchdog_runtime=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null || true)
+watchdog_state=$(cat "${WATCHDOG_ROOT}/sys/class/watchdog/watchdog0/state" 2>/dev/null || true)
+watchdog_opt_out=0
+case "${SIGNALK_NO_WATCHDOG:-}" in
+    1 | true | TRUE | yes | YES) watchdog_opt_out=1 ;;
+esac
+
+if (( watchdog_opt_out )); then
+    if [[ ! -e "$WATCHDOG_DROPIN" ]]; then
+        info "Hardware watchdog skipped (SIGNALK_NO_WATCHDOG)"
+    elif [[ "$SUDO" = "MISSING" ]]; then
+        warn "Cannot remove $WATCHDOG_DROPIN without sudo; the hardware watchdog stays on"
+    elif $SUDO rm -f "$WATCHDOG_DROPIN" && $SUDO systemctl daemon-reload; then
+        ok "Hardware watchdog off ($WATCHDOG_DROPIN removed)"
+    else
+        warn "could not remove $WATCHDOG_DROPIN; the hardware watchdog stays on"
+    fi
+elif ! is_pi; then
+    info "Not a Raspberry Pi; hardware watchdog left as is"
+elif [[ ! -e "${WATCHDOG_ROOT}/dev/watchdog0" ]]; then
+    info "No /dev/watchdog0; hardware watchdog skipped"
+elif [[ "$(cat "$WATCHDOG_DROPIN" 2>/dev/null)" == "$WATCHDOG_DESIRED" && "$watchdog_runtime" == 15s ]]; then
+    ok "Hardware watchdog armed, 15 s (skipping)"
+elif [[ ! -e "$WATCHDOG_DROPIN" && -n "$watchdog_runtime" && "$watchdog_runtime" != 0 ]]; then
+    ok "Hardware watchdog set by the operator or the OS (RuntimeWatchdogSec=${watchdog_runtime}; left as is)"
+elif [[ ! -e "$WATCHDOG_DROPIN" ]] \
+    && { [[ "$watchdog_state" == active ]] || systemctl is-active --quiet watchdog.service 2>/dev/null; }; then
+    ok "/dev/watchdog0 is held by another program, such as the watchdog daemon (left as is)"
+elif [[ "$SUDO" = "MISSING" ]]; then
+    warn "Cannot enable the hardware watchdog without sudo; a frozen Pi stays frozen until power-cycled."
+else
+    info "Enabling the hardware watchdog: the Pi resets after 15 s frozen (requires sudo)"
+    if $SUDO install -d -m 0755 "$(dirname "$WATCHDOG_DROPIN")" \
+        && printf '%s\n' "$WATCHDOG_DESIRED" | $SUDO install -m 0644 /dev/stdin "$WATCHDOG_DROPIN" \
+        && $SUDO systemctl daemon-reload; then
+        watchdog_runtime=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null || true)
+        if [[ "$watchdog_runtime" == 15s ]]; then
+            ok "Hardware watchdog armed, 15 s ($WATCHDOG_DROPIN)"
+        else
+            warn "RuntimeWatchdogSec reads '${watchdog_runtime}' after daemon-reload; a later file in"
+            warn "$(dirname "$WATCHDOG_DROPIN") may override $WATCHDOG_DROPIN"
+        fi
+    else
+        warn "could not enable the hardware watchdog; a frozen Pi stays frozen until power-cycled."
+    fi
+fi
+# ── end of Hardware watchdog ──
 
 # 18. Mark bootstrap-complete
 section "Recording bootstrap state"

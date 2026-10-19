@@ -3453,6 +3453,23 @@ cmd_bug_report() {
             echo "(signalk-timesync not installed)"
         fi
         echo
+        echo "=== hardware watchdog ==="
+        # For a box that reboots by itself: whether systemd drives
+        # /dev/watchdog0 and when it last pinged it, and how the previous boot
+        # ended. A watchdog reset, like a power cut, leaves no shutdown lines
+        # at the end of that boot's journal.
+        systemctl show -p RuntimeWatchdogUSec -p WatchdogDevice -p WatchdogLastPingTimestamp 2>&1 || true
+        for f in identity state timeout; do
+            if [[ -r "/sys/class/watchdog/watchdog0/$f" ]]; then
+                echo "watchdog0 $f: $(cat "/sys/class/watchdog/watchdog0/$f" 2>&1)"
+            fi
+        done
+        cat /etc/systemd/system.conf.d/50-signalk-watchdog.conf 2>/dev/null \
+            || echo "(no /etc/systemd/system.conf.d/50-signalk-watchdog.conf)"
+        echo "--- end of the previous boot's journal ---"
+        journalctl -b -1 -n 5 --no-pager -o short-iso 2>/dev/null \
+            || echo "(no previous boot in the journal readable as this user)"
+        echo
         echo "=== pasta / passt (rootless networking backend) ==="
         # podman >= 5 defaults rootless networking to pasta, but on Debian
         # passt is only a Recommends of podman and Armbian ships with APT

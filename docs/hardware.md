@@ -178,6 +178,8 @@ Neither mount is strictly required. signalk-container 1.24.0 and newer know `/de
 
 Detected automatically via `/proc/device-tree/model`. On the Pi the installer also nudges cgroup memory + pids delegation onto the user slice (some Pi-OS images ship without the right `Delegate=` set on `user@.service`), so engine containers can apply memory limits.
 
+The installer arms the Pi's hardware watchdog through systemd (`RuntimeWatchdogSec=15`), so a Pi whose kernel or systemd hangs resets itself 15 s later. [docs/recovery.md](recovery.md#hardware-watchdog-raspberry-pi) has the check, the manual recipe and the opt-out.
+
 GPIO passthrough mounts `/dev/gpiomem` only — not `/dev/mem`. Plugins that need the full memory map for low-level peripherals won't work in this configuration; they'd need to run on the host, not in the container.
 
 ### Hat Labs HALPI2 (Compute Module 5 carrier)
