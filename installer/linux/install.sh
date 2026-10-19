@@ -2892,10 +2892,12 @@ if (( watchdog_opt_out )); then
         info "Hardware watchdog skipped (SIGNALK_NO_WATCHDOG)"
     elif [[ "$SUDO" = "MISSING" ]]; then
         warn "Cannot remove $WATCHDOG_DROPIN without sudo; the hardware watchdog stays on"
-    elif $SUDO rm -f "$WATCHDOG_DROPIN" && $SUDO systemctl daemon-reload; then
+    elif ! $SUDO rm -f "$WATCHDOG_DROPIN"; then
+        warn "could not remove $WATCHDOG_DROPIN; the hardware watchdog stays on"
+    elif $SUDO systemctl daemon-reload; then
         ok "Hardware watchdog off ($WATCHDOG_DROPIN removed)"
     else
-        warn "could not remove $WATCHDOG_DROPIN; the hardware watchdog stays on"
+        warn "removed $WATCHDOG_DROPIN, but daemon-reload failed; the hardware watchdog stays on until the next daemon-reload or reboot"
     fi
 elif ! is_pi; then
     info "Not a Raspberry Pi; hardware watchdog left as is"

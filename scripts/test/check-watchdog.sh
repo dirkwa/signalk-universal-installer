@@ -8,7 +8,8 @@
 #   3. RuntimeWatchdogSec set by the operator, the watchdog daemon running,
 #      or the device held by another program: left alone.
 #   4. Not a Pi, no /dev/watchdog0, or no sudo: nothing written.
-#   5. SIGNALK_NO_WATCHDOG=1: our drop-in is removed and reloaded.
+#   5. SIGNALK_NO_WATCHDOG=1: our drop-in is removed and reloaded; a failed
+#      reload is reported as such, not as a failed removal.
 #   6. The drop-in's timeout fits bcm2835_wdt's counter (1-15 s).
 # Run from the repo root.
 
@@ -48,6 +49,7 @@ case "$*" in
         [[ -e "$WATCHDOG_ROOT/watchdog-daemon-active" ]] ;;
     daemon-reload)
         echo "systemctl daemon-reload" >>"$STUB_LOG"
+        [[ -e "$WATCHDOG_ROOT/reload-fails" ]] && exit 1
         if grep -qx 'RuntimeWatchdogSec=15' "$dropin" 2>/dev/null; then
             echo 15s >"$WATCHDOG_ROOT/runtime"
         else
@@ -177,6 +179,18 @@ if [[ ! -e "$tmp/optout/etc/systemd/system.conf.d/50-signalk-watchdog.conf" ]] \
     ok "SIGNALK_NO_WATCHDOG=1: drop-in removed, watchdog off after reload"
 else
     miss "opt out: log=[$log] runtime=[$(cat "$tmp/optout/runtime")] out=[$out]"
+fi
+
+mkdir -p "$tmp/optout-fail/etc/systemd/system.conf.d"
+printf '%s\n' "$desired" >"$tmp/optout-fail/etc/systemd/system.conf.d/50-signalk-watchdog.conf"
+echo 15s >"$tmp/optout-fail/runtime"
+: >"$tmp/optout-fail/reload-fails"
+OPT_OUT=1 run_step optout-fail ""
+if [[ ! -e "$tmp/optout-fail/etc/systemd/system.conf.d/50-signalk-watchdog.conf" \
+    && "$out" == *"removed "*"but daemon-reload failed"* ]]; then
+    ok "SIGNALK_NO_WATCHDOG=1 with a failing daemon-reload: says the drop-in is gone but the watchdog is still on"
+else
+    miss "opt out, reload fails: out=[$out]"
 fi
 
 OPT_OUT=1 run_step optout-none ""
