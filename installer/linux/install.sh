@@ -2861,7 +2861,8 @@ fi
 # 7.5 s. If the kernel or systemd hangs, the pings stop and the watchdog resets
 # the board 15 s later, so a frozen Pi boots again without anyone at the power
 # switch. systemd disarms it on poweroff and halt, so a Pi that was shut down
-# stays down. daemon-reload applies the drop-in; no reboot.
+# stays down; the Pi kernel configs leave CONFIG_WATCHDOG_NOWAYOUT unset, so
+# the disarm takes effect. daemon-reload applies the drop-in; no reboot.
 #
 # 15 s is the most the hardware holds: bcm2835_wdt writes the timeout, shifted
 # left 16, into a 20-bit counter of 1/65536 s ticks, so 16 s programs 0 ticks
