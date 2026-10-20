@@ -195,7 +195,11 @@ source for the button set — rendered by the pre-installed
 `actboy168.tasks` extension, so the same list is under *Terminal → Run
 Task* in any IDE flavor. VS Code disables tasks in
 Restricted Mode — accept the one-time workspace-trust dialog and the
-buttons appear. In a workspace created before
+buttons appear. The Claude Code extension does not run in Restricted
+Mode either; its Extensions page then says "untrusted workspaces are not
+supported". Trust stays on deliberately: the container reaches the host's
+podman socket, so code from a checkout under `dev/plugins/` can start
+containers on the host. In a workspace created before
 the extension was wired in, `git pull` brings the tasks — add the
 buttons by installing "Tasks" (actboy168) once from the Extensions view,
 or recreate the workspace.
@@ -315,6 +319,11 @@ falls back to the browser IDE on `:10800`, with the rust-analyzer
 extension installed. devpod's Zed integration runs
 `xdg-open zed://ssh/signalk-rust.devpod/...` locally, which is why an ssh
 login to a headless box always gets the browser IDE.
+
+Zed opens the workspace in Restricted Mode and starts rust-analyzer only
+after you trust it with the Restricted Mode button at the top left. It
+then uses the toolchain's own `rust-analyzer` from `~/.cargo/bin` and
+downloads none.
 
 To use Zed on a desktop against a headless box, start the workspace on
 the box and print the SSH config for the desktop:

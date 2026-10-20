@@ -3953,6 +3953,8 @@ cmd_devpod() {
                 echo "[i] Opening the workspace in Zed. Dev server on :${dev_port}"
                 echo "    (host networking, UNAUTHENTICATED and LAN-visible)."
                 echo "    First run builds the dev image (several minutes)."
+                echo "[i] Zed opens it in Restricted Mode: trust the workspace (top left)"
+                echo "    to start rust-analyzer."
                 echo "[i] Workspace source: ${DEVPOD_SOURCE}"
                 exec "$bin" up "$DEVPOD_SOURCE" --id "$ws" "${config_args[@]}" \
                     ${provider_args[@]+"${provider_args[@]}"} --ide zed "$@"
@@ -4028,6 +4030,8 @@ cmd_devpod() {
                 echo "      ssh -L 10800:localhost:10800 <this-box>   # then http://localhost:10800"
                 echo "      chrome://flags/#unsafely-treat-insecure-origin-as-secure (allowlist the URL)"
             fi
+            echo "[i] Accept the workspace-trust dialog on first open: in Restricted Mode"
+            echo "    the Claude Code extension and the SK task buttons stay off."
             if [[ "$ws" == "$DEVPOD_RUST_WORKSPACE" ]]; then
                 echo "[i] Zed on another machine instead: signalk devpod rust zed"
             fi
