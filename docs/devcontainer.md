@@ -322,14 +322,13 @@ falls back to the browser IDE on `:10800`, with the rust-analyzer
 extension installed. devpod's Zed integration runs
 `xdg-open zed://ssh/signalk-rust.devpod/...` locally, which is why a plain
 ssh login to a headless box gets the browser IDE. With X11 forwarding
-(`ssh -X`) and Zed installed on the box, `DISPLAY` is set and Zed starts
-on the box itself, drawing through the forwarded display; without a GPU
-there it falls back to software Vulkan (llvmpipe) and warns about it.
+(`ssh -X`) and Zed installed on the box, Zed starts on the box itself
+and draws through the forwarded display. Where that display has no GPU,
+Zed shows an "Unsupported GPU" dialog naming llvmpipe; Skip continues.
 
 Zed opens the workspace in Restricted Mode and starts rust-analyzer only
 after you trust it with the Restricted Mode button at the top left. It
-then uses the toolchain's own `rust-analyzer` from `~/.cargo/bin` and
-downloads none.
+then uses the rust-analyzer the Rust image ships and downloads none.
 
 To use Zed on a desktop against a headless box, start the workspace on
 the box and print the SSH config for the desktop:
