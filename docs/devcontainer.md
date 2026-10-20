@@ -317,8 +317,11 @@ signalk devpod rust up        # on an installer-provisioned box
 (`DISPLAY` or `WAYLAND_DISPLAY`) on the machine it runs on. Otherwise it
 falls back to the browser IDE on `:10800`, with the rust-analyzer
 extension installed. devpod's Zed integration runs
-`xdg-open zed://ssh/signalk-rust.devpod/...` locally, which is why an ssh
-login to a headless box always gets the browser IDE.
+`xdg-open zed://ssh/signalk-rust.devpod/...` locally, which is why a plain
+ssh login to a headless box gets the browser IDE. With X11 forwarding
+(`ssh -X`) and Zed installed on the box, `DISPLAY` is set and Zed starts
+on the box itself, drawing through the forwarded display; without a GPU
+there it falls back to software Vulkan (llvmpipe) and warns about it.
 
 Zed opens the workspace in Restricted Mode and starts rust-analyzer only
 after you trust it with the Restricted Mode button at the top left. It
