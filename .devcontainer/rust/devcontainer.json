@@ -1,0 +1,73 @@
+{
+  // Rust / WASM plugin variant of ../devcontainer.json: same image plus the
+  // Rust toolchain (Dockerfile stage "rust"). `signalk devpod rust up`
+  // opens it in Zed where Zed is installed, otherwise in the browser IDE;
+  // see docs/devcontainer.md, "Rust / WASM plugins". Comments on the
+  // settings shared with the main variant live in ../devcontainer.json.
+  "name": "signalk-rust",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+    "target": "rust"
+  },
+
+  "initializeCommand": "bash .devcontainer/host-prepare.sh",
+  "mounts": [
+    // Own config and plugin volumes: both variants can run side by side
+    // without sharing a dev server config or plugin checkouts.
+    "source=signalk-devpod-rust,target=/home/node/.signalk,type=volume",
+    // Shared with the main variant: one Claude Code / gh / CodeRabbit login.
+    "source=signalk-devpod-claude,target=/home/node/.claude,type=volume",
+    "source=signalk-devpod-rust-plugins,target=${containerWorkspaceFolder}/dev/plugins,type=volume",
+    // Downloaded crates survive rebuilds — a fresh serde fetch + build is
+    // minutes on a Pi.
+    "source=signalk-devpod-cargo,target=/home/node/.cargo/registry,type=volume",
+    "source=${localEnv:XDG_RUNTIME_DIR:/tmp}/podman,target=/run/host-podman,type=bind"
+  ],
+
+  "runArgs": ["--network=host"],
+
+  "containerEnv": {
+    // 4000 belongs to the main variant's dev server; with host networking
+    // both would bind the same host port.
+    "PORT": "4001",
+    "SIGNALK_NODE_CONFIG_DIR": "/home/node/.signalk",
+    "TS_NODE_IGNORE": "(?:^|/)node_modules/,(?:^|/)dist/",
+    // dev.sh defaults to "devpod"; a namespace of its own keeps this dev
+    // server's signalk-container siblings apart from the main variant's
+    // on the shared host podman socket (1-32 lowercase alphanumerics).
+    "SIGNALK_CONTAINER_NAMESPACE": "devpodrust",
+    "CONTAINER_RUNTIME": "podman",
+    "CONTAINER_HOST": "unix:///run/host-podman/podman.sock",
+    "DOCKER_HOST": "unix:///run/host-podman/podman.sock",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "CODERABBIT_API_KEY": "${localEnv:CODERABBIT_API_KEY}"
+  },
+
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postStartCommand": "bash .devcontainer/post-start.sh",
+
+  "remoteUser": "node",
+
+  // Used when `signalk devpod rust up` falls back to the browser IDE
+  // (no Zed on this machine): the main variant's set plus rust-analyzer.
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "actboy168.tasks",
+        "anthropic.claude-code",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-playwright.playwright",
+        "rust-lang.rust-analyzer"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}

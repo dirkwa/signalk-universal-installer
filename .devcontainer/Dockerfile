@@ -5,7 +5,7 @@
 # CLIs, libnss-mdns, containers.conf routing podman to /var/run/docker.sock)
 # AND a pre-built signalk-server at /home/node/signalk — plugin development
 # starts immediately, no clone/build needed.
-FROM ghcr.io/dirkwa/signalk-server:dirkwa
+FROM ghcr.io/dirkwa/signalk-server:dirkwa AS dev
 
 # The image's ENTRYPOINT execs signalk-server and appends any args — the
 # devcontainer's keep-alive command would be passed to the server. Reset both;
@@ -108,3 +108,26 @@ USER node
 RUN curl -fsSL https://cli.coderabbit.ai/install.sh | sh || true; \
     test -x /home/node/.local/bin/coderabbit
 ENV PATH="/home/node/.local/bin:${PATH}"
+
+# ── Rust / WASM plugin variant (.devcontainer/rust/) ────────────────────
+# Everything above plus the toolchain for Signal K WASM plugins. The
+# server's WASM runtime is WASI preview 1, so wasm32-wasip1 is the only
+# target. rust-analyzer comes from rustup so Zed (and any other editor
+# attaching over SSH) finds it on PATH instead of downloading its own.
+# The base image already ships gcc, which cargo needs to link build
+# scripts and proc macros (serde_derive) for the host.
+FROM dev AS rust
+
+ENV RUSTUP_HOME=/home/node/.rustup \
+    CARGO_HOME=/home/node/.cargo
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
+# registry/ is pre-created so the signalk-devpod-cargo volume mounted
+# there inherits node ownership (an absent mount point is created root-
+# owned and every cargo fetch then fails with EACCES).
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal \
+            --default-toolchain stable \
+            --component rustfmt,clippy,rust-analyzer,rust-src \
+            --target wasm32-wasip1 \
+    && mkdir -p "${CARGO_HOME}/registry" \
+    && rustc --version && cargo --version && rust-analyzer --version

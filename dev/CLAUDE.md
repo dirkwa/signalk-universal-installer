@@ -11,13 +11,17 @@ workspace-specific context.
   only; when absent, dev.sh runs the pre-built server baked into the image
   at `/home/node/signalk` — production parity, nothing to build)
 - `plugins/<name>/` — local plugin repos, linked into the dev instance
-  (named volume `signalk-devpod-plugins` — survives workspace delete)
+  (named volume `signalk-devpod-plugins`, `signalk-devpod-rust-plugins` in
+  the Rust variant — survives workspace delete)
 - `companions/<name>/` — optional checkouts of the stack's companion repos
   (signalk-updater-server, signalk-doctor-server, signalk-updater,
   signalk-doctor, signalk-container) via `./clone-companions.sh`
+- `templates/wasm-rust/` — the Rust WASM plugin template that
+  `./new-wasm-plugin.sh <name>` copies to `plugins/<name>/`
 - `e2e/` — Playwright tests against the dev instance
 - `~/.signalk` in the container — persistent dev config (named volume
-  `signalk-devpod`, deliberately separate from production `~/.signalk`)
+  `signalk-devpod`, `signalk-devpod-rust` in the Rust variant, deliberately
+  separate from production `~/.signalk`)
 
 ## Port map (do not collide!)
 
@@ -25,8 +29,9 @@ The devcontainer uses **host networking** (production parity): every
 port a dev process binds lands DIRECTLY on the box. Taken ports:
 80 or 3000 (signalk-server), 3003 (signalk-updater-server), 3004
 (signalk-doctor-server) — production; 10800 — this workspace's own
-browser IDE. **Dev instance: port 4000.** Dev code must never bind any
-of those. For a same-box production connection use the box's
+browser IDE. **Dev instance: port 4000**, or **4001** in the Rust
+variant (`.devcontainer/rust/`, `$PORT` holds the right one). Dev code
+must never bind any of those. For a same-box production connection use the box's
 LAN/tailscale IP — `localhost` is SSRF-blocked by the server (127/8).
 
 ## Dev server
@@ -52,9 +57,10 @@ LAN/tailscale IP — `localhost` is SSRF-blocked by the server (127/8).
 Running signalk-server's mocha suites from `signalk-server/` needs two
 adjustments to this container's environment:
 
-- **Unset the dev-instance vars.** The shell exports `PORT=4000`,
-  `SIGNALK_NODE_CONFIG_DIR` and `SIGNALK_SERVER_IS_UPDATABLE` for the dev
-  instance; test servers inherit them and fail (EADDRINUSE on 4000,
+- **Unset the dev-instance vars.** The shell exports `PORT=4000` (4001 in
+  the Rust variant), `SIGNALK_NODE_CONFIG_DIR` and
+  `SIGNALK_SERVER_IS_UPDATABLE` for the dev
+  instance; test servers inherit them and fail (EADDRINUSE on that port,
   wrong config dir). Invoke as:
 
   ```bash

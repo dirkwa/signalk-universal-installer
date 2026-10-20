@@ -1,0 +1,4 @@
+# Signal K's WASM runtime is WASI preview 1. Making it the default target
+# keeps `cargo build`, `cargo clippy` and rust-analyzer on the same target.
+[build]
+target = "wasm32-wasip1"

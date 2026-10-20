@@ -1,0 +1,4 @@
+target/
+plugin.wasm
+node_modules/
+package-lock.json

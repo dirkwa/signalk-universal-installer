@@ -114,6 +114,6 @@ Forgot the admin password: `signalk resetadmin`. To report a problem, run `signa
 | [docs/development.md](docs/development.md) | Developing plugins or the server on an installed box |
 | [docs/devcontainer.md](docs/devcontainer.md) | The development container, in detail |
 
-For development, `signalk devpod up` sets up a separate Signal K server on port 4000 with plugin linking and the test tools, without touching the installed one ([docs/development.md](docs/development.md)).
+For development, `signalk devpod up` sets up a separate Signal K server on port 4000 with plugin linking and the test tools, without touching the installed one ([docs/development.md](docs/development.md)). `signalk devpod rust up` does the same for WASM plugins written in Rust, on port 4001, and opens in Zed where Zed is installed ([docs/devcontainer.md](docs/devcontainer.md#rust--wasm-plugins)).
 
 The older installer, with Keeper, Caddy, Kopia, InfluxDB and Grafana bundled, is archived at [signalk-universal-installer-v1](https://github.com/dirkwa/signalk-universal-installer-v1) and on this repository's `legacy-v1-keeper` branch and `v1-keeper-final` tag.

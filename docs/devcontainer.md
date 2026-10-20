@@ -291,6 +291,95 @@ To verify against a production install afterward: `npm pack` the plugin and
 install the tarball there, or add a bind mount for the plugin directory in
 the USER ADDITIONS block of the signalk-server Quadlet.
 
+## Rust / WASM plugins
+
+The devcontainer has a second variant for Signal K WASM plugins written
+in Rust: `.devcontainer/rust/devcontainer.json`. It builds the `rust`
+stage of the same Dockerfile, so it carries everything above plus rustup
+with the stable toolchain, the `wasm32-wasip1` target (signalk-server's
+WASM runtime is WASI preview 1), rustfmt, clippy and rust-analyzer.
+
+```bash
+signalk devpod rust up        # on an installer-provisioned box
+```
+
+`signalk devpod rust up` opens the workspace in **Zed** when it finds a
+`zed` or `zeditor` command, `xdg-open` and a graphical session
+(`DISPLAY` or `WAYLAND_DISPLAY`) on the machine it runs on. Otherwise it
+falls back to the browser IDE on `:10800`, with the rust-analyzer
+extension installed. devpod's Zed integration runs
+`xdg-open zed://ssh/signalk-rust.devpod/...` locally, which is why an ssh
+login to a headless box always gets the browser IDE.
+
+To use Zed on a desktop against a headless box, start the workspace on
+the box and print the SSH config for the desktop:
+
+```bash
+signalk devpod rust up        # on the box (browser IDE fallback)
+signalk devpod rust zed       # on the box: prints the ssh config
+```
+
+`signalk devpod rust zed` prints a `Host signalk-rust.devpod` block for
+`~/.ssh/config` on the desktop and the `zed ssh://...` command that opens
+the workspace. Its ProxyCommand logs in to the box with your normal SSH
+key and runs the box's devpod as the tunnel into the container, so the
+desktop needs Zed and SSH access to the box, and no devpod.
+
+What differs from the main variant:
+
+| | main | rust |
+|---|---|---|
+| devpod workspace | `signalk-universal-installer` | `signalk-rust` |
+| dev server | `:4000` | `:4001` |
+| dev config volume | `signalk-devpod` | `signalk-devpod-rust` |
+| `dev/plugins` volume | `signalk-devpod-plugins` | `signalk-devpod-rust-plugins` |
+| cargo registry volume | none | `signalk-devpod-cargo` |
+
+The `signalk-devpod-claude` volume (Claude Code, gh and CodeRabbit
+logins) is shared. Both workspaces can run at the same time as long as at
+most one of them uses the browser IDE: devpod starts openvscode on the
+fixed port 10800 inside the container, and under host networking that is
+the box's port. `signalk devpod rust up` and `signalk devpod up` record
+which workspace started the browser IDE (in
+`$XDG_STATE_HOME/signalk/devpod-ide-workspace`, `$XDG_STATE_HOME`
+defaulting to `~/.local/state`) and refuse to start one
+while the other workspace holds 10800. signalk-container
+siblings of the Rust dev server are named `devpodrust-<name>`
+(`SIGNALK_CONTAINER_NAMESPACE`), so they never collide with the main
+variant's `devpod-<name>`.
+
+To run the workspace on a desktop instead, with devpod and Zed installed
+there:
+
+```bash
+devpod up github.com/dirkwa/signalk-universal-installer@release \
+  --id signalk-rust --devcontainer-path .devcontainer/rust/devcontainer.json \
+  --ide zed
+```
+
+### A new Rust plugin
+
+```bash
+dev/new-wasm-plugin.sh signalk-my-plugin
+dev/dev.sh restart
+```
+
+`new-wasm-plugin.sh` copies `dev/templates/wasm-rust/` to
+`dev/plugins/<name>/` with the name filled in as npm package name and
+plugin id. The name needs at least two hyphen-joined words
+(`signalk-anchor-alarm`), so the derived crate name is never a Rust
+keyword or a reserved crate name. The template exports `allocate`/`deallocate`, `plugin_id`,
+`plugin_name`, `plugin_schema`, `plugin_start` and `plugin_stop`; on start
+it publishes the configured message to `plugins.<name>.message`. Its
+`.cargo/config.toml` makes `wasm32-wasip1` the default target, so `cargo
+build`, `cargo clippy` and rust-analyzer all check the code as WASM.
+`dev/dev.sh restart` builds it on the first run (`npm run build`, which
+runs cargo and copies the module to `plugin.wasm`) and links it into the
+dev server; after code changes use `SK_DEV_PLUGIN_BUILD=1 dev/dev.sh
+restart`. The script only accepts unscoped names: signalk-server 2.33.0
+shows no status and reads no saved config for a WASM plugin with a
+scoped package name.
+
 ## Plugins that use signalk-container
 
 The host's rootless podman socket **directory** is bind-mounted at

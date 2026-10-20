@@ -133,6 +133,7 @@ dev server uses port **4000** precisely so the two never collide.
 
 Under the hood this is a "devcontainer" managed by a free tool called
 [DevPod](https://devpod.sh). There are two ways to start it; pick one.
+Option C below is the variant for WASM plugins written in Rust.
 
 ### Option A: everything on the box (easiest)
 
@@ -180,6 +181,26 @@ If you'd rather use VS Code installed on your own computer:
    - IDE: **VS Code**
 4. DevPod builds the environment on the box and opens your local VS Code
    connected to it.
+
+### Option C: WASM plugins in Rust (Zed or browser VS Code)
+
+For Signal K WASM plugins written in Rust there is a second dev
+environment with the Rust toolchain already set up:
+
+```bash
+signalk devpod rust up
+dev/new-wasm-plugin.sh signalk-my-plugin    # in the workspace terminal
+```
+
+If the machine running the command has [Zed](https://zed.dev) and a
+desktop session, the workspace opens in Zed; on a headless box it opens
+in browser VS Code on `:10800` as in Option A. Its dev server runs on
+port **4001**, so it can run next to the Option A environment, as long as
+only one of the two uses the browser editor (both need :10800). To use Zed
+on your laptop against the box, run `signalk devpod rust zed` on the box
+and follow what it prints. The second command creates a plugin under
+`dev/plugins/` that builds and loads on the next `./dev.sh restart`.
+Details: [devcontainer.md](devcontainer.md#rust--wasm-plugins).
 
 ### Where do plugins go?
 

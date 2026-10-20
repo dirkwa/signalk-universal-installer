@@ -57,8 +57,12 @@ link_plugins() {
     [ -n "${name}" ] || { warn "skipping ${plugin##*/} (unreadable package.json / no name)"; continue; }
 
     # First-time provisioning only — keeps restarts fast and offline-safe.
-    # Guarded: a broken plugin must not abort the others.
-    if [ ! -d "${plugin}/node_modules" ]; then
+    # Guarded: a broken plugin must not abort the others. npm creates no
+    # node_modules for a package without dependencies (a Rust WASM plugin
+    # from new-wasm-plugin.sh), so those would reinstall on every start.
+    if [ ! -d "${plugin}/node_modules" ] \
+        && jq -e '(.dependencies // {}) + (.devDependencies // {}) | length > 0' \
+          "${plugin}/package.json" >/dev/null 2>&1; then
       log "Installing deps: ${name}"
       if ! ( cd "${plugin}" && npm install --no-audit --no-fund ); then
         warn "npm install failed for ${name} — skipping"

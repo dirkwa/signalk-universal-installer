@@ -242,9 +242,12 @@ fi
 
 echo ""
 echo "==> Setup complete."
-echo "    Start dev server:   dev/dev.sh start    (http://localhost:4000)"
+echo "    Start dev server:   dev/dev.sh start    (http://localhost:${PORT:-4000})"
 echo "    Sample NMEA data:   dev/dev.sh demo"
 echo "    e2e tests:          cd dev && npm run test:e2e"
 echo "    Server-source dev:  clone into dev/signalk-server, re-run this script"
 echo "    Companion repos:    dev/clone-companions.sh"
 echo "    AI tooling:         claude | cr review"
+if command -v cargo >/dev/null 2>&1; then
+  echo "    New WASM plugin:    dev/new-wasm-plugin.sh <name>"
+fi
