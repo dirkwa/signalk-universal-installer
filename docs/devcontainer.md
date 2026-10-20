@@ -135,6 +135,11 @@ Troubleshooting:
   `podman unshare chown -R 0:0 <workspace-content>/.devcontainer/.devpod-internal`.
 - `error unset system credential helper exit status 5` in the `up` log is
   cosmetic devpod noise (it unsets a git config key that was never set).
+- `error Error port forwarding localhost:10800:10800: listen tcp
+  127.0.0.1:10800: bind: address already in use` in the `up` log is
+  cosmetic as well: devpod forwards the IDE port to localhost even with
+  `FORWARD_PORTS=false`, and under host networking openvscode already
+  listens on 10800 on the box. The IDE works on that port regardless.
 - Browser IDE ignores the seeded dark theme: the browser caches the last
   active theme per site from earlier sessions. Pick it once
   (Ctrl+K Ctrl+T → "Default Dark Modern") or clear site data for the

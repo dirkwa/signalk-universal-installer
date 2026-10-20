@@ -4031,6 +4031,12 @@ cmd_devpod() {
             if [[ "$ws" == "$DEVPOD_RUST_WORKSPACE" ]]; then
                 echo "[i] Zed on another machine instead: signalk devpod rust zed"
             fi
+            # devpod v0.6.15 forwards the IDE port to localhost even with
+            # FORWARD_PORTS=false. Under host networking openvscode holds
+            # that port on the box already, so the forward fails and the
+            # up log shows an error for it (field-verified, Pi 5 + podman).
+            echo "[i] devpod may log 'Error port forwarding localhost:${DEVPOD_IDE_PORT}' (address"
+            echo "    already in use): the IDE listens on that port itself. Harmless."
             echo "[i] Workspace source: ${DEVPOD_SOURCE}"
             # FORWARD_PORTS=false: under host networking the ports are on
             # the host already; devpod's forwards would only collide with
