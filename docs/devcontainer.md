@@ -316,22 +316,14 @@ the box and print the SSH config for the desktop:
 
 ```bash
 signalk devpod rust up        # on the box (browser IDE fallback)
-signalk devpod rust zed       # on the box: prints the block below
+signalk devpod rust zed       # on the box: prints the ssh config
 ```
 
-```text
-Host signalk-rust.devpod
-  ProxyCommand ssh -T <user>@<box> '<path>/devpod' ssh --stdio --user node signalk-rust
-  User node
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-```
-
-Add the block to `~/.ssh/config` on the desktop, then
-`zed ssh://signalk-rust.devpod/workspaces/signalk-rust`. The
-ProxyCommand logs in to the box with your normal SSH key and runs the
-box's devpod as the tunnel into the container, so the desktop needs Zed
-and SSH access to the box, and no devpod.
+`signalk devpod rust zed` prints a `Host signalk-rust.devpod` block for
+`~/.ssh/config` on the desktop and the `zed ssh://...` command that opens
+the workspace. Its ProxyCommand logs in to the box with your normal SSH
+key and runs the box's devpod as the tunnel into the container, so the
+desktop needs Zed and SSH access to the box, and no devpod.
 
 What differs from the main variant:
 
@@ -347,8 +339,10 @@ The `signalk-devpod-claude` volume (Claude Code, gh and CodeRabbit
 logins) is shared. Both workspaces can run at the same time as long as at
 most one of them uses the browser IDE: devpod starts openvscode on the
 fixed port 10800 inside the container, and under host networking that is
-the box's port. `signalk devpod rust up` and `signalk devpod up` refuse to
-start a browser IDE while another workspace holds 10800. signalk-container
+the box's port. `signalk devpod rust up` and `signalk devpod up` record
+which workspace started the browser IDE (in
+`~/.local/state/signalk/devpod-ide-workspace`) and refuse to start one
+while the other workspace holds 10800. signalk-container
 siblings of the Rust dev server are named `devpodrust-<name>`
 (`SIGNALK_CONTAINER_NAMESPACE`), so they never collide with the main
 variant's `devpod-<name>`.
