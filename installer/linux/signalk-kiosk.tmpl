@@ -361,9 +361,16 @@ fi
 # --password-store=basic: a keyring unlock prompt would block an unattended
 # screen. --disable-features=Translate: the page language usually differs from
 # the system locale, which would otherwise raise a translate bar.
+# --disable-renderer-accessibility: Raspberry Pi OS's rpi-chromium-mods adds
+# --force-renderer-accessibility in /etc/chromium.d/00-rpi-vars, which keeps
+# every accessibility mode on, screen reader support included, so the page
+# rebuilds its accessibility tree on every DOM change. A kiosk has no screen
+# reader, and the disable switch wins: chrome://accessibility then shows every
+# mode off.
 flags=(--kiosk --noerrdialogs --no-first-run --no-default-browser-check
     --password-store=basic --ozone-platform=wayland
-    --disable-features=Translate "--user-data-dir=${profile}")
+    --disable-features=Translate --disable-renderer-accessibility
+    "--user-data-dir=${profile}")
 # On a touchscreen a stray two-finger touch must not zoom a chart, and a
 # sideways swipe must not navigate back off the dashboard.
 if [[ -n "$(detect_touchscreens)" ]]; then

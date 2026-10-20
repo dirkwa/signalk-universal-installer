@@ -366,6 +366,11 @@ if grep -qx -- "--user-data-dir=$profile" <<<"$args"; then
 else
     miss "no --user-data-dir"
 fi
+if grep -qx -- '--disable-renderer-accessibility' <<<"$args"; then
+    ok "renderer accessibility off"
+else
+    miss "no --disable-renderer-accessibility"
+fi
 for f in --touch-events=enabled --disable-pinch --overscroll-history-navigation=0; do
     if grep -qx -- "$f" <<<"$args"; then
         ok "touchscreen present: $f"
