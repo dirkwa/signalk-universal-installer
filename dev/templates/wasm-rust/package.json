@@ -18,8 +18,8 @@
   "wasmManifest": "plugin.wasm",
   "wasmCapabilities": {
     "network": false,
-    "storage": "vfs-only",
-    "dataRead": true,
+    "storage": "none",
+    "dataRead": false,
     "dataWrite": true
   }
 }

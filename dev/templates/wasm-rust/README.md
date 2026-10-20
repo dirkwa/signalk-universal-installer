@@ -9,9 +9,11 @@ npm run build    # cargo build --release, copies the module to plugin.wasm
 npm run check    # clippy, warnings as errors
 ```
 
-Inside the signalk-universal-installer devcontainer, `dev/dev.sh restart`
-links this plugin into the dev server. After a code change, rebuild on
-restart with `SK_DEV_PLUGIN_BUILD=1 dev/dev.sh restart`.
+The plugin only emits deltas. Before calling host functions that read
+the data model or use the plugin's file storage, set `dataRead` to `true`
+or `storage` to `"vfs-only"` under `wasmCapabilities` in package.json:
+signalk-server treats an absent `dataRead` as `true` and an absent
+`storage` as `"vfs-only"`, so the template declares both off explicitly.
 
 ## Publish
 

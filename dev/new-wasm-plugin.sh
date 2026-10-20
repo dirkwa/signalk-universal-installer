@@ -36,7 +36,8 @@ crate="${name//-/_}"
 # signalk-my-plugin -> "Signalk My Plugin", a starting point for the
 # name shown in the admin UI.
 display=""
-for word in ${name//-/ }; do
+IFS='-' read -r -a words <<< "${name}"
+for word in "${words[@]}"; do
   display+="${display:+ }${word^}"
 done
 
