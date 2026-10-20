@@ -3780,6 +3780,9 @@ cmd_bug_report() {
 # kills the browser-IDE port forward mid-session), then delegates to the
 # repo devcontainer with the browser IDE. Field notes and desktop
 # alternatives: docs/devcontainer.md.
+# The port-forward note in cmd_devpod's up branch, and its entry under
+# Troubleshooting in docs/devcontainer.md, describe v0.6.15: re-check
+# both when this pin moves.
 DEVPOD_VERSION="v0.6.15"
 DEVPOD_OPENVSCODE_VERSION="v1.109.5"
 # Workspaces track the 'release' BRANCH, which CI force-updates to every
@@ -3953,6 +3956,8 @@ cmd_devpod() {
                 echo "[i] Opening the workspace in Zed. Dev server on :${dev_port}"
                 echo "    (host networking, UNAUTHENTICATED and LAN-visible)."
                 echo "    First run builds the dev image (several minutes)."
+                echo "[i] Zed opens it in Restricted Mode: trust the workspace (top left)"
+                echo "    to start rust-analyzer."
                 echo "[i] Workspace source: ${DEVPOD_SOURCE}"
                 exec "$bin" up "$DEVPOD_SOURCE" --id "$ws" "${config_args[@]}" \
                     ${provider_args[@]+"${provider_args[@]}"} --ide zed "$@"
@@ -4028,9 +4033,17 @@ cmd_devpod() {
                 echo "      ssh -L 10800:localhost:10800 <this-box>   # then http://localhost:10800"
                 echo "      chrome://flags/#unsafely-treat-insecure-origin-as-secure (allowlist the URL)"
             fi
+            echo "[i] Accept the workspace-trust dialog on first open: in Restricted Mode"
+            echo "    the Claude Code extension and the SK task buttons stay off."
             if [[ "$ws" == "$DEVPOD_RUST_WORKSPACE" ]]; then
                 echo "[i] Zed on another machine instead: signalk devpod rust zed"
             fi
+            # devpod v0.6.15 forwards the IDE port to localhost even with
+            # FORWARD_PORTS=false. Under host networking openvscode holds
+            # that port on the box already, so the forward fails and the
+            # up log shows an error for it (field-verified, Pi 5 + podman).
+            echo "[i] devpod may log 'Error port forwarding localhost:${DEVPOD_IDE_PORT}' (address"
+            echo "    already in use): the IDE listens on that port itself. Harmless."
             echo "[i] Workspace source: ${DEVPOD_SOURCE}"
             # FORWARD_PORTS=false: under host networking the ports are on
             # the host already; devpod's forwards would only collide with

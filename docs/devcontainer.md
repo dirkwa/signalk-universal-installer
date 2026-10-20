@@ -135,6 +135,14 @@ Troubleshooting:
   `podman unshare chown -R 0:0 <workspace-content>/.devcontainer/.devpod-internal`.
 - `error unset system credential helper exit status 5` in the `up` log is
   cosmetic devpod noise (it unsets a git config key that was never set).
+- `error Error port forwarding localhost:10800:10800: listen tcp
+  127.0.0.1:10800: bind: address already in use` in the `up` log is
+  cosmetic as well with devpod v0.6.15, the version `signalk devpod`
+  pins: it forwards the IDE port to localhost even with
+  `FORWARD_PORTS=false`, and under host networking openvscode already
+  listens on 10800 on the box. The IDE works on that port regardless.
+  With another devpod version, check that the IDE answers before
+  treating the error as cosmetic.
 - Browser IDE ignores the seeded dark theme: the browser caches the last
   active theme per site from earlier sessions. Pick it once
   (Ctrl+K Ctrl+T → "Default Dark Modern") or clear site data for the
@@ -190,7 +198,11 @@ source for the button set — rendered by the pre-installed
 `actboy168.tasks` extension, so the same list is under *Terminal → Run
 Task* in any IDE flavor. VS Code disables tasks in
 Restricted Mode — accept the one-time workspace-trust dialog and the
-buttons appear. In a workspace created before
+buttons appear. The Claude Code extension does not run in Restricted
+Mode either; its Extensions page then says "untrusted workspaces are not
+supported". Trust stays on deliberately: the container reaches the host's
+podman socket, so code from a checkout under `dev/plugins/` can start
+containers on the host. In a workspace created before
 the extension was wired in, `git pull` brings the tasks — add the
 buttons by installing "Tasks" (actboy168) once from the Extensions view,
 or recreate the workspace.
@@ -308,8 +320,15 @@ signalk devpod rust up        # on an installer-provisioned box
 (`DISPLAY` or `WAYLAND_DISPLAY`) on the machine it runs on. Otherwise it
 falls back to the browser IDE on `:10800`, with the rust-analyzer
 extension installed. devpod's Zed integration runs
-`xdg-open zed://ssh/signalk-rust.devpod/...` locally, which is why an ssh
-login to a headless box always gets the browser IDE.
+`xdg-open zed://ssh/signalk-rust.devpod/...` locally, which is why a plain
+ssh login to a headless box gets the browser IDE. With X11 forwarding
+(`ssh -X`) and Zed installed on the box, Zed starts on the box itself
+and draws through the forwarded display. Where that display has no GPU,
+Zed shows an "Unsupported GPU" dialog naming llvmpipe; Skip continues.
+
+Zed opens the workspace in Restricted Mode and starts rust-analyzer only
+after you trust it with the Restricted Mode button at the top left. It
+then uses the rust-analyzer the Rust image ships and downloads none.
 
 To use Zed on a desktop against a headless box, start the workspace on
 the box and print the SSH config for the desktop:
