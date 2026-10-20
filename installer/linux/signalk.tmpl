@@ -3801,6 +3801,10 @@ DEVPOD_RUST_CONFIG=".devcontainer/rust/devcontainer.json"
 # devpod's agent starts openvscode on this fixed container port; under
 # host networking only one workspace at a time can serve the browser IDE.
 DEVPOD_IDE_PORT=10800
+# Which workspace last started the browser IDE. Nothing else can tell:
+# the listener runs as a subordinate uid inside the container, and
+# `devpod ssh --command` exits 1 whatever the remote command returns.
+DEVPOD_IDE_OWNER_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/signalk/devpod-ide-workspace"
 
 devpod_bin() {
     if command -v devpod >/dev/null 2>&1; then
@@ -3955,17 +3959,25 @@ cmd_devpod() {
             fi
             # A second workspace's openvscode cannot bind the port and
             # devpod still reports success — the browser would then show
-            # the OTHER workspace's IDE. A taken port is ours only when
-            # this workspace runs and the other one does not (the normal
-            # re-up); with both running, the holder is unknown.
-            if (: <>"/dev/tcp/127.0.0.1/${DEVPOD_IDE_PORT}") 2>/dev/null \
-                && { ! devpod_ws_running "$bin" "$ws" \
-                    || devpod_ws_running "$bin" "$other_ws"; }; then
-                echo "[ERR] Port ${DEVPOD_IDE_PORT} is taken, possibly by the browser IDE of the" >&2
-                echo "      ${other_ws} workspace. Stop the workspace you don't need first" >&2
-                echo "      (signalk devpod stop, or signalk devpod rust stop)." >&2
-                exit 1
+            # the OTHER workspace's IDE. A taken port is ours when this
+            # workspace runs and last started the browser IDE (the normal
+            # re-up). Without an owner record (a workspace started before
+            # the record existed), it is ours only while the other
+            # workspace is not running.
+            if (: <>"/dev/tcp/127.0.0.1/${DEVPOD_IDE_PORT}") 2>/dev/null; then
+                local ide_owner=""
+                ide_owner="$(cat "$DEVPOD_IDE_OWNER_FILE" 2>/dev/null || true)"
+                if ! devpod_ws_running "$bin" "$ws" \
+                    || [[ -n "$ide_owner" && "$ide_owner" != "$ws" ]] \
+                    || { [[ -z "$ide_owner" ]] && devpod_ws_running "$bin" "$other_ws"; }; then
+                    echo "[ERR] Port ${DEVPOD_IDE_PORT} is taken, possibly by the browser IDE of the" >&2
+                    echo "      ${other_ws} workspace. Stop the workspace you don't need first" >&2
+                    echo "      (signalk devpod stop, or signalk devpod rust stop)." >&2
+                    exit 1
+                fi
             fi
+            mkdir -p "$(dirname "$DEVPOD_IDE_OWNER_FILE")" \
+                && printf '%s\n' "$ws" > "$DEVPOD_IDE_OWNER_FILE" || true
             echo "[i] Browser IDE will serve on http://<this-box>:${DEVPOD_IDE_PORT} (host networking),"
             echo "    dev server on :${dev_port} — they keep running after this command returns."
             echo "    First run downloads the dev image (a few minutes)."
