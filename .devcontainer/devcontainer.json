@@ -1,7 +1,9 @@
 {
   "name": "signalk-dev",
   "build": {
-    "dockerfile": "Dockerfile"
+    "dockerfile": "Dockerfile",
+    // The Dockerfile's last stage is the Rust variant (rust/devcontainer.json).
+    "target": "dev"
   },
 
   // Runs on the HOST before build: best-effort enables the host's podman
