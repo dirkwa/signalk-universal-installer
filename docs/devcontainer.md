@@ -341,7 +341,8 @@ most one of them uses the browser IDE: devpod starts openvscode on the
 fixed port 10800 inside the container, and under host networking that is
 the box's port. `signalk devpod rust up` and `signalk devpod up` record
 which workspace started the browser IDE (in
-`~/.local/state/signalk/devpod-ide-workspace`) and refuse to start one
+`$XDG_STATE_HOME/signalk/devpod-ide-workspace`, `$XDG_STATE_HOME`
+defaulting to `~/.local/state`) and refuse to start one
 while the other workspace holds 10800. signalk-container
 siblings of the Rust dev server are named `devpodrust-<name>`
 (`SIGNALK_CONTAINER_NAMESPACE`), so they never collide with the main
