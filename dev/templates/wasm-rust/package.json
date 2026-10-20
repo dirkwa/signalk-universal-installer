@@ -1,0 +1,25 @@
+{
+  "name": "__PLUGIN_ID__",
+  "version": "0.1.0",
+  "description": "Signal K WASM plugin written in Rust",
+  "main": "plugin.wasm",
+  "keywords": [
+    "signalk-wasm-plugin"
+  ],
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "cargo build --release && cp target/wasm32-wasip1/release/__CRATE_NAME__.wasm plugin.wasm",
+    "check": "cargo clippy -- -D warnings",
+    "clean": "cargo clean && rm -f plugin.wasm"
+  },
+  "files": [
+    "plugin.wasm"
+  ],
+  "wasmManifest": "plugin.wasm",
+  "wasmCapabilities": {
+    "network": false,
+    "storage": "vfs-only",
+    "dataRead": true,
+    "dataWrite": true
+  }
+}
