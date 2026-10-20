@@ -50,6 +50,12 @@ checkout; that's what the dev environment is for.
   network you don't fully control, `tailscale serve` the IDE and enable security in the dev
   server's admin UI. Note each measure covers only its own port, and `tailscale serve` is a
   proxy, not a firewall — the plain ports stay LAN-reachable regardless.
+- `signalk devpod rust up` → the Rust / WASM plugin variant: same image plus rustup with
+  `wasm32-wasip1`, its own workspace (`signalk-rust`), volumes and dev server on `:4001`.
+  Opens in Zed when the machine has Zed and a graphical session, else the browser IDE on
+  `:10800` — only one workspace at a time can hold that port. `signalk devpod rust zed`
+  prints the `~/.ssh/config` block for Zed on a desktop. `dev/new-wasm-plugin.sh <name>`
+  scaffolds a buildable Rust plugin into `dev/plugins/`.
 - Plugin repos go under `dev/plugins/` — every `./dev.sh restart` links whatever is there
   into the dev server; missing `node_modules` get installed on the next start. There is no
   install step to run.

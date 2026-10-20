@@ -31,7 +31,10 @@ and LAN-visible by design. It never touches a production install (production
 map: 80/3000 server, 3003 updater, 3004 doctor). `dev/` and `.devcontainer/` are dev-only and NOT
 published by GitHub Pages. See docs/devcontainer.md; workspace-specific agent
 context is in `dev/CLAUDE.md`. The pre-PR checklist tooling (shellcheck,
-`cr review`) is available inside the container.
+`cr review`) is available inside the container. A second variant,
+`.devcontainer/rust/` (`signalk devpod rust up`), adds the Rust toolchain
+for WASM plugins, runs its dev server on port 4001 and opens in Zed where
+Zed is installed.
 
 ## Workflow Conventions
 
