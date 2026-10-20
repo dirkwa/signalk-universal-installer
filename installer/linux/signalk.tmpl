@@ -3976,8 +3976,9 @@ cmd_devpod() {
                     exit 1
                 fi
             fi
-            mkdir -p "$(dirname "$DEVPOD_IDE_OWNER_FILE")" \
-                && printf '%s\n' "$ws" > "$DEVPOD_IDE_OWNER_FILE" || true
+            if mkdir -p "$(dirname "$DEVPOD_IDE_OWNER_FILE")" 2>/dev/null; then
+                { printf '%s\n' "$ws" > "$DEVPOD_IDE_OWNER_FILE"; } 2>/dev/null || true
+            fi
             echo "[i] Browser IDE will serve on http://<this-box>:${DEVPOD_IDE_PORT} (host networking),"
             echo "    dev server on :${dev_port} — they keep running after this command returns."
             echo "    First run downloads the dev image (a few minutes)."
