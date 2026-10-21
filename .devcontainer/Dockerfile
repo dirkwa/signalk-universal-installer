@@ -76,8 +76,15 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 # 'node' user and CI find them. Baked into the image: e2e tests run
 # immediately after `devpod up` — no postCreate download.
 # Keep this version in sync with @playwright/test in dev/package.json.
+# Installed into a throwaway prefix rather than run through `npx`: the
+# playwright CLI prints a "running 'npx playwright install' without first
+# installing your project's dependencies" box whenever its own path
+# contains npm's `_npx` cache directory, which every `npx -y` run does.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-RUN npx -y playwright@1.61.1 install --with-deps chromium \
+RUN pwdir="$(mktemp -d)" \
+    && npm install --prefix "$pwdir" --no-save --no-audit --no-fund playwright@1.61.1 \
+    && "$pwdir/node_modules/.bin/playwright" install --with-deps chromium \
+    && rm -rf "$pwdir" \
     && chmod -R a+rX /opt/playwright
 
 # Stable path to the baked Chromium for tools pinned to a slightly different
