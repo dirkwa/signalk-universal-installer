@@ -114,7 +114,7 @@ cp wind-sensor ~/.signalk/bin/
 chmod +x ~/.signalk/bin/wind-sensor
 ```
 
-**It has to run on the container's OS.** The image is Ubuntu 26.04, built for `arm64` and `amd64`, so a 32-bit `armhf` binary does not run. A 64-bit binary built on Raspberry Pi OS bookworm or trixie needs no newer C library than the container has. Every other shared library it links, for example `libdbus-1` for some BLE crates, must also exist in the container. A statically linked build, such as Rust's `aarch64-unknown-linux-musl` target, needs none of them. To check, list what is missing and then run it the way the server will:
+**It has to run on the container's OS.** The image is built for `arm64` and `amd64` and is currently based on Ubuntu 26.04 (`podman exec signalk-server cat /etc/os-release` shows the one you run), so a 32-bit `armhf` binary does not run. A 64-bit binary built on Raspberry Pi OS bookworm or trixie needs no newer C library than the container has. Every other shared library it links, for example `libdbus-1` for some BLE crates, must also exist in the container. A statically linked build, such as Rust's `aarch64-unknown-linux-musl` target, needs none of them. To check, list the missing libraries (a static binary prints `not a dynamic executable` instead), then run it the way the server will:
 
 ```bash
 podman exec signalk-server sh -c 'ldd /home/node/.signalk/bin/wind-sensor | grep "not found"'
