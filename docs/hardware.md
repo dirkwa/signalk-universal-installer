@@ -100,6 +100,49 @@ podman exec signalk-server ls -l /dev/serial/by-id/
 podman exec signalk-server sh -c '[ -w /dev/ttyUSB0 ] && echo writable'
 ```
 
+## Running your own program as a data source
+
+Signal K Server can start a program and read one Signal K delta per line from its standard output, through a `providers/execute` entry in `settings.json`. The admin UI cannot create this connection type, so the entry is added by hand. In this stack the server starts the program **inside the `signalk-server` container**, which changes three things compared with a server installed with npm.
+
+**The program has to be inside `~/.signalk`.** That directory is the only part of your home the container mounts, at `/home/node/.signalk`. A path such as `/home/pi/bin/wind-sensor` does not exist inside the container.
+
+```bash
+mkdir -p ~/.signalk/bin
+cp wind-sensor ~/.signalk/bin/
+chmod +x ~/.signalk/bin/wind-sensor
+```
+
+**It has to run on the container's OS.** The image is Ubuntu 26.04, built for `arm64` and `amd64`. A binary built on 64-bit Raspberry Pi OS (bookworm or trixie) or a current x86 Linux runs as is, because the container's C library is newer. A 32-bit `armhf` binary does not run. A statically linked build, such as Rust's `aarch64-unknown-linux-musl` target, works regardless of the C library. To check, run it the way the server will:
+
+```bash
+podman exec signalk-server /home/node/.signalk/bin/wind-sensor
+```
+
+**Devices it opens have to be passed through.** A USB serial device needs `signalk hardware rescan`, as in [Connecting a USB NMEA gateway](#connecting-a-usb-nmea-gateway). A program that uses BLE through bluez needs `signalk bluetooth enable` ([Bluetooth / BLE passthrough](#bluetooth--ble-passthrough)).
+
+Then add the connection. Stop the server first with `signalk stop`, because the server writes `settings.json` from memory and can overwrite an edit made while it runs. Add this entry to the `pipedProviders` array in `~/.signalk/settings.json` and leave the rest of the file unchanged:
+
+```json
+{
+  "id": "wind-sensor",
+  "enabled": true,
+  "pipeElements": [
+    {
+      "type": "providers/execute",
+      "options": {
+        "command": "/home/node/.signalk/bin/wind-sensor"
+      }
+    },
+    { "type": "providers/liner" },
+    { "type": "providers/from_json" }
+  ]
+}
+```
+
+Start it again with `signalk start`. The connection is listed under **Server → Data Connections** as read-only JSON, and its data shows in the **Data Browser** with `wind-sensor` as the source. Each line the program prints must be a complete delta, for example `{"updates":[{"values":[{"path":"environment.wind.speedApparent","value":5.2}]}]}`, with values in SI units. Without a `context` the values go to your own vessel. Output on standard error appears in the server log (`journalctl --user -u signalk-server`).
+
+The `settings/commandline-provider-settings.json` file in the signalk-server repository is an example of the same entry. Copying that file into `~/.signalk` does nothing: it is a complete settings file for `signalk-server -s <file>`, and the server reads only `settings.json`. Its `vessel` block is not needed either; the vessel name and MMSI are set under **Server → Settings**.
+
 ## Bluetooth / BLE passthrough
 
 BLE plugins (bt-sensors and anything built on `node-ble` / `dbus-next` / `dbus-native`) talk to the host's bluez over the **system D-Bus**. A rootless container cannot simply bind-mount `/run/dbus`: D-Bus `AUTH EXTERNAL` compares the uid the client sends (its in-container uid) with the kernel's `SO_PEERCRED` (the host-side uid). On any host where the SignalK user isn't uid 1000 those differ, the daemon never completes the handshake, and after its 30 s auth timeout the plugin dies with `Tried to write a message to a closed stream`. A missing mount fails earlier and louder: `connect ENOENT /var/run/dbus/system_bus_socket`.
