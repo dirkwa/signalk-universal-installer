@@ -104,6 +104,8 @@ podman exec signalk-server sh -c '[ -w /dev/ttyUSB0 ] && echo writable'
 
 Signal K Server can start a program and read one Signal K delta per line from its standard output, through a `providers/execute` entry in `settings.json`. The admin UI cannot create this connection type, so the entry is added by hand. In this stack the server starts the program **inside the `signalk-server` container**, which changes three things compared with a server installed with npm.
 
+The program gets the same access as the server: the host network, the devices passed into the container, and the Podman API socket, which controls all of your user's containers. Run only programs you trust.
+
 **The program has to be inside `~/.signalk`.** That directory is the only part of your home the container mounts, at `/home/node/.signalk`. A path such as `/home/pi/bin/wind-sensor` does not exist inside the container.
 
 ```bash
@@ -112,9 +114,10 @@ cp wind-sensor ~/.signalk/bin/
 chmod +x ~/.signalk/bin/wind-sensor
 ```
 
-**It has to run on the container's OS.** The image is Ubuntu 26.04, built for `arm64` and `amd64`. A binary built on 64-bit Raspberry Pi OS (bookworm or trixie) or a current x86 Linux runs as is, because the container's C library is newer. A 32-bit `armhf` binary does not run. A statically linked build, such as Rust's `aarch64-unknown-linux-musl` target, works regardless of the C library. To check, run it the way the server will:
+**It has to run on the container's OS.** The image is Ubuntu 26.04, built for `arm64` and `amd64`, so a 32-bit `armhf` binary does not run. A 64-bit binary built on Raspberry Pi OS bookworm or trixie needs no newer C library than the container has. Every other shared library it links, for example `libdbus-1` for some BLE crates, must also exist in the container. A statically linked build, such as Rust's `aarch64-unknown-linux-musl` target, needs none of them. To check, list what is missing and then run it the way the server will:
 
 ```bash
+podman exec signalk-server sh -c 'ldd /home/node/.signalk/bin/wind-sensor | grep "not found"'
 podman exec signalk-server /home/node/.signalk/bin/wind-sensor
 ```
 
