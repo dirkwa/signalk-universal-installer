@@ -36,7 +36,7 @@
 #  16. Append a PATH snippet to the user's login-shell rc
 #  17. Journald drop-in (sudo)
 #  17c. Hardware watchdog drop-in on a Raspberry Pi (sudo)
-#  17d. earlyoom: end the largest process before RAM runs out (sudo)
+#  17d. earlyoom: end a process before RAM runs out (sudo)
 #  18. Mark bootstrap-complete in last-good.json
 #  18b. (re-runs only) Verification pass: report healthy/broken checkpoints
 #  19. Print success URLs
@@ -2951,15 +2951,16 @@ fi
 # Left alone when systemd-oomd runs, or when earlyoom is installed without our
 # drop-in, running or not. SIGNALK_NO_EARLYOOM=1 skips the step; where an
 # earlier run set earlyoom up, it disables the unit and removes the drop-in
-# (the package stays). The drop-in is world-readable, so a re-run with nothing
-# to do never touches sudo. EARLYOOM_ROOT prefixes the drop-in and binary
-# paths for scripts/test/check-earlyoom.sh.
+# (the package stays). An earlyoom unit counts as installed when systemd loads
+# it, wherever the binary lives. The drop-in is world-readable, so a re-run
+# with nothing to do never touches sudo. EARLYOOM_ROOT prefixes the drop-in
+# path for scripts/test/check-earlyoom.sh.
 section "earlyoom"
 EARLYOOM_ROOT="${EARLYOOM_ROOT:-}"
 EARLYOOM_DROPIN="${EARLYOOM_ROOT}/etc/systemd/system/earlyoom.service.d/50-signalk.conf"
 EARLYOOM_DESIRED='# Installed by signalk-universal-installer.
-# SIGTERM to the largest process at 10 % available memory, SIGKILL at 5 %,
-# whatever swap is left (zram is RAM too).
+# SIGTERM to the process with the highest oom_score at 10 % available memory,
+# SIGKILL at 5 %, whatever swap is left (zram is RAM too).
 [Service]
 ExecStart=
 ExecStart=/usr/bin/earlyoom -r 3600 -m 10,5 -s 100,100'
@@ -2974,10 +2975,11 @@ if (( earlyoom_opt_out )); then
         info "earlyoom skipped (SIGNALK_NO_EARLYOOM)"
     elif [[ "$SUDO" = "MISSING" ]]; then
         warn "Cannot turn earlyoom off without sudo; it stays on"
-    elif [[ -x "${EARLYOOM_ROOT}/usr/bin/earlyoom" ]] && ! $SUDO systemctl disable --now earlyoom.service; then
+    elif [[ "$(systemctl show -p LoadState --value earlyoom.service 2>/dev/null)" == loaded ]] \
+        && ! $SUDO systemctl disable --now earlyoom.service; then
         warn "could not disable earlyoom; check: systemctl status earlyoom"
     elif $SUDO rm -f "$EARLYOOM_DROPIN" && $SUDO systemctl daemon-reload; then
-        # Without the package, the drop-in is left from an install that failed.
+        # With no unit loaded, the drop-in is left from an install that failed.
         ok "earlyoom off ($EARLYOOM_DROPIN removed; the package, if any, stays installed)"
     else
         warn "could not remove $EARLYOOM_DROPIN; check: systemctl status earlyoom"
@@ -2989,12 +2991,12 @@ elif [[ "$(cat "$EARLYOOM_DROPIN" 2>/dev/null)" == "$EARLYOOM_DESIRED" ]] \
     ok "earlyoom running (skipping)"
 elif [[ ! -e "$EARLYOOM_DROPIN" ]] && systemctl is-active --quiet earlyoom.service 2>/dev/null; then
     ok "earlyoom is set up by the operator (left as is)"
-elif [[ ! -e "$EARLYOOM_DROPIN" && -x "${EARLYOOM_ROOT}/usr/bin/earlyoom" ]]; then
+elif [[ ! -e "$EARLYOOM_DROPIN" && "$(systemctl show -p LoadState --value earlyoom.service 2>/dev/null)" == loaded ]]; then
     ok "earlyoom is installed but stopped by the operator (left as is)"
 elif [[ "$SUDO" = "MISSING" ]]; then
     warn "Cannot set up earlyoom without sudo; a box out of memory may stop responding."
 else
-    info "Setting up earlyoom: the largest process is ended at 10 % free memory (requires sudo)"
+    info "Setting up earlyoom: at 10 % free memory it ends the process with the highest oom_score (requires sudo)"
     # The drop-in goes in before the package, so the start in Debian's
     # postinst already uses these arguments instead of the packaged ones.
     if printf '%s\n' "$EARLYOOM_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$EARLYOOM_DROPIN" \

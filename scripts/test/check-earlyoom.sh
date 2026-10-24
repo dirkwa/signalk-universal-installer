@@ -36,8 +36,8 @@ if [[ -z "$STEP" || "$STEP" != *'end of earlyoom'* ]]; then
     exit 2
 fi
 
-# systemctl reports units as active from flag files in $EARLYOOM_ROOT; a
-# restart of earlyoom.service marks it active.
+# systemctl reports units as active, and earlyoom.service as loaded, from flag
+# files in $EARLYOOM_ROOT; a restart of earlyoom.service marks it active.
 mkdir -p "$tmp/stub"
 cat >"$tmp/stub/systemctl" <<'STUB'
 #!/usr/bin/env bash
@@ -46,6 +46,8 @@ case "$*" in
         [[ -e "$EARLYOOM_ROOT/oomd-active" ]] ;;
     "is-active --quiet earlyoom.service")
         [[ -e "$EARLYOOM_ROOT/earlyoom-active" ]] ;;
+    "show -p LoadState --value earlyoom.service")
+        if [[ -e "$EARLYOOM_ROOT/earlyoom-loaded" ]]; then echo loaded; else echo not-found; fi ;;
     "restart earlyoom.service")
         echo "systemctl $*" >>"$STUB_LOG"
         : >"$EARLYOOM_ROOT/earlyoom-active" ;;
@@ -56,11 +58,11 @@ STUB
 chmod +x "$tmp/stub/systemctl"
 
 # run_step <name> <sudo> — runs the step in the sandbox $tmp/<name>, which the
-# caller may have seeded. $tmp/<name>/usr/bin/earlyoom exists once the stubbed
-# pkg_install has run (or the caller put it there).
+# caller may have seeded. The earlyoom unit is loaded once the stubbed
+# pkg_install has run (or the caller loaded it with seed_unit).
 run_step() {
     local root="$tmp/$1"
-    mkdir -p "$root/etc/systemd/system" "$root/usr/bin"
+    mkdir -p "$root/etc/systemd/system"
     : >"$root/log"
     out=$(EARLYOOM_ROOT="$root" STUB_LOG="$root/log" PATH="$tmp/stub:$PATH" SUDO="$2" \
         STUB_PKG_FAILS="${PKG_FAILS:-}" SIGNALK_NO_EARLYOOM="${OPT_OUT:-}" bash -c '
@@ -69,7 +71,7 @@ run_step() {
         pkg_install() {
             echo "pkg_install $*" >>"$STUB_LOG"
             [[ -z "$STUB_PKG_FAILS" ]] || return 1
-            printf "#!/bin/sh\n" >"$EARLYOOM_ROOT/usr/bin/earlyoom"; chmod +x "$EARLYOOM_ROOT/usr/bin/earlyoom"
+            : >"$EARLYOOM_ROOT/earlyoom-loaded"
         }
         '"$STEP" 2>&1) || { miss "$1: step exited non-zero: $out"; return 0; }
     log=$(cat "$root/log")
@@ -77,7 +79,7 @@ run_step() {
 
 dropin_path() { echo "$tmp/$1/etc/systemd/system/earlyoom.service.d/50-signalk.conf"; }
 dropin_of() { cat "$(dropin_path "$1")" 2>/dev/null; }
-seed_binary() { mkdir -p "$tmp/$1/usr/bin"; printf '#!/bin/sh\n' >"$tmp/$1/usr/bin/earlyoom"; chmod +x "$tmp/$1/usr/bin/earlyoom"; }
+seed_unit() { mkdir -p "$tmp/$1"; : >"$tmp/$1/earlyoom-loaded"; }
 desired=$(awk "/^EARLYOOM_DESIRED='/{p=1; sub(/^EARLYOOM_DESIRED='/, \"\")} p{ if (\$0 ~ /'\$/) { sub(/'\$/, \"\"); print; exit } print }" "$INSTALL_SH")
 want_log=$'pkg_install earlyoom\nsystemctl daemon-reload\nsystemctl enable earlyoom.service\nsystemctl restart earlyoom.service'
 
@@ -103,7 +105,7 @@ fi
 
 mkdir -p "$(dirname "$(dropin_path older)")"
 printf '[Service]\nExecStart=\nExecStart=/usr/bin/earlyoom -m 10\n' >"$(dropin_path older)"
-seed_binary older
+seed_unit older
 : >"$tmp/older/earlyoom-active"
 run_step older ""
 if [[ "$(dropin_of older)" == "$desired" && "$log" == *"systemctl restart earlyoom.service"* ]]; then
@@ -122,7 +124,7 @@ else
     miss "oomd: dropin=[$(dropin_of oomd)] log=[$log] out=[$out]"
 fi
 
-seed_binary operator
+seed_unit operator
 : >"$tmp/operator/earlyoom-active"
 run_step operator ""
 if [[ -z "$(dropin_of operator)" && -z "$log" && "$out" == *"set up by the operator"* ]]; then
@@ -131,7 +133,7 @@ else
     miss "operator: dropin=[$(dropin_of operator)] log=[$log] out=[$out]"
 fi
 
-seed_binary stopped
+seed_unit stopped
 run_step stopped ""
 if [[ -z "$(dropin_of stopped)" && -z "$log" && "$out" == *"stopped by the operator"* ]]; then
     ok "earlyoom installed but stopped: left alone"
@@ -156,7 +158,7 @@ fi
 
 mkdir -p "$(dirname "$(dropin_path undo)")"
 printf '%s\n' "$desired" >"$(dropin_path undo)"
-seed_binary undo
+seed_unit undo
 : >"$tmp/undo/earlyoom-active"
 OPT_OUT=1 run_step undo ""
 if [[ ! -e "$(dropin_path undo)" && "$log" == *"systemctl disable --now earlyoom.service"* \
