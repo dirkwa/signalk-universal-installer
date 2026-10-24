@@ -185,16 +185,26 @@ wsys="$tmp/wsys"
 wstubs="$tmp/wstubs"
 wstate="$tmp/wstate"
 mkdir -p "$wstubs"
-# Answers on the DDC bus as line <round> of $WSTATE/plan says (y or n); the
-# round is counted by the watch's own sleep between checks (7s in the tests).
+# Answers on DDC bus N as line <round> of $WSTATE/plan-N says, or of
+# $WSTATE/plan without one (y or n); the round is counted by the watch's own
+# sleep between checks (7s in the tests), which also writes a new EDID when
+# $WSTATE/swap says "<round> <edid file> <content>".
 cat >"$wstubs/i2ctransfer" <<'EOF'
 #!/bin/bash
 round=$(cat "$WSTATE/round")
-[[ "$(sed -n "${round}p" "$WSTATE/plan")" == y ]]
+plan="$WSTATE/plan-$2"
+[[ -f "$plan" ]] || plan="$WSTATE/plan"
+[[ "$(sed -n "${round}p" "$plan")" == y ]]
 EOF
 cat >"$wstubs/sleep" <<'EOF'
 #!/bin/bash
-[[ "$1" == 7 ]] && echo $(( $(cat "$WSTATE/round") + 1 )) >"$WSTATE/round"
+[[ "$1" == 7 ]] || exit 0
+round=$(( $(cat "$WSTATE/round") + 1 ))
+echo "$round" >"$WSTATE/round"
+if [[ -f "$WSTATE/swap" ]]; then
+    read -r at file content <"$WSTATE/swap"
+    [[ "$at" == "$round" ]] && printf '%s' "$content" >"$file"
+fi
 exit 0
 EOF
 cat >"$wstubs/pkill" <<'EOF'
@@ -208,11 +218,24 @@ wmemory="$tmp/wmemory"
 # connector (on DDC bus 14), connected unless the second argument is "no".
 # The monitor's EDID is "EDID-$WEDID" (A by default). The watch's memory of
 # monitors that answered starts empty unless WKEEP=1 keeps the last run's.
+# WSECOND=<plan> adds a second monitor, card1-HDMI-A-2 on bus 15 with EDID
+# "EDID-C", answering as that plan says; WSWAP="<round> <content>" gives the
+# first connector a new EDID from that round on.
 run_watch() {
     rm -rf "$wsys" "$wstate"
     [[ "${WKEEP:-}" == 1 ]] || rm -rf "$wmemory"
     mkdir -p "$wsys/class/drm/card1-HDMI-A-1" "$wstate"
     printf 'EDID-%s' "${WEDID:-A}" >"$wsys/class/drm/card1-HDMI-A-1/edid"
+    if [[ -n "${WSECOND:-}" ]]; then
+        mkdir -p "$wsys/class/drm/card1-HDMI-A-2"
+        echo connected >"$wsys/class/drm/card1-HDMI-A-2/status"
+        printf 'EDID-C' >"$wsys/class/drm/card1-HDMI-A-2/edid"
+        ln -s ../../../../devices/platform/soc/107d508280.i2c/i2c-15 "$wsys/class/drm/card1-HDMI-A-2/ddc"
+        tr ' ' '\n' <<<"$WSECOND" >"$wstate/plan-15"
+    fi
+    if [[ -n "${WSWAP:-}" ]]; then
+        echo "${WSWAP%% *} $wsys/class/drm/card1-HDMI-A-1/edid ${WSWAP#* }" >"$wstate/swap"
+    fi
     if [[ "${2:-yes}" == no ]]; then
         echo disconnected >"$wsys/class/drm/card1-HDMI-A-1/status"
     else
@@ -263,6 +286,18 @@ if [[ "$got" == "1 pkill -CONT $p|" ]]; then
     ok "another monitor on the remembered connector counts as never answered"
 else
     miss "another monitor on the same connector: $got"
+fi
+got=$(WSWAP="2 EDID-B" run_watch "y n n n n")
+if [[ "$got" == "1 pkill -CONT $p|" ]]; then
+    ok "a monitor without DDC/CI plugged in where one answered keeps the browser running"
+else
+    miss "monitor swapped on a connector that answered: $got"
+fi
+got=$(WSECOND="y n n n n" run_watch "y n n n n")
+if [[ "$got" == "1 pkill -CONT $p|4 pkill -STOP $p|5 pkill -STOP $p|" ]]; then
+    ok "two monitors that answered together, both switched off: the browser is paused"
+else
+    miss "two monitors, both off: $got"
 fi
 state_dir=$(PATH="$sysbin" bash -c ". '$TMPL'; echo \"\$SCREEN_STATE\"")
 if grep -qF "MEMORY=\"\${KIOSK_SCREEN_MEMORY:-$state_dir/answered}\"" "$watch"; then

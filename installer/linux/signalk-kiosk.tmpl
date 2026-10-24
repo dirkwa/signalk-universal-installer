@@ -569,18 +569,16 @@ ddc_answers() {
     return 1
 }
 
-# Buses whose monitor has answered at least once since the watch started.
-declare -A answered=()
-
-# Monitors that have answered before, kept across restarts by connector and
-# EDID: one switched off since boot would otherwise never answer, count as
-# on, and leave the browser running. `signalk kiosk enable` empties it.
+# Monitors that have answered, by connector and EDID, or by DDC bus for one
+# whose EDID cannot be read. Those with an EDID are kept across restarts: a
+# monitor switched off since boot would otherwise never answer, count as on,
+# and leave the browser running. `signalk kiosk enable` empties the file.
 MEMORY="${KIOSK_SCREEN_MEMORY:-/var/lib/signalk-kiosk-screen/answered}"
-declare -A remembered=()
+declare -A answered=()
 if [[ -r "$MEMORY" ]]; then
     while IFS= read -r line; do
         if [[ -n "$line" ]]; then
-            remembered[$line]=1
+            answered["$line"]=1
         fi
     done <"$MEMORY"
 fi
@@ -594,42 +592,46 @@ monitor_id() {
     printf '%s:%s' "${1##*/}" "${sum:0:16}"
 }
 
-# Written once per monitor, so a running watch does not write every 5s.
+# remember <key> <monitor id>: written to the file once per monitor with an
+# EDID, so a running watch does not write every 5s.
 remember() {
-    if [[ -z "$1" ]]; then
+    if [[ -n "${answered["$1"]:-}" ]]; then
         return 0
     fi
-    if [[ -z "${remembered[$1]:-}" ]]; then
-        remembered[$1]=1
-        { mkdir -p "${MEMORY%/*}" && printf '%s\n' "$1" >>"$MEMORY"; } 2>/dev/null || true
+    answered["$1"]=1
+    if [[ -n "$2" ]]; then
+        { mkdir -p "${MEMORY%/*}" && printf '%s\n' "$2" >>"$MEMORY"; } 2>/dev/null || true
     fi
 }
 
 # True while some connected monitor may be showing the browser: one without
 # a DDC bus, one that answers, or one that has never answered. False when
 # every connected monitor has answered before, in this run or an earlier one,
-# and is silent now, or when nothing is connected.
+# and is silent now, or when nothing is connected. Every monitor is asked
+# each round, so one that answers alongside another is remembered too.
 screen_visible() {
-    local c link bus id
+    local c link bus id key visible=1
     for c in "${SYSFS}"/class/drm/card*-*; do
         [[ "$(cat "$c/status" 2>/dev/null)" == connected ]] || continue
-        link=$(readlink "$c/ddc" 2>/dev/null) || return 0
-        bus=${link##*/i2c-}
-        [[ "$bus" =~ ^[0-9]+$ ]] || return 0
-        id=$(monitor_id "$c")
-        if ddc_answers "$bus"; then
-            answered[$bus]=1
-            remember "$id"
-            return 0
-        fi
-        if [[ -n "${answered[$bus]:-}" ]]; then
+        if ! link=$(readlink "$c/ddc" 2>/dev/null); then
+            visible=0
             continue
         fi
-        if [[ -z "$id" || -z "${remembered[$id]:-}" ]]; then
-            return 0
+        bus=${link##*/i2c-}
+        if ! [[ "$bus" =~ ^[0-9]+$ ]]; then
+            visible=0
+            continue
+        fi
+        id=$(monitor_id "$c")
+        key=${id:-bus:$bus}
+        if ddc_answers "$bus"; then
+            remember "$key" "$id"
+            visible=0
+        elif [[ -z "${answered["$key"]:-}" ]]; then
+            visible=0
         fi
     done
-    return 1
+    return "$visible"
 }
 
 if [[ "${1:-}" == resume ]]; then
