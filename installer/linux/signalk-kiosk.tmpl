@@ -1356,7 +1356,15 @@ cmd_enable() {
     if [[ "$screen_pause" == on ]]; then
         # Every enable starts the watch's memory afresh: a monitor whose
         # DDC/CI was switched off since would otherwise pause a lit screen.
-        run_root rm -rf "$SCREEN_STATE_DIR"
+        # A running watch is stopped first, so it cannot write to the memory
+        # after it is gone; the kiosk restart below, or the next boot, starts
+        # the new one. One that does not stop keeps the memory it would
+        # write back.
+        if [[ ! -f "$SCREEN_UNIT_FILE" ]] || run_root systemctl stop "$SCREEN_UNIT"; then
+            run_root rm -rf "$SCREEN_STATE_DIR"
+        else
+            warn "could not stop ${SCREEN_UNIT}; it keeps the monitors it remembers"
+        fi
         render_screen_watch | install_file 0755 "$SCREEN_WATCH_FILE"
         render_screen_unit | install_file 0644 "$SCREEN_UNIT_FILE"
         render_i2c_module | install_file 0644 "$I2C_MODULE_FILE"

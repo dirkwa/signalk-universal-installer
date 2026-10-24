@@ -637,6 +637,13 @@ case "$*" in
         [[ ! -e "$STUB_STATE/lightdm-stopped" ]]; exit ;;
     "is-enabled signalk-kiosk.service") echo enabled ;;
     "is-active signalk-kiosk.service") echo active ;;
+    "stop signalk-kiosk-screen.service")
+        if [[ -e "$STUB_STATE/screen-stop-fails" ]]; then
+            exit 1
+        fi
+        if [[ -e "$STUB_ROOT/var/lib/signalk-kiosk-screen/answered" ]]; then
+            : >"$STUB_STATE/screen-memory-at-stop"
+        fi ;;
 esac
 exit 0
 EOF
@@ -1027,6 +1034,7 @@ else
     miss "screen watch not executable"
 fi
 call_made 'systemctl enable signalk-kiosk-screen.service' "enables the screen watch with the kiosk"
+call_not_made 'systemctl stop signalk-kiosk-screen.service' "a first enable has no screen watch to stop"
 call_made 'modprobe i2c-dev' "loads i2c-dev so the DDC buses have /dev/i2c-N nodes"
 conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on by default"
 call_made 'udevadm trigger --action=change --subsystem-match=input' \
@@ -1063,7 +1071,9 @@ out_has 'the desktop is still running; reboot' "says to reboot"
 echo "  re-enable with --readwrite after the reboot"
 : >"$state/lightdm-stopped"
 : >"$state/calls"
-rm -f "$state/user-calls"
+rm -f "$state/user-calls" "$state/screen-memory-at-stop"
+mkdir -p "$root/var/lib/signalk-kiosk-screen"
+echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 run_enable --readwrite --light
 if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readwrite"}' ]]; then
     ok "the existing kiosk user is changed to readwrite"
@@ -1083,6 +1093,11 @@ conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed' "re-enable keeps the recorded plugi
 conf_has 'KIOSK_SK_USER_CREATED=1' "re-enable keeps the recorded Signal K user"
 call_not_made 'signalk restart' "plugin already loaded: no server restart"
 call_made 'systemctl restart signalk-kiosk.service' "no desktop running: restarts the kiosk"
+if [[ -e "$state/screen-memory-at-stop" && ! -e "$root/var/lib/signalk-kiosk-screen" ]]; then
+    ok "a re-enable stops the running screen watch, then empties its memory"
+else
+    miss "screen watch stop and memory reset: $(grep -c 'stop signalk-kiosk-screen' "$state/calls") stop calls, memory at stop: $([[ -e "$state/screen-memory-at-stop" ]] && echo yes || echo no)"
+fi
 no_unexpected_requests
 
 echo "  re-enable with --no-screen-pause, then without"
@@ -1117,9 +1132,17 @@ if [[ ! -e "$root/var/lib/signalk-kiosk-screen" ]]; then
 else
     miss "re-enable kept the screen watch's memory"
 fi
+conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on again"
 mkdir -p "$root/var/lib/signalk-kiosk-screen"
 echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
-conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on again"
+: >"$state/screen-stop-fails"
+run_enable --readwrite --light
+rm -f "$state/screen-stop-fails"
+if [[ -f "$root/var/lib/signalk-kiosk-screen/answered" ]] && grep -qF 'could not stop' <<<"$out"; then
+    ok "a screen watch that does not stop keeps its memory, with a warning"
+else
+    miss "failed stop: memory $([[ -f "$root/var/lib/signalk-kiosk-screen/answered" ]] && echo kept || echo removed), output: $(grep -i 'screen' <<<"$out" | tr '\n' '|')"
+fi
 
 echo "  disable --purge"
 : >"$state/calls"
