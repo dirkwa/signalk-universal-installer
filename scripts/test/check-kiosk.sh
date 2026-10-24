@@ -273,7 +273,7 @@ run_watch "y y y" >/dev/null
 if [[ "$(wc -l <"$wmemory/answered" 2>/dev/null)" == 1 ]]; then
     ok "a monitor that answers is remembered, written once"
 else
-    miss "memory after three answers: $(cat "$wmemory/answered" 2>/dev/null | tr '\n' '|')"
+    miss "memory after three answers: $(tr '\n' '|' 2>/dev/null <"$wmemory/answered")"
 fi
 got=$(WKEEP=1 run_watch "n n n n")
 if [[ "$got" == "1 pkill -CONT $p|3 pkill -STOP $p|4 pkill -STOP $p|" ]]; then
