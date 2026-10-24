@@ -218,30 +218,31 @@ wmemory="$tmp/wmemory"
 # connector (on DDC bus 14), connected unless the second argument is "no".
 # The monitor's EDID is "EDID-$WEDID" (A by default). The watch's memory of
 # monitors that answered starts empty unless WKEEP=1 keeps the last run's.
-# WSECOND=<plan> adds a second monitor, card1-HDMI-A-2 on bus 15 with EDID
+# WSECOND=<plan> adds a second monitor, HDMI-A-2 on bus 15 with EDID
 # "EDID-C", answering as that plan says; WSWAP="<round> <content>" gives the
-# first connector a new EDID from that round on.
+# first connector a new EDID from that round on. WCARD names the DRM card
+# (card1 by default), which a Pi may number differently after a reboot.
 run_watch() {
     rm -rf "$wsys" "$wstate"
     [[ "${WKEEP:-}" == 1 ]] || rm -rf "$wmemory"
-    mkdir -p "$wsys/class/drm/card1-HDMI-A-1" "$wstate"
-    printf 'EDID-%s' "${WEDID:-A}" >"$wsys/class/drm/card1-HDMI-A-1/edid"
+    mkdir -p "$wsys/class/drm/${WCARD:-card1}-HDMI-A-1" "$wstate"
+    printf 'EDID-%s' "${WEDID:-A}" >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-1/edid"
     if [[ -n "${WSECOND:-}" ]]; then
-        mkdir -p "$wsys/class/drm/card1-HDMI-A-2"
-        echo connected >"$wsys/class/drm/card1-HDMI-A-2/status"
-        printf 'EDID-C' >"$wsys/class/drm/card1-HDMI-A-2/edid"
-        ln -s ../../../../devices/platform/soc/107d508280.i2c/i2c-15 "$wsys/class/drm/card1-HDMI-A-2/ddc"
+        mkdir -p "$wsys/class/drm/${WCARD:-card1}-HDMI-A-2"
+        echo connected >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-2/status"
+        printf 'EDID-C' >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-2/edid"
+        ln -s ../../../../devices/platform/soc/107d508280.i2c/i2c-15 "$wsys/class/drm/${WCARD:-card1}-HDMI-A-2/ddc"
         tr ' ' '\n' <<<"$WSECOND" >"$wstate/plan-15"
     fi
     if [[ -n "${WSWAP:-}" ]]; then
-        echo "${WSWAP%% *} $wsys/class/drm/card1-HDMI-A-1/edid ${WSWAP#* }" >"$wstate/swap"
+        echo "${WSWAP%% *} $wsys/class/drm/${WCARD:-card1}-HDMI-A-1/edid ${WSWAP#* }" >"$wstate/swap"
     fi
     if [[ "${2:-yes}" == no ]]; then
-        echo disconnected >"$wsys/class/drm/card1-HDMI-A-1/status"
+        echo disconnected >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-1/status"
     else
-        echo connected >"$wsys/class/drm/card1-HDMI-A-1/status"
+        echo connected >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-1/status"
     fi
-    ln -s ../../../../devices/platform/soc/107d508280.i2c/i2c-14 "$wsys/class/drm/card1-HDMI-A-1/ddc"
+    ln -s ../../../../devices/platform/soc/107d508280.i2c/i2c-14 "$wsys/class/drm/${WCARD:-card1}-HDMI-A-1/ddc"
     tr ' ' '\n' <<<"$1" >"$wstate/plan"
     echo 1 >"$wstate/round"
     : >"$wstate/signals"
@@ -280,6 +281,17 @@ if [[ "$got" == "1 pkill -CONT $p|3 pkill -STOP $p|4 pkill -STOP $p|" ]]; then
     ok "a remembered monitor off since the watch restarted pauses the browser"
 else
     miss "remembered monitor, silent after a restart: $got"
+fi
+if [[ "$(cat "$wmemory/answered" 2>/dev/null)" =~ ^HDMI-A-1:[0-9a-f]{16}$ ]]; then
+    ok "the memory names the connector without its DRM card"
+else
+    miss "memory line: $(tr '\n' '|' 2>/dev/null <"$wmemory/answered")"
+fi
+got=$(WKEEP=1 WCARD=card0 run_watch "n n n n")
+if [[ "$got" == "1 pkill -CONT $p|3 pkill -STOP $p|4 pkill -STOP $p|" ]]; then
+    ok "a remembered monitor is recognised when its DRM card is numbered differently"
+else
+    miss "remembered monitor on card0 after card1: $got"
 fi
 got=$(WKEEP=1 WEDID=B run_watch "n n n n")
 if [[ "$got" == "1 pkill -CONT $p|" ]]; then
@@ -1076,7 +1088,7 @@ no_unexpected_requests
 echo "  re-enable with --no-screen-pause, then without"
 : >"$state/calls"
 mkdir -p "$root/var/lib/signalk-kiosk-screen"
-echo 'card1-HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
+echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 run_enable --readwrite --light --no-screen-pause
 call_made 'systemctl disable --now signalk-kiosk-screen.service' \
     "--no-screen-pause stops the screen watch, which resumes the browser"
@@ -1097,7 +1109,7 @@ else
 fi
 : >"$state/calls"
 mkdir -p "$root/var/lib/signalk-kiosk-screen"
-echo 'card1-HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
+echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 run_enable --readwrite --light
 call_made 'systemctl enable signalk-kiosk-screen.service' "a re-enable without the flag puts the screen watch back"
 if [[ ! -e "$root/var/lib/signalk-kiosk-screen" ]]; then
@@ -1106,7 +1118,7 @@ else
     miss "re-enable kept the screen watch's memory"
 fi
 mkdir -p "$root/var/lib/signalk-kiosk-screen"
-echo 'card1-HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
+echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on again"
 
 echo "  disable --purge"

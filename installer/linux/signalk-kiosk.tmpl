@@ -584,12 +584,15 @@ if [[ -r "$MEMORY" ]]; then
 fi
 
 # A connector and a hash of its monitor's EDID, or nothing while no EDID can
-# be read. The EDID tells another monitor on the same connector apart.
+# be read. The EDID tells another monitor on the same connector apart. The
+# connector is named without its DRM card ("HDMI-A-1", not "card1-HDMI-A-1"):
+# a Pi can number its cards differently from one boot to the next.
 monitor_id() {
-    local sum
+    local sum connector
     [[ "$(wc -c 2>/dev/null <"$1/edid")" -gt 0 ]] || return 0
     sum=$(sha256sum 2>/dev/null <"$1/edid") || return 0
-    printf '%s:%s' "${1##*/}" "${sum:0:16}"
+    connector=${1##*/}
+    printf '%s:%s' "${connector#card*-}" "${sum:0:16}"
 }
 
 # remember <key> <monitor id>: written to the file once per monitor with an
