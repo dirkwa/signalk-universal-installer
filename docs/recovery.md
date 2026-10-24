@@ -117,7 +117,7 @@ sudo systemctl restart systemd-journald
 
 ## Hardware watchdog (Raspberry Pi)
 
-On a Pi the installer arms the hardware watchdog with the systemd drop-in in the recipe below: when the kernel or systemd hangs, systemd's pings stop and the watchdog resets the Pi. systemd disarms it on `poweroff` and `halt`, so a Pi that was shut down stays down; that holds while the driver runs without `nowayout`, which the Pi kernel does not set. A box that reboots by itself with no shutdown lines at the end of the previous boot's journal (`journalctl -b -1 -n 20`) was reset by the watchdog or lost power; `signalk bug-report` captures both the watchdog state and those lines.
+On a Pi the installer arms the hardware watchdog with the systemd drop-in in the recipe below: when the kernel or systemd hangs, systemd's pings stop and the watchdog resets the Pi. systemd disarms it on `poweroff` and `halt`, so a Pi that was shut down stays down; that holds while the driver runs without `nowayout`, which the Pi kernel does not set. A box that reboots by itself with no shutdown lines at the end of the previous boot's journal (`journalctl -b -1 -n 20`) was reset by the watchdog or lost power; `signalk bug-report` captures both the watchdog state and those lines. A box that is frozen because it ran out of memory is not reset; [earlyoom](#out-of-memory-earlyoom) covers that case.
 
 Check that systemd drives it:
 
@@ -137,6 +137,37 @@ To turn it off, re-run the installer with `SIGNALK_NO_WATCHDOG=1` on `bash`, or 
 
 ```bash
 sudo rm /etc/systemd/system.conf.d/50-signalk-watchdog.conf
+sudo systemctl daemon-reload
+```
+
+## Out of memory (earlyoom)
+
+A box that runs out of RAM and zram does not crash: the kernel keeps swapping, and SSH, the web UI and the instruments stop answering, sometimes until the power is cut. The hardware watchdog does not reset it, because systemd still gets enough CPU to ping the watchdog. The installer therefore runs `earlyoom`, which ends the process with the highest `oom_score` once available memory is down to 10 % (SIGTERM; SIGKILL at 5 %), however much swap is left. If that is signalk-server, the updater or the doctor, systemd starts it again (`Restart=` in their Quadlets).
+
+Check that it runs, and what it ended:
+
+```bash
+systemctl status earlyoom
+journalctl -u earlyoom --no-pager | grep 'to process'
+```
+
+If you skipped that step (sudo unavailable at install time), apply it later:
+
+```bash
+sudo install -d -m 0755 /etc/systemd/system/earlyoom.service.d
+printf '[Service]\nExecStart=\nExecStart=/usr/bin/earlyoom -r 3600 -m 10,5 -s 100,100\n' \
+    | sudo install -m 0644 /dev/stdin /etc/systemd/system/earlyoom.service.d/50-signalk.conf
+sudo apt-get install -y earlyoom        # dnf install -y earlyoom on Fedora
+sudo systemctl daemon-reload
+sudo systemctl enable earlyoom
+sudo systemctl restart earlyoom
+```
+
+To turn it off, re-run the installer with `SIGNALK_NO_EARLYOOM=1` on `bash`, or by hand:
+
+```bash
+sudo systemctl disable --now earlyoom
+sudo rm /etc/systemd/system/earlyoom.service.d/50-signalk.conf
 sudo systemctl daemon-reload
 ```
 
