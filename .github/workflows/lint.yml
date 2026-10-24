@@ -110,6 +110,9 @@ jobs:
       - name: Pi hardware watchdog drop-in
         run: bash scripts/test/check-watchdog.sh
 
+      - name: earlyoom drop-in
+        run: bash scripts/test/check-earlyoom.sh
+
       - name: mDNS EXTERNALHOST wiring
         run: bash scripts/test/check-mdns-external-host.sh
 

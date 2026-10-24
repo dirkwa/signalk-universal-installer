@@ -3477,6 +3477,17 @@ cmd_bug_report() {
         journalctl -b -1 -n 5 --no-pager -o short-iso 2>/dev/null \
             || echo "(no previous boot in the journal readable as this user)"
         echo
+        echo "=== earlyoom (low-memory guard) ==="
+        # For a box that froze or lost a container: whether earlyoom runs,
+        # with which arguments, and which processes it ended. The kill line
+        # ends in the victim's cmdline, which can hold a password or token,
+        # so it is cut before the report can be uploaded.
+        systemctl show -p LoadState -p ActiveState -p UnitFileState -p DropInPaths -p ExecStart earlyoom.service 2>&1 || true
+        systemctl is-active systemd-oomd.service 2>&1 | sed 's/^/systemd-oomd: /' || true
+        earlyoom_kills=$(journalctl -u earlyoom.service --no-pager -o short-iso 2>/dev/null \
+            | grep -E 'sending SIG[A-Z]+ to process' | sed -E 's/, cmdline ".*$//' | tail -10 || true)
+        echo "${earlyoom_kills:-(no earlyoom kills in the journal readable as this user)}"
+        echo
         echo "=== pasta / passt (rootless networking backend) ==="
         # podman >= 5 defaults rootless networking to pasta, but on Debian
         # passt is only a Recommends of podman and Armbian ships with APT

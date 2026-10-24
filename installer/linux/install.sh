@@ -36,6 +36,7 @@
 #  16. Append a PATH snippet to the user's login-shell rc
 #  17. Journald drop-in (sudo)
 #  17c. Hardware watchdog drop-in on a Raspberry Pi (sudo)
+#  17d. earlyoom: end a process before RAM runs out (sudo)
 #  18. Mark bootstrap-complete in last-good.json
 #  18b. (re-runs only) Verification pass: report healthy/broken checkpoints
 #  19. Print success URLs
@@ -2930,6 +2931,91 @@ else
     fi
 fi
 # ── end of Hardware watchdog ──
+
+# 17d. earlyoom.
+#
+# When RAM and zram fill up, the kernel keeps swapping instead of killing
+# anything: the box stops answering for minutes or for good, and the hardware
+# watchdog (17c) does not fire, because PID 1 still gets enough CPU to ping it.
+# earlyoom checks /proc/meminfo several times a second and sends SIGTERM to the
+# process with the highest oom_score once MemAvailable is at 10 % (SIGKILL at
+# 5 %). If that is signalk-server, the updater or the doctor, systemd starts
+# it again (Restart= in their Quadlets).
+#
+# `-s 100` drops earlyoom's second condition, free swap under 10 %: zram lives
+# in RAM, and with a swap file behind it the box can be swapping hard long
+# before 90 % of the swap is used. systemd-oomd would act on memory pressure
+# instead, but the Pi kernels ship with PSI off (CONFIG_PSI_DEFAULT_DISABLED=y),
+# so it needs psi=1 on the kernel command line and a reboot.
+#
+# Left alone when systemd-oomd runs and `oomctl` lists a cgroup it watches
+# (it acts only on cgroups with ManagedOOM*=kill; oomctl can need root, and
+# then earlyoom is set up beside it), or when earlyoom is installed without our
+# drop-in, running or not. The oomctl check greps without -q: grep -q stops
+# reading at the first match, oomctl then dies of SIGPIPE, and pipefail turns
+# that into a failed check. SIGNALK_NO_EARLYOOM=1 skips the step; where an
+# earlier run set earlyoom up, it disables the unit and removes the drop-in
+# (the package stays). An earlyoom unit counts as installed when systemd loads
+# it, wherever the binary lives. The drop-in is world-readable, so a re-run
+# with nothing to do never touches sudo. EARLYOOM_ROOT prefixes the drop-in
+# path for scripts/test/check-earlyoom.sh.
+section "earlyoom"
+EARLYOOM_ROOT="${EARLYOOM_ROOT:-}"
+EARLYOOM_DROPIN="${EARLYOOM_ROOT}/etc/systemd/system/earlyoom.service.d/50-signalk.conf"
+EARLYOOM_DESIRED='# Installed by signalk-universal-installer.
+# SIGTERM to the process with the highest oom_score at 10 % available memory,
+# SIGKILL at 5 %, whatever swap is left (zram is RAM too).
+[Service]
+ExecStart=
+ExecStart=/usr/bin/earlyoom -r 3600 -m 10,5 -s 100,100'
+
+case "${SIGNALK_NO_EARLYOOM:-}" in
+    1 | true | TRUE | yes | YES) earlyoom_opt_out=1 ;;
+    *) earlyoom_opt_out=0 ;;
+esac
+
+if (( earlyoom_opt_out )); then
+    if [[ ! -e "$EARLYOOM_DROPIN" ]]; then
+        info "earlyoom skipped (SIGNALK_NO_EARLYOOM)"
+    elif [[ "$SUDO" = "MISSING" ]]; then
+        warn "Cannot turn earlyoom off without sudo; it stays on"
+    elif [[ "$(systemctl show -p LoadState --value earlyoom.service 2>/dev/null)" == loaded ]] \
+        && ! $SUDO systemctl disable --now earlyoom.service; then
+        warn "could not disable earlyoom; check: systemctl status earlyoom"
+    elif $SUDO rm -f "$EARLYOOM_DROPIN" && $SUDO systemctl daemon-reload; then
+        # With no unit loaded, the drop-in is left from an install that failed.
+        ok "earlyoom off ($EARLYOOM_DROPIN removed; the package, if any, stays installed)"
+    else
+        warn "could not remove $EARLYOOM_DROPIN; check: systemctl status earlyoom"
+    fi
+elif systemctl is-active --quiet systemd-oomd.service 2>/dev/null \
+    && oomctl 2>/dev/null | grep 'Path: ' >/dev/null; then
+    ok "systemd-oomd is running and watches cgroups (earlyoom not needed)"
+elif [[ "$(cat "$EARLYOOM_DROPIN" 2>/dev/null)" == "$EARLYOOM_DESIRED" ]] \
+    && systemctl is-active --quiet earlyoom.service 2>/dev/null; then
+    ok "earlyoom running (skipping)"
+elif [[ ! -e "$EARLYOOM_DROPIN" ]] && systemctl is-active --quiet earlyoom.service 2>/dev/null; then
+    ok "earlyoom is set up by the operator (left as is)"
+elif [[ ! -e "$EARLYOOM_DROPIN" && "$(systemctl show -p LoadState --value earlyoom.service 2>/dev/null)" == loaded ]]; then
+    ok "earlyoom is installed but stopped by the operator (left as is)"
+elif [[ "$SUDO" = "MISSING" ]]; then
+    warn "Cannot set up earlyoom without sudo; a box out of memory may stop responding."
+else
+    info "Setting up earlyoom: at 10 % free memory it ends the process with the highest oom_score (requires sudo)"
+    # The drop-in goes in before the package, so the start in Debian's
+    # postinst already uses these arguments instead of the packaged ones.
+    # $SUDO stays unquoted, as everywhere in this file: the tests set it empty.
+    if printf '%s\n' "$EARLYOOM_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$EARLYOOM_DROPIN" \
+        && pkg_install earlyoom \
+        && $SUDO systemctl daemon-reload \
+        && $SUDO systemctl enable earlyoom.service \
+        && $SUDO systemctl restart earlyoom.service; then
+        ok "earlyoom running ($EARLYOOM_DROPIN)"
+    else
+        warn "could not set up earlyoom; a box out of memory may stop responding."
+    fi
+fi
+# ── end of earlyoom ──
 
 # 18. Mark bootstrap-complete
 section "Recording bootstrap state"
