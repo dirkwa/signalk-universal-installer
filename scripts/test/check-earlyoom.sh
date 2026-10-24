@@ -4,8 +4,8 @@
 #   1. No earlyoom: the drop-in is written, the package installed, the unit
 #      enabled and restarted; a re-run changes nothing.
 #   2. An older drop-in of ours: rewritten and restarted.
-#   3. systemd-oomd running, or earlyoom installed by the operator (running
-#      or stopped): left alone.
+#   3. systemd-oomd watching a cgroup, or earlyoom installed by the operator
+#      (running or stopped): left alone. systemd-oomd watching nothing: set up.
 #   4. No sudo, SIGNALK_NO_EARLYOOM=1, or a failed package install: no unit
 #      enabled.
 #   5. SIGNALK_NO_EARLYOOM=1 after an earlier run set it up: disabled and the
@@ -56,6 +56,11 @@ case "$*" in
 esac
 STUB
 chmod +x "$tmp/stub/systemctl"
+cat >"$tmp/stub/oomctl" <<'STUB'
+#!/usr/bin/env bash
+cat "$EARLYOOM_ROOT/oomctl.out" 2>/dev/null
+STUB
+chmod +x "$tmp/stub/oomctl"
 
 # run_step <name> <sudo> — runs the step in the sandbox $tmp/<name>, which the
 # caller may have seeded. The earlyoom unit is loaded once the stubbed
@@ -117,11 +122,22 @@ fi
 echo "left alone"
 mkdir -p "$tmp/oomd"
 : >"$tmp/oomd/oomd-active"
+printf 'Swap Monitored CGroups:\n        Path: /\n' >"$tmp/oomd/oomctl.out"
 run_step oomd ""
 if [[ -z "$(dropin_of oomd)" && -z "$log" && "$out" == *"systemd-oomd is running"* ]]; then
-    ok "systemd-oomd running: nothing written"
+    ok "systemd-oomd watching a cgroup: nothing written"
 else
     miss "oomd: dropin=[$(dropin_of oomd)] log=[$log] out=[$out]"
+fi
+
+mkdir -p "$tmp/oomd-idle"
+: >"$tmp/oomd-idle/oomd-active"
+printf 'Swap Monitored CGroups:\nMemory Pressure Monitored CGroups:\n' >"$tmp/oomd-idle/oomctl.out"
+run_step oomd-idle ""
+if [[ "$(dropin_of oomd-idle)" == "$desired" && "$log" == "$want_log" ]]; then
+    ok "systemd-oomd running but watching nothing: earlyoom set up"
+else
+    miss "oomd idle: dropin=[$(dropin_of oomd-idle)] log=[$log] out=[$out]"
 fi
 
 seed_unit operator

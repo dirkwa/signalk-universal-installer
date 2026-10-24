@@ -2948,7 +2948,9 @@ fi
 # instead, but the Pi kernels ship with PSI off (CONFIG_PSI_DEFAULT_DISABLED=y),
 # so it needs psi=1 on the kernel command line and a reboot.
 #
-# Left alone when systemd-oomd runs, or when earlyoom is installed without our
+# Left alone when systemd-oomd runs and `oomctl` lists a cgroup it watches
+# (it acts only on cgroups with ManagedOOM*=kill; oomctl can need root, and
+# then earlyoom is set up beside it), or when earlyoom is installed without our
 # drop-in, running or not. SIGNALK_NO_EARLYOOM=1 skips the step; where an
 # earlier run set earlyoom up, it disables the unit and removes the drop-in
 # (the package stays). An earlyoom unit counts as installed when systemd loads
@@ -2984,8 +2986,9 @@ if (( earlyoom_opt_out )); then
     else
         warn "could not remove $EARLYOOM_DROPIN; check: systemctl status earlyoom"
     fi
-elif systemctl is-active --quiet systemd-oomd.service 2>/dev/null; then
-    ok "systemd-oomd is running (earlyoom not needed)"
+elif systemctl is-active --quiet systemd-oomd.service 2>/dev/null \
+    && oomctl 2>/dev/null | grep -q 'Path: '; then
+    ok "systemd-oomd is running and watches cgroups (earlyoom not needed)"
 elif [[ "$(cat "$EARLYOOM_DROPIN" 2>/dev/null)" == "$EARLYOOM_DESIRED" ]] \
     && systemctl is-active --quiet earlyoom.service 2>/dev/null; then
     ok "earlyoom running (skipping)"
@@ -2999,6 +3002,7 @@ else
     info "Setting up earlyoom: at 10 % free memory it ends the process with the highest oom_score (requires sudo)"
     # The drop-in goes in before the package, so the start in Debian's
     # postinst already uses these arguments instead of the packaged ones.
+    # $SUDO stays unquoted, as everywhere in this file: the tests set it empty.
     if printf '%s\n' "$EARLYOOM_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$EARLYOOM_DROPIN" \
         && pkg_install earlyoom \
         && $SUDO systemctl daemon-reload \
