@@ -122,7 +122,9 @@ fi
 echo "left alone"
 mkdir -p "$tmp/oomd"
 : >"$tmp/oomd/oomd-active"
-printf 'Swap Monitored CGroups:\n        Path: /\n' >"$tmp/oomd/oomctl.out"
+# Far more output after the match than a pipe holds, so a grep that stops
+# reading early would end oomctl with SIGPIPE.
+{ printf 'Swap Monitored CGroups:\n        Path: /\n'; for _ in $(seq 20000); do echo "        Memory Pressure Limit: 0.00%"; done; } >"$tmp/oomd/oomctl.out"
 run_step oomd ""
 if [[ -z "$(dropin_of oomd)" && -z "$log" && "$out" == *"systemd-oomd is running"* ]]; then
     ok "systemd-oomd watching a cgroup: nothing written"

@@ -2951,7 +2951,9 @@ fi
 # Left alone when systemd-oomd runs and `oomctl` lists a cgroup it watches
 # (it acts only on cgroups with ManagedOOM*=kill; oomctl can need root, and
 # then earlyoom is set up beside it), or when earlyoom is installed without our
-# drop-in, running or not. SIGNALK_NO_EARLYOOM=1 skips the step; where an
+# drop-in, running or not. The oomctl check greps without -q: grep -q stops
+# reading at the first match, oomctl then dies of SIGPIPE, and pipefail turns
+# that into a failed check. SIGNALK_NO_EARLYOOM=1 skips the step; where an
 # earlier run set earlyoom up, it disables the unit and removes the drop-in
 # (the package stays). An earlyoom unit counts as installed when systemd loads
 # it, wherever the binary lives. The drop-in is world-readable, so a re-run
@@ -2987,7 +2989,7 @@ if (( earlyoom_opt_out )); then
         warn "could not remove $EARLYOOM_DROPIN; check: systemctl status earlyoom"
     fi
 elif systemctl is-active --quiet systemd-oomd.service 2>/dev/null \
-    && oomctl 2>/dev/null | grep -q 'Path: '; then
+    && oomctl 2>/dev/null | grep 'Path: ' >/dev/null; then
     ok "systemd-oomd is running and watches cgroups (earlyoom not needed)"
 elif [[ "$(cat "$EARLYOOM_DROPIN" 2>/dev/null)" == "$EARLYOOM_DESIRED" ]] \
     && systemctl is-active --quiet earlyoom.service 2>/dev/null; then
