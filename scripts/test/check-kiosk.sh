@@ -10,7 +10,8 @@
 #      The screen watch, run against a fake sysfs and stubbed i2ctransfer and
 #      pkill: pauses the browser once a monitor that answered DDC/CI stays
 #      silent, resumes it on the next answer, never pauses for a monitor that
-#      has never answered.
+#      has never answered, and remembers a monitor that answered across a
+#      restart by its connector and EDID.
 #   4. The rendered launcher: waits for the server, clears the crash marker a
 #      hard power-off leaves, adds touch flags only when a touchscreen exists,
 #      starts the browser anyway once the wait runs out, and with token sign-in
@@ -53,7 +54,7 @@ JWT="eyJhbGciOiJIUzI1NiJ9.eyJpZCI6InNpZ25hbGsta2lvc2sifQ.c2lnbmF0dXJl"
 sysbin="$tmp/sysbin"
 mkdir -p "$sysbin"
 for t in bash sh cat sed grep head tail tr od mktemp rm rmdir install mkdir \
-         readlink basename dirname env jq printf sort uname cut wc touch chmod ln \
+         readlink basename dirname env jq printf sort uname cut wc touch chmod ln sha256sum \
          sleep; do
     real=$(command -v "$t") || { echo "[ERR] test needs $t" >&2; exit 2; }
     ln -s "$real" "$sysbin/$t"
@@ -202,11 +203,16 @@ echo "$(cat "$WSTATE/round") pkill $*" >>"$WSTATE/signals"
 EOF
 chmod +x "$wstubs"/*
 
+wmemory="$tmp/wmemory"
 # run_watch <plan, one y/n per round> [connected]: the watch over one HDMI
 # connector (on DDC bus 14), connected unless the second argument is "no".
+# The monitor's EDID is "EDID-$WEDID" (A by default). The watch's memory of
+# monitors that answered starts empty unless WKEEP=1 keeps the last run's.
 run_watch() {
     rm -rf "$wsys" "$wstate"
+    [[ "${WKEEP:-}" == 1 ]] || rm -rf "$wmemory"
     mkdir -p "$wsys/class/drm/card1-HDMI-A-1" "$wstate"
+    printf 'EDID-%s' "${WEDID:-A}" >"$wsys/class/drm/card1-HDMI-A-1/edid"
     if [[ "${2:-yes}" == no ]]; then
         echo disconnected >"$wsys/class/drm/card1-HDMI-A-1/status"
     else
@@ -217,6 +223,7 @@ run_watch() {
     echo 1 >"$wstate/round"
     : >"$wstate/signals"
     PATH="$wstubs:$sysbin" WSTATE="$wstate" KIOSK_SYSFS="$wsys" KIOSK_SCREEN_STEP=7 \
+        KIOSK_SCREEN_MEMORY="$wmemory/answered" \
         KIOSK_SCREEN_ROUNDS=$(wc -w <<<"$1") bash "$watch" >"$wstate/out" 2>&1
     tr '\n' '|' <"$wstate/signals"
 }
@@ -238,6 +245,30 @@ if [[ "$got" == "1 pkill -CONT $p|3 pkill -STOP $p|4 pkill -STOP $p|" ]]; then
     ok "nothing connected: the browser is paused"
 else
     miss "nothing connected: $got"
+fi
+run_watch "y y y" >/dev/null
+if [[ "$(wc -l <"$wmemory/answered" 2>/dev/null)" == 1 ]]; then
+    ok "a monitor that answers is remembered, written once"
+else
+    miss "memory after three answers: $(cat "$wmemory/answered" 2>/dev/null | tr '\n' '|')"
+fi
+got=$(WKEEP=1 run_watch "n n n n")
+if [[ "$got" == "1 pkill -CONT $p|3 pkill -STOP $p|4 pkill -STOP $p|" ]]; then
+    ok "a remembered monitor off since the watch restarted pauses the browser"
+else
+    miss "remembered monitor, silent after a restart: $got"
+fi
+got=$(WKEEP=1 WEDID=B run_watch "n n n n")
+if [[ "$got" == "1 pkill -CONT $p|" ]]; then
+    ok "another monitor on the remembered connector counts as never answered"
+else
+    miss "another monitor on the same connector: $got"
+fi
+state_dir=$(PATH="$sysbin" bash -c ". '$TMPL'; echo \"\$SCREEN_STATE\"")
+if grep -qF "MEMORY=\"\${KIOSK_SCREEN_MEMORY:-$state_dir/answered}\"" "$watch"; then
+    ok "the watch keeps its memory under \$SCREEN_STATE ($state_dir)"
+else
+    miss "the watch's memory path differs from \$SCREEN_STATE ($state_dir)"
 fi
 rm -rf "$wstate"; mkdir -p "$wstate"; echo 1 >"$wstate/round"
 PATH="$wstubs:$sysbin" WSTATE="$wstate" bash "$watch" resume
@@ -1009,11 +1040,13 @@ no_unexpected_requests
 
 echo "  re-enable with --no-screen-pause, then without"
 : >"$state/calls"
+mkdir -p "$root/var/lib/signalk-kiosk-screen"
+echo 'card1-HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 run_enable --readwrite --light --no-screen-pause
 call_made 'systemctl disable --now signalk-kiosk-screen.service' \
     "--no-screen-pause stops the screen watch, which resumes the browser"
 for f in etc/systemd/system/signalk-kiosk-screen.service usr/local/lib/signalk-kiosk/screen-watch \
-         etc/modules-load.d/signalk-kiosk-i2c.conf; do
+         etc/modules-load.d/signalk-kiosk-i2c.conf var/lib/signalk-kiosk-screen; do
     if [[ ! -e "$root/$f" ]]; then
         ok "--no-screen-pause removed: /$f"
     else
@@ -1028,8 +1061,17 @@ else
     miss "status screen-off line: $(grep 'screen off' <<<"$status_out")"
 fi
 : >"$state/calls"
+mkdir -p "$root/var/lib/signalk-kiosk-screen"
+echo 'card1-HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 run_enable --readwrite --light
 call_made 'systemctl enable signalk-kiosk-screen.service' "a re-enable without the flag puts the screen watch back"
+if [[ ! -e "$root/var/lib/signalk-kiosk-screen" ]]; then
+    ok "a re-enable starts the screen watch's memory afresh"
+else
+    miss "re-enable kept the screen watch's memory"
+fi
+mkdir -p "$root/var/lib/signalk-kiosk-screen"
+echo 'card1-HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on again"
 
 echo "  disable --purge"
@@ -1053,7 +1095,7 @@ for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/user-999.sl
          etc/pam.d/signalk-kiosk etc/signalk-kiosk.conf etc/signalk-kiosk.token \
          etc/udev/rules.d/61-signalk-kiosk-cec.rules \
          etc/systemd/system/signalk-kiosk-screen.service etc/modules-load.d/signalk-kiosk-i2c.conf \
-         var/lib/signalk-kiosk/start.html usr/local/lib/signalk-kiosk; do
+         var/lib/signalk-kiosk-screen var/lib/signalk-kiosk/start.html usr/local/lib/signalk-kiosk; do
     if [[ ! -e "$root/$f" ]]; then
         ok "removed: /$f"
     else

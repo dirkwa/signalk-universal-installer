@@ -73,6 +73,10 @@ SCREEN_WATCH="/usr/local/lib/signalk-kiosk/screen-watch"
 SCREEN_UNIT_FILE="${KIOSK_ROOT}/etc/systemd/system/${SCREEN_UNIT}"
 SCREEN_WATCH_FILE="${KIOSK_ROOT}${SCREEN_WATCH}"
 I2C_MODULE_FILE="${KIOSK_ROOT}/etc/modules-load.d/signalk-kiosk-i2c.conf"
+# The watch's memory of monitors that have answered DDC/CI. render_screen_watch
+# spells the same path out, since its script is written unexpanded.
+SCREEN_STATE="/var/lib/signalk-kiosk-screen"
+SCREEN_STATE_DIR="${KIOSK_ROOT}${SCREEN_STATE}"
 
 AUTOLOGIN_ID="signalk-autologin"
 # The kiosk's Signal K user is an admin by default: App Dock reads its app
@@ -514,8 +518,11 @@ EOF
 # request on the connector's DDC bus at address 0x37; switched off, the bus
 # answers with no acknowledgement. While every monitor that has answered
 # before stays silent, the browser gets SIGSTOP; the first answer gives it
-# SIGCONT. A monitor that has never answered (no DDC/CI, or switched off since
-# the watch started) counts as on, so it never pauses the browser.
+# SIGCONT. A monitor that has never answered (no DDC/CI) counts as on, so it
+# never pauses the browser. "Before" outlasts a restart: the watch remembers
+# each monitor that answered by its connector and EDID in
+# ${SCREEN_STATE}/answered, so a monitor switched off since boot is still
+# known to have DDC/CI, and another monitor on the same connector is not.
 #
 # The browser's processes are found by user and name, not by cgroup:
 # pam_systemd moves cage into the session's scope and Chromium moves itself
@@ -565,22 +572,62 @@ ddc_answers() {
 # Buses whose monitor has answered at least once since the watch started.
 declare -A answered=()
 
+# Monitors that have answered before, kept across restarts by connector and
+# EDID: one switched off since boot would otherwise never answer, count as
+# on, and leave the browser running. `signalk kiosk enable` empties it.
+MEMORY="${KIOSK_SCREEN_MEMORY:-/var/lib/signalk-kiosk-screen/answered}"
+declare -A remembered=()
+if [[ -r "$MEMORY" ]]; then
+    while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+            remembered[$line]=1
+        fi
+    done <"$MEMORY"
+fi
+
+# A connector and a hash of its monitor's EDID, or nothing while no EDID can
+# be read. The EDID tells another monitor on the same connector apart.
+monitor_id() {
+    local sum
+    [[ "$(wc -c 2>/dev/null <"$1/edid")" -gt 0 ]] || return 0
+    sum=$(sha256sum 2>/dev/null <"$1/edid") || return 0
+    printf '%s:%s' "${1##*/}" "${sum:0:16}"
+}
+
+# Written once per monitor, so a running watch does not write every 5s.
+remember() {
+    if [[ -z "$1" ]]; then
+        return 0
+    fi
+    if [[ -z "${remembered[$1]:-}" ]]; then
+        remembered[$1]=1
+        { mkdir -p "${MEMORY%/*}" && printf '%s\n' "$1" >>"$MEMORY"; } 2>/dev/null || true
+    fi
+}
+
 # True while some connected monitor may be showing the browser: one without
 # a DDC bus, one that answers, or one that has never answered. False when
-# every connected monitor has answered before and is silent now, or when
-# nothing is connected.
+# every connected monitor has answered before, in this run or an earlier one,
+# and is silent now, or when nothing is connected.
 screen_visible() {
-    local c link bus
+    local c link bus id
     for c in "${SYSFS}"/class/drm/card*-*; do
         [[ "$(cat "$c/status" 2>/dev/null)" == connected ]] || continue
         link=$(readlink "$c/ddc" 2>/dev/null) || return 0
         bus=${link##*/i2c-}
         [[ "$bus" =~ ^[0-9]+$ ]] || return 0
+        id=$(monitor_id "$c")
         if ddc_answers "$bus"; then
             answered[$bus]=1
+            remember "$id"
             return 0
         fi
-        [[ -n "${answered[$bus]:-}" ]] || return 0
+        if [[ -n "${answered[$bus]:-}" ]]; then
+            continue
+        fi
+        if [[ -z "$id" || -z "${remembered[$id]:-}" ]]; then
+            return 0
+        fi
     done
     return 1
 }
@@ -999,6 +1046,7 @@ remove_screen_watch() {
         run_root systemctl disable --now "$SCREEN_UNIT" || true
     fi
     run_root rm -f "$SCREEN_UNIT_FILE" "$SCREEN_WATCH_FILE" "$I2C_MODULE_FILE"
+    run_root rm -rf "$SCREEN_STATE_DIR"
 }
 
 # ─── commands ──────────────────────────────────────────────────────────
@@ -1301,6 +1349,9 @@ cmd_enable() {
     render_udev_rule | install_file 0644 "$UDEV_RULE_FILE"
     reload_udev_input
     if [[ "$screen_pause" == on ]]; then
+        # Every enable starts the watch's memory afresh: a monitor whose
+        # DDC/CI was switched off since would otherwise pause a lit screen.
+        run_root rm -rf "$SCREEN_STATE_DIR"
         render_screen_watch | install_file 0755 "$SCREEN_WATCH_FILE"
         render_screen_unit | install_file 0644 "$SCREEN_UNIT_FILE"
         render_i2c_module | install_file 0644 "$I2C_MODULE_FILE"
