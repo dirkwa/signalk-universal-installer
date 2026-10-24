@@ -36,4 +36,4 @@ SK_VERSION="${INSTALLER_VERSION:-unknown}"
 sed -e "s|__SK_VERSION__|${SK_VERSION}|g" \
     "$TEMPLATE" >"$TARGET"
 chmod 0755 "$TARGET"
-ok "Installed $TARGET"
+ok "signalk installed at $TARGET (version $SK_VERSION)"
