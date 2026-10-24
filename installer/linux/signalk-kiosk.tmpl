@@ -538,8 +538,8 @@ set -uo pipefail
 
 SYSFS="${KIOSK_SYSFS:-/sys}"
 STEP="${KIOSK_SCREEN_STEP:-5}"
-# Silent checks in a row before the browser is paused: 3 at 5s apart is 15s,
-# longer than the hotplug drop some monitors give while they power up.
+# Silent checks in a row before the browser is paused: 3 at 5s apart span
+# 10s, longer than the hotplug drop some monitors give while they power up.
 MISSES="${KIOSK_SCREEN_MISSES:-3}"
 # Tests stop the loop after this many checks; 0 runs it until stopped.
 ROUNDS="${KIOSK_SCREEN_ROUNDS:-0}"
