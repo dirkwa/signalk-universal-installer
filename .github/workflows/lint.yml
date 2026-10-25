@@ -113,6 +113,9 @@ jobs:
       - name: earlyoom drop-in
         run: bash scripts/test/check-earlyoom.sh
 
+      - name: host power off and reboot
+        run: bash scripts/test/check-host-power.sh
+
       - name: mDNS EXTERNALHOST wiring
         run: bash scripts/test/check-mdns-external-host.sh
 

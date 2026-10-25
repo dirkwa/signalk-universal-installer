@@ -2060,6 +2060,26 @@ cmd_uninstall() {
     rm -f "$HOME/.config/systemd/user/podman.service.d/override.conf" 2>/dev/null || true
     rmdir "$HOME/.config/systemd/user/podman.service.d" 2>/dev/null || true
 
+    # The power units the installer wrote (step 17e), and the polkit rule
+    # that lets this account power off: removed without a password prompt
+    # when sudo allows it, otherwise listed under "To purge" below.
+    if ! rm -f "$HOME/.config/systemd/user/signalk-poweroff.service" \
+        "$HOME/.config/systemd/user/signalk-reboot.service"; then
+        echo "[WARN] Could not remove the power off / reboot user units." >&2
+    fi
+    # Debian's rules.d is root:polkitd 0750: this account cannot see the rule
+    # there, so an unreadable directory counts as "the rule may exist".
+    local power_rule=/etc/polkit-1/rules.d/50-signalk-power.rules
+    if [[ -e "$power_rule" ]] || [[ -d "${power_rule%/*}" && ! -x "${power_rule%/*}" ]] \
+        || sudo -n test -e "$power_rule" 2>/dev/null; then
+        if sudo -n rm -f "$power_rule" 2>/dev/null; then
+            echo "Removed the power off / reboot polkit rule."
+        else
+            echo "[WARN] $power_rule may still let $(id -un) power off" >&2
+            echo "       and reboot this computer; remove it with sudo (see below)." >&2
+        fi
+    fi
+
     # The app.slice CPUWeight drop-in the installer wrote. Deleting the file
     # alone leaves the running slice at 300 until re-login (systemd does not
     # write the default back), so also reset the live value.
@@ -2107,7 +2127,8 @@ cmd_uninstall() {
     echo "         ~/.local/bin/signalk-kiosk"
     echo "  sudo systemctl disable --now signalk-timesync.timer"
     echo "  sudo rm -f /usr/local/bin/signalk-timesync /etc/default/signalk-timesync \\"
-    echo "         /etc/systemd/system/signalk-timesync.{service,timer}"
+    echo "         /etc/systemd/system/signalk-timesync.{service,timer} \\"
+    echo "         /etc/polkit-1/rules.d/50-signalk-power.rules"
     echo "  sudo systemctl daemon-reload"
     echo "Done."
 }
