@@ -171,6 +171,27 @@ sudo rm /etc/systemd/system/earlyoom.service.d/50-signalk.conf
 sudo systemctl daemon-reload
 ```
 
+## Power off and reboot from the Updater Console
+
+The Dashboard's Power off and Reboot buttons start `signalk-poweroff.service` or `signalk-reboot.service` in the user manager, which run `systemctl poweroff` or `systemctl reboot`. systemd stops the containers first, so signalk-server writes its data before the power goes. A Raspberry Pi stays off until its power is cycled; a Pi 5 starts again from its power button. The stack's user has no login session, so logind asks polkit, and polkit allows it only through the installer's rule.
+
+Check the rule and the units:
+
+```bash
+sudo cat /etc/polkit-1/rules.d/50-signalk-power.rules
+systemctl --user status signalk-poweroff.service signalk-reboot.service
+```
+
+A unit in `failed` with `Access denied` or `Interactive authentication required` in `journalctl --user -u signalk-poweroff` means the rule is missing or names another user; re-run the installer.
+
+To remove it:
+
+```bash
+sudo rm /etc/polkit-1/rules.d/50-signalk-power.rules
+rm ~/.config/systemd/user/signalk-{poweroff,reboot}.service
+systemctl --user daemon-reload
+```
+
 ## When even SSH is gone
 
 If you can't even SSH:

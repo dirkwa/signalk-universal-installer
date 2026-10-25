@@ -37,6 +37,7 @@
 #  17. Journald drop-in (sudo)
 #  17c. Hardware watchdog drop-in on a Raspberry Pi (sudo)
 #  17d. earlyoom: end a process before RAM runs out (sudo)
+#  17e. Power off / reboot from the Updater Console: polkit rule (sudo)
 #  18. Mark bootstrap-complete in last-good.json
 #  18b. (re-runs only) Verification pass: report healthy/broken checkpoints
 #  19. Print success URLs
@@ -339,6 +340,7 @@ pkg_install() {
     for p in "${debs[@]}"; do
         case "$p" in
             uidmap) pkgs+=("shadow-utils") ;;
+            polkitd) pkgs+=("polkit") ;;
             *)      pkgs+=("$p") ;;
         esac
     done
@@ -3016,6 +3018,101 @@ else
     fi
 fi
 # ── end of earlyoom ──
+
+# 17e. Power off and reboot from the Updater Console.
+#
+# logind lets a user without an active seat session power off or reboot only
+# after polkit's auth_admin, and the stack's user has no session: systemd
+# --user runs it through linger. So a polkit rule lets this one user do
+# exactly the four logind actions below, and two oneshot user units run the
+# commands. signalk-updater-server starts them over the user bus it already
+# drives (POST /api/host/{poweroff,reboot}) and offers the buttons only while
+# the units are loaded, which is why they are written only after the rule. No
+# container gets a new mount or the system bus. The *-multiple-sessions
+# actions cover a kiosk or SSH session of another user; inhibitors still
+# block, since ignore-inhibit is not granted.
+#
+# Skipped in a podman machine (macOS, Windows): powering off that VM would
+# stop the stack and leave the computer running. A minimal Debian install
+# has no polkitd, and logind then denies the user outright, so polkitd is
+# installed when missing, followed by a reload of the bus
+# configuration: dbus's own reload trigger runs before polkitd's postinst
+# creates the polkitd user its bus policy names, so until a reload polkitd
+# cannot take its bus name and every logind check times out (seen on Debian
+# trixie, polkitd 126). Debian makes /etc/polkit-1/rules.d root:polkitd
+# 0750, so a re-run compares the rule through `sudo -n` there and touches
+# sudo with a prompt only when that fails. POWER_ROOT prefixes the rule path
+# for scripts/test/check-host-power.sh.
+section "Power off and reboot from the Updater Console"
+POWER_ROOT="${POWER_ROOT:-}"
+POWER_RULE="${POWER_ROOT}/etc/polkit-1/rules.d/50-signalk-power.rules"
+POWER_UNIT_DIR="$HOME/.config/systemd/user"
+# The account this process runs as, which owns the stack: an inherited $USER
+# could name another account in a rule that grants power off.
+POWER_USER=$(id -un)
+POWER_RULE_DESIRED="// Installed by signalk-universal-installer.
+// Lets ${POWER_USER}, which runs the SignalK stack without a login session, power
+// off and reboot the host from the Updater Console.
+polkit.addRule(function (action, subject) {
+    if (subject.user == \"${POWER_USER}\" && [
+        \"org.freedesktop.login1.power-off\",
+        \"org.freedesktop.login1.power-off-multiple-sessions\",
+        \"org.freedesktop.login1.reboot\",
+        \"org.freedesktop.login1.reboot-multiple-sessions\"
+    ].indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+});"
+power_unit() {
+    printf '%s\n' "# Installed by signalk-universal-installer.
+# Started by signalk-updater-server (POST /api/host/$1); allowed by
+# /etc/polkit-1/rules.d/50-signalk-power.rules. RemainAfterExit leaves the
+# unit active when logind accepted the request and failed when it refused,
+# which is how the updater tells the two apart.
+[Unit]
+Description=$2 the host (requested from the Updater Console)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=systemctl $1"
+}
+# Current means on disk as written here AND loaded by the user manager: a
+# daemon-reload that failed after the write would otherwise be skipped on
+# every later run, and the updater would never see the units.
+power_units_current() {
+    [[ "$(cat "$POWER_UNIT_DIR/signalk-poweroff.service" 2>/dev/null)" == "$(power_unit poweroff 'Power off')" ]] \
+        && [[ "$(cat "$POWER_UNIT_DIR/signalk-reboot.service" 2>/dev/null)" == "$(power_unit reboot Reboot)" ]] \
+        && [[ "$(systemctl --user show -p LoadState --value signalk-poweroff.service signalk-reboot.service 2>/dev/null)" == $'loaded\n\nloaded' ]]
+}
+power_rule_current() {
+    local current
+    current=$(cat "$POWER_RULE" 2>/dev/null) \
+        || { [[ "$SUDO" == "sudo" ]] && current=$(sudo -n cat "$POWER_RULE" 2>/dev/null); } \
+        || return 1
+    [[ "$current" == "$POWER_RULE_DESIRED" ]]
+}
+
+if [[ -e "${POWER_ROOT}/etc/containers/podman-machine" ]]; then
+    info "Power off and reboot from the console skipped: this is a podman machine VM"
+elif command -v pkaction >/dev/null 2>&1 && power_rule_current && power_units_current; then
+    ok "power off and reboot from the Updater Console already set up (skipping)"
+elif [[ "$SUDO" = "MISSING" ]]; then
+    warn "Cannot allow power off and reboot from the Updater Console without sudo"
+elif ! command -v pkaction >/dev/null 2>&1 \
+    && ! { pkg_install polkitd && $SUDO systemctl reload dbus.service; }; then
+    warn "could not set up polkitd; the Updater Console cannot power off or reboot the host"
+elif ! printf '%s\n' "$POWER_RULE_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$POWER_RULE"; then
+    warn "could not write $POWER_RULE; the Updater Console cannot power off or reboot the host"
+elif ! mkdir -p "$POWER_UNIT_DIR" \
+    || ! power_unit poweroff 'Power off' >"$POWER_UNIT_DIR/signalk-poweroff.service" \
+    || ! power_unit reboot Reboot >"$POWER_UNIT_DIR/signalk-reboot.service" \
+    || ! systemctl --user daemon-reload; then
+    warn "could not install the signalk-poweroff/reboot user units"
+else
+    ok "the Updater Console can power off and reboot the host ($POWER_RULE)"
+fi
+# ── end of host power ──
 
 # 18. Mark bootstrap-complete
 section "Recording bootstrap state"

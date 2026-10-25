@@ -2060,6 +2060,20 @@ cmd_uninstall() {
     rm -f "$HOME/.config/systemd/user/podman.service.d/override.conf" 2>/dev/null || true
     rmdir "$HOME/.config/systemd/user/podman.service.d" 2>/dev/null || true
 
+    # The power units the installer wrote (step 17e), and the polkit rule
+    # that lets this account power off: removed without a password prompt
+    # when sudo allows it, otherwise listed under "To purge" below.
+    rm -f "$HOME/.config/systemd/user/signalk-poweroff.service" \
+        "$HOME/.config/systemd/user/signalk-reboot.service"
+    if [[ -e /etc/polkit-1/rules.d/50-signalk-power.rules ]] || sudo -n test -e /etc/polkit-1/rules.d/50-signalk-power.rules 2>/dev/null; then
+        if sudo -n rm -f /etc/polkit-1/rules.d/50-signalk-power.rules 2>/dev/null; then
+            echo "Removed the power off / reboot polkit rule."
+        else
+            echo "[WARN] /etc/polkit-1/rules.d/50-signalk-power.rules still lets $(id -un) power off" >&2
+            echo "       and reboot this computer; remove it with sudo (see below)." >&2
+        fi
+    fi
+
     # The app.slice CPUWeight drop-in the installer wrote. Deleting the file
     # alone leaves the running slice at 300 until re-login (systemd does not
     # write the default back), so also reset the live value.
@@ -2107,7 +2121,8 @@ cmd_uninstall() {
     echo "         ~/.local/bin/signalk-kiosk"
     echo "  sudo systemctl disable --now signalk-timesync.timer"
     echo "  sudo rm -f /usr/local/bin/signalk-timesync /etc/default/signalk-timesync \\"
-    echo "         /etc/systemd/system/signalk-timesync.{service,timer}"
+    echo "         /etc/systemd/system/signalk-timesync.{service,timer} \\"
+    echo "         /etc/polkit-1/rules.d/50-signalk-power.rules"
     echo "  sudo systemctl daemon-reload"
     echo "Done."
 }

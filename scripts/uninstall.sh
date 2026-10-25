@@ -40,6 +40,21 @@ done
 # it only ever contains the proxy's unix socket.
 podman volume rm signalk-dbus-socket 2>/dev/null || true
 
+# The power units the installer wrote (install.sh step 17e), and the polkit
+# rule that lets this account power off: removed without a password prompt
+# when sudo allows it, otherwise listed under "Preserved" below.
+rm -f "${HOME}/.config/systemd/user/signalk-poweroff.service" \
+    "${HOME}/.config/systemd/user/signalk-reboot.service"
+POWER_RULE=/etc/polkit-1/rules.d/50-signalk-power.rules
+if [[ -e "$POWER_RULE" ]] || sudo -n test -e "$POWER_RULE" 2>/dev/null; then
+    if sudo -n rm -f "$POWER_RULE" 2>/dev/null; then
+        echo "Removed the power off / reboot polkit rule."
+    else
+        echo "[WARN] $POWER_RULE still lets $(id -un) power off and reboot" >&2
+        echo "       this computer; remove it with sudo (see below)." >&2
+    fi
+fi
+
 # The app.slice CPUWeight drop-in the installer wrote. Deleting the file
 # alone leaves the running slice at 300 until re-login (systemd does not
 # write the default back), so also reset the live value.
@@ -62,6 +77,7 @@ echo "  ~/.signalk-backup/         — Backup repo (if present)"
 echo "  ~/.local/bin/signalk-recovery — Host recovery script"
 echo "  ~/.local/bin/signalk-{socketcan,bluetooth,kiosk} — hardware helpers"
 echo "  signalk-timesync (system timer)   — disable: sudo systemctl disable --now signalk-timesync.timer"
+echo "  power off/reboot polkit rule (if the warning above showed) — remove: sudo rm /etc/polkit-1/rules.d/50-signalk-power.rules"
 echo
 echo "To purge ALL data, run:  rm -rf ~/.signalk ~/.signalk-updater ~/.signalk-doctor ~/.signalk-backup"
 echo "Done."
