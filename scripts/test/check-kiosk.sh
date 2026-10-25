@@ -10,7 +10,8 @@
 #      The screen watch, run against a fake sysfs and stubbed i2ctransfer and
 #      pkill: pauses the browser once a monitor that answered DDC/CI stays
 #      silent, resumes it on the next answer, never pauses for a monitor that
-#      has never answered.
+#      has never answered, and remembers a monitor that answered across a
+#      restart by its connector and EDID.
 #   4. The rendered launcher: waits for the server, clears the crash marker a
 #      hard power-off leaves, adds touch flags only when a touchscreen exists,
 #      starts the browser anyway once the wait runs out, and with token sign-in
@@ -53,7 +54,7 @@ JWT="eyJhbGciOiJIUzI1NiJ9.eyJpZCI6InNpZ25hbGsta2lvc2sifQ.c2lnbmF0dXJl"
 sysbin="$tmp/sysbin"
 mkdir -p "$sysbin"
 for t in bash sh cat sed grep head tail tr od mktemp rm rmdir install mkdir \
-         readlink basename dirname env jq printf sort uname cut wc touch chmod ln \
+         readlink basename dirname env jq printf sort uname cut wc touch chmod ln sha256sum \
          sleep; do
     real=$(command -v "$t") || { echo "[ERR] test needs $t" >&2; exit 2; }
     ln -s "$real" "$sysbin/$t"
@@ -184,16 +185,26 @@ wsys="$tmp/wsys"
 wstubs="$tmp/wstubs"
 wstate="$tmp/wstate"
 mkdir -p "$wstubs"
-# Answers on the DDC bus as line <round> of $WSTATE/plan says (y or n); the
-# round is counted by the watch's own sleep between checks (7s in the tests).
+# Answers on DDC bus N as line <round> of $WSTATE/plan-N says, or of
+# $WSTATE/plan without one (y or n); the round is counted by the watch's own
+# sleep between checks (7s in the tests), which also writes a new EDID when
+# $WSTATE/swap says "<round> <edid file> <content>".
 cat >"$wstubs/i2ctransfer" <<'EOF'
 #!/bin/bash
 round=$(cat "$WSTATE/round")
-[[ "$(sed -n "${round}p" "$WSTATE/plan")" == y ]]
+plan="$WSTATE/plan-$2"
+[[ -f "$plan" ]] || plan="$WSTATE/plan"
+[[ "$(sed -n "${round}p" "$plan")" == y ]]
 EOF
 cat >"$wstubs/sleep" <<'EOF'
 #!/bin/bash
-[[ "$1" == 7 ]] && echo $(( $(cat "$WSTATE/round") + 1 )) >"$WSTATE/round"
+[[ "$1" == 7 ]] || exit 0
+round=$(( $(cat "$WSTATE/round") + 1 ))
+echo "$round" >"$WSTATE/round"
+if [[ -f "$WSTATE/swap" ]]; then
+    read -r at file content <"$WSTATE/swap"
+    [[ "$at" == "$round" ]] && printf '%s' "$content" >"$file"
+fi
 exit 0
 EOF
 cat >"$wstubs/pkill" <<'EOF'
@@ -202,21 +213,41 @@ echo "$(cat "$WSTATE/round") pkill $*" >>"$WSTATE/signals"
 EOF
 chmod +x "$wstubs"/*
 
+wmemory="$tmp/wmemory"
 # run_watch <plan, one y/n per round> [connected]: the watch over one HDMI
 # connector (on DDC bus 14), connected unless the second argument is "no".
+# The monitor's EDID is "EDID-$WEDID" (A by default). The watch's memory of
+# monitors that answered starts empty unless WKEEP=1 keeps the last run's.
+# WSECOND=<plan> adds a second monitor, HDMI-A-2 on bus 15 with EDID
+# "EDID-C", answering as that plan says; WSWAP="<round> <content>" gives the
+# first connector a new EDID from that round on. WCARD names the DRM card
+# (card1 by default), which a Pi may number differently after a reboot.
 run_watch() {
     rm -rf "$wsys" "$wstate"
-    mkdir -p "$wsys/class/drm/card1-HDMI-A-1" "$wstate"
-    if [[ "${2:-yes}" == no ]]; then
-        echo disconnected >"$wsys/class/drm/card1-HDMI-A-1/status"
-    else
-        echo connected >"$wsys/class/drm/card1-HDMI-A-1/status"
+    [[ "${WKEEP:-}" == 1 ]] || rm -rf "$wmemory"
+    mkdir -p "$wsys/class/drm/${WCARD:-card1}-HDMI-A-1" "$wstate"
+    printf 'EDID-%s' "${WEDID:-A}" >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-1/edid"
+    if [[ -n "${WSECOND:-}" ]]; then
+        mkdir -p "$wsys/class/drm/${WCARD:-card1}-HDMI-A-2"
+        echo connected >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-2/status"
+        printf 'EDID-C' >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-2/edid"
+        ln -s ../../../../devices/platform/soc/107d508280.i2c/i2c-15 "$wsys/class/drm/${WCARD:-card1}-HDMI-A-2/ddc"
+        tr ' ' '\n' <<<"$WSECOND" >"$wstate/plan-15"
     fi
-    ln -s ../../../../devices/platform/soc/107d508280.i2c/i2c-14 "$wsys/class/drm/card1-HDMI-A-1/ddc"
+    if [[ -n "${WSWAP:-}" ]]; then
+        echo "${WSWAP%% *} $wsys/class/drm/${WCARD:-card1}-HDMI-A-1/edid ${WSWAP#* }" >"$wstate/swap"
+    fi
+    if [[ "${2:-yes}" == no ]]; then
+        echo disconnected >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-1/status"
+    else
+        echo connected >"$wsys/class/drm/${WCARD:-card1}-HDMI-A-1/status"
+    fi
+    ln -s ../../../../devices/platform/soc/107d508280.i2c/i2c-14 "$wsys/class/drm/${WCARD:-card1}-HDMI-A-1/ddc"
     tr ' ' '\n' <<<"$1" >"$wstate/plan"
     echo 1 >"$wstate/round"
     : >"$wstate/signals"
     PATH="$wstubs:$sysbin" WSTATE="$wstate" KIOSK_SYSFS="$wsys" KIOSK_SCREEN_STEP=7 \
+        KIOSK_SCREEN_MEMORY="$wmemory/answered" \
         KIOSK_SCREEN_ROUNDS=$(wc -w <<<"$1") bash "$watch" >"$wstate/out" 2>&1
     tr '\n' '|' <"$wstate/signals"
 }
@@ -238,6 +269,53 @@ if [[ "$got" == "1 pkill -CONT $p|3 pkill -STOP $p|4 pkill -STOP $p|" ]]; then
     ok "nothing connected: the browser is paused"
 else
     miss "nothing connected: $got"
+fi
+run_watch "y y y" >/dev/null
+if [[ "$(wc -l <"$wmemory/answered" 2>/dev/null)" == 1 ]]; then
+    ok "a monitor that answers is remembered, written once"
+else
+    miss "memory after three answers: $(tr '\n' '|' 2>/dev/null <"$wmemory/answered")"
+fi
+got=$(WKEEP=1 run_watch "n n n n")
+if [[ "$got" == "1 pkill -CONT $p|3 pkill -STOP $p|4 pkill -STOP $p|" ]]; then
+    ok "a remembered monitor off since the watch restarted pauses the browser"
+else
+    miss "remembered monitor, silent after a restart: $got"
+fi
+if [[ "$(cat "$wmemory/answered" 2>/dev/null)" =~ ^HDMI-A-1:[0-9a-f]{16}$ ]]; then
+    ok "the memory names the connector without its DRM card"
+else
+    miss "memory line: $(tr '\n' '|' 2>/dev/null <"$wmemory/answered")"
+fi
+got=$(WKEEP=1 WCARD=card0 run_watch "n n n n")
+if [[ "$got" == "1 pkill -CONT $p|3 pkill -STOP $p|4 pkill -STOP $p|" ]]; then
+    ok "a remembered monitor is recognised when its DRM card is numbered differently"
+else
+    miss "remembered monitor on card0 after card1: $got"
+fi
+got=$(WKEEP=1 WEDID=B run_watch "n n n n")
+if [[ "$got" == "1 pkill -CONT $p|" ]]; then
+    ok "another monitor on the remembered connector counts as never answered"
+else
+    miss "another monitor on the same connector: $got"
+fi
+got=$(WSWAP="2 EDID-B" run_watch "y n n n n")
+if [[ "$got" == "1 pkill -CONT $p|" ]]; then
+    ok "a monitor without DDC/CI plugged in where one answered keeps the browser running"
+else
+    miss "monitor swapped on a connector that answered: $got"
+fi
+got=$(WSECOND="y n n n n" run_watch "y n n n n")
+if [[ "$got" == "1 pkill -CONT $p|4 pkill -STOP $p|5 pkill -STOP $p|" ]]; then
+    ok "two monitors that answered together, both switched off: the browser is paused"
+else
+    miss "two monitors, both off: $got"
+fi
+state_dir=$(PATH="$sysbin" bash -c ". '$TMPL'; echo \"\$SCREEN_STATE\"")
+if grep -qF "MEMORY=\"\${KIOSK_SCREEN_MEMORY:-$state_dir/answered}\"" "$watch"; then
+    ok "the watch keeps its memory under \$SCREEN_STATE ($state_dir)"
+else
+    miss "the watch's memory path differs from \$SCREEN_STATE ($state_dir)"
 fi
 rm -rf "$wstate"; mkdir -p "$wstate"; echo 1 >"$wstate/round"
 PATH="$wstubs:$sysbin" WSTATE="$wstate" bash "$watch" resume
@@ -559,6 +637,13 @@ case "$*" in
         [[ ! -e "$STUB_STATE/lightdm-stopped" ]]; exit ;;
     "is-enabled signalk-kiosk.service") echo enabled ;;
     "is-active signalk-kiosk.service") echo active ;;
+    "stop signalk-kiosk-screen.service")
+        if [[ -e "$STUB_STATE/screen-stop-fails" ]]; then
+            exit 1
+        fi
+        if [[ -e "$STUB_ROOT/var/lib/signalk-kiosk-screen/answered" ]]; then
+            : >"$STUB_STATE/screen-memory-at-stop"
+        fi ;;
 esac
 exit 0
 EOF
@@ -949,6 +1034,7 @@ else
     miss "screen watch not executable"
 fi
 call_made 'systemctl enable signalk-kiosk-screen.service' "enables the screen watch with the kiosk"
+call_not_made 'systemctl stop signalk-kiosk-screen.service' "a first enable has no screen watch to stop"
 call_made 'modprobe i2c-dev' "loads i2c-dev so the DDC buses have /dev/i2c-N nodes"
 conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on by default"
 call_made 'udevadm trigger --action=change --subsystem-match=input' \
@@ -985,7 +1071,9 @@ out_has 'the desktop is still running; reboot' "says to reboot"
 echo "  re-enable with --readwrite after the reboot"
 : >"$state/lightdm-stopped"
 : >"$state/calls"
-rm -f "$state/user-calls"
+rm -f "$state/user-calls" "$state/screen-memory-at-stop"
+mkdir -p "$root/var/lib/signalk-kiosk-screen"
+echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 run_enable --readwrite --light
 if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'PUT {"type":"readwrite"}' ]]; then
     ok "the existing kiosk user is changed to readwrite"
@@ -1005,15 +1093,22 @@ conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed' "re-enable keeps the recorded plugi
 conf_has 'KIOSK_SK_USER_CREATED=1' "re-enable keeps the recorded Signal K user"
 call_not_made 'signalk restart' "plugin already loaded: no server restart"
 call_made 'systemctl restart signalk-kiosk.service' "no desktop running: restarts the kiosk"
+if [[ -e "$state/screen-memory-at-stop" && ! -e "$root/var/lib/signalk-kiosk-screen" ]]; then
+    ok "a re-enable stops the running screen watch, then empties its memory"
+else
+    miss "screen watch stop and memory reset: $(grep -c 'stop signalk-kiosk-screen' "$state/calls") stop calls, memory at stop: $([[ -e "$state/screen-memory-at-stop" ]] && echo yes || echo no)"
+fi
 no_unexpected_requests
 
 echo "  re-enable with --no-screen-pause, then without"
 : >"$state/calls"
+mkdir -p "$root/var/lib/signalk-kiosk-screen"
+echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 run_enable --readwrite --light --no-screen-pause
 call_made 'systemctl disable --now signalk-kiosk-screen.service' \
     "--no-screen-pause stops the screen watch, which resumes the browser"
 for f in etc/systemd/system/signalk-kiosk-screen.service usr/local/lib/signalk-kiosk/screen-watch \
-         etc/modules-load.d/signalk-kiosk-i2c.conf; do
+         etc/modules-load.d/signalk-kiosk-i2c.conf var/lib/signalk-kiosk-screen; do
     if [[ ! -e "$root/$f" ]]; then
         ok "--no-screen-pause removed: /$f"
     else
@@ -1028,9 +1123,26 @@ else
     miss "status screen-off line: $(grep 'screen off' <<<"$status_out")"
 fi
 : >"$state/calls"
+mkdir -p "$root/var/lib/signalk-kiosk-screen"
+echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 run_enable --readwrite --light
 call_made 'systemctl enable signalk-kiosk-screen.service' "a re-enable without the flag puts the screen watch back"
+if [[ ! -e "$root/var/lib/signalk-kiosk-screen" ]]; then
+    ok "a re-enable starts the screen watch's memory afresh"
+else
+    miss "re-enable kept the screen watch's memory"
+fi
 conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on again"
+mkdir -p "$root/var/lib/signalk-kiosk-screen"
+echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
+: >"$state/screen-stop-fails"
+run_enable --readwrite --light
+rm -f "$state/screen-stop-fails"
+if [[ -f "$root/var/lib/signalk-kiosk-screen/answered" ]] && grep -qF 'could not stop' <<<"$out"; then
+    ok "a screen watch that does not stop keeps its memory, with a warning"
+else
+    miss "failed stop: memory $([[ -f "$root/var/lib/signalk-kiosk-screen/answered" ]] && echo kept || echo removed), output: $(grep -i 'screen' <<<"$out" | tr '\n' '|')"
+fi
 
 echo "  disable --purge"
 : >"$state/calls"
@@ -1053,7 +1165,7 @@ for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/user-999.sl
          etc/pam.d/signalk-kiosk etc/signalk-kiosk.conf etc/signalk-kiosk.token \
          etc/udev/rules.d/61-signalk-kiosk-cec.rules \
          etc/systemd/system/signalk-kiosk-screen.service etc/modules-load.d/signalk-kiosk-i2c.conf \
-         var/lib/signalk-kiosk/start.html usr/local/lib/signalk-kiosk; do
+         var/lib/signalk-kiosk-screen var/lib/signalk-kiosk/start.html usr/local/lib/signalk-kiosk; do
     if [[ ! -e "$root/$f" ]]; then
         ok "removed: /$f"
     else
