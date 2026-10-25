@@ -2063,8 +2063,10 @@ cmd_uninstall() {
     # The power units the installer wrote (step 17e), and the polkit rule
     # that lets this account power off: removed without a password prompt
     # when sudo allows it, otherwise listed under "To purge" below.
-    rm -f "$HOME/.config/systemd/user/signalk-poweroff.service" \
-        "$HOME/.config/systemd/user/signalk-reboot.service"
+    if ! rm -f "$HOME/.config/systemd/user/signalk-poweroff.service" \
+        "$HOME/.config/systemd/user/signalk-reboot.service"; then
+        echo "[WARN] Could not remove the power off / reboot user units." >&2
+    fi
     # Debian's rules.d is root:polkitd 0750: this account cannot see the rule
     # there, so an unreadable directory counts as "the rule may exist".
     local power_rule=/etc/polkit-1/rules.d/50-signalk-power.rules

@@ -43,8 +43,10 @@ podman volume rm signalk-dbus-socket 2>/dev/null || true
 # The power units the installer wrote (install.sh step 17e), and the polkit
 # rule that lets this account power off: removed without a password prompt
 # when sudo allows it, otherwise listed under "Preserved" below.
-rm -f "${HOME}/.config/systemd/user/signalk-poweroff.service" \
-    "${HOME}/.config/systemd/user/signalk-reboot.service"
+if ! rm -f "${HOME}/.config/systemd/user/signalk-poweroff.service" \
+    "${HOME}/.config/systemd/user/signalk-reboot.service"; then
+    echo "[WARN] Could not remove the power off / reboot user units." >&2
+fi
 POWER_RULE=/etc/polkit-1/rules.d/50-signalk-power.rules
 # Debian's rules.d is root:polkitd 0750: this account cannot see the rule
 # there, so an unreadable directory counts as "the rule may exist".
