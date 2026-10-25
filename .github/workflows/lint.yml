@@ -116,6 +116,9 @@ jobs:
       - name: host power off and reboot
         run: bash scripts/test/check-host-power.sh
 
+      - name: stop plugin containers at shutdown
+        run: bash scripts/test/check-container-stop.sh
+
       - name: mDNS EXTERNALHOST wiring
         run: bash scripts/test/check-mdns-external-host.sh
 

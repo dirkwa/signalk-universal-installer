@@ -38,6 +38,7 @@
 #  17c. Hardware watchdog drop-in on a Raspberry Pi (sudo)
 #  17d. earlyoom: end a process before RAM runs out (sudo)
 #  17e. Power off / reboot from the Updater Console: polkit rule (sudo)
+#  17f. Stop the plugin containers before the user manager at shutdown (sudo)
 #  18. Mark bootstrap-complete in last-good.json
 #  18b. (re-runs only) Verification pass: report healthy/broken checkpoints
 #  19. Print success URLs
@@ -3113,6 +3114,73 @@ else
     ok "the Updater Console can power off and reboot the host ($POWER_RULE)"
 fi
 # ── end of host power ──
+
+# 17f. Stop the plugin containers before the user manager at shutdown.
+#
+# signalk-container creates its containers (Grafana, QuestDB, mayara, ...)
+# over the podman socket, with --restart=unless-stopped and no systemd unit;
+# their conmon runs in a transient libpod-conmon-<id>.scope of the user
+# manager. At shutdown the user manager stops those scopes like any other
+# unit, the container exits on that SIGTERM without podman having asked for
+# it, and conmon's `podman container cleanup` applies the restart policy and
+# starts the container again (journal: "container restart" during the
+# shutdown). On a Pi that start held user@<uid>.service at "Job
+# user@1000.service/stop running ... User job libpod-conmon-<id>" until
+# systemd gave up. A `podman stop` marks the container stopped by the user,
+# so the cleanup leaves it down.
+#
+# This system unit does that stop. Ordered After=user@<uid>.service, it is
+# stopped before the user manager on every shutdown and reboot, whoever asked
+# for it, while the user manager and the podman socket still run. It stops
+# only containers named sk-*, the prefix signalk-container gives every
+# container and job it creates (its default SIGNALK_CONTAINER_NAMESPACE),
+# so the account's other containers are left alone. The Quadlet containers
+# are named signalk-* and stop with their own units; a `podman stop` behind
+# their back would bring them straight back through Restart=. Each container
+# keeps its own stop timeout (podman's default is 10 s). At boot signalk-container starts the
+# stopped containers again, as it already did after a crash, since rootless
+# podman restarts nothing across a reboot. The unit file is world-readable,
+# so a re-run with nothing to do never touches sudo. CONTAINER_STOP_ROOT
+# prefixes the unit path for scripts/test/check-container-stop.sh.
+section "Stop plugin containers at shutdown"
+CONTAINER_STOP_ROOT="${CONTAINER_STOP_ROOT:-}"
+CONTAINER_STOP_UNIT="${CONTAINER_STOP_ROOT}/etc/systemd/system/signalk-container-stop.service"
+CONTAINER_STOP_UID=$(id -u)
+CONTAINER_STOP_PODMAN=$(command -v podman || echo /usr/bin/podman)
+CONTAINER_STOP_DESIRED="# Installed by signalk-universal-installer.
+# Stops the containers signalk-container started over the podman socket
+# (sk-*) before the user manager of $(id -un) stops, so podman does not
+# restart them during the shutdown. Quadlet containers stop with their units.
+[Unit]
+Description=Stop the SignalK plugin containers before shutdown
+After=user@${CONTAINER_STOP_UID}.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=$(id -un)
+Environment=XDG_RUNTIME_DIR=/run/user/${CONTAINER_STOP_UID}
+ExecStart=/bin/true
+ExecStop=/bin/sh -c '${CONTAINER_STOP_PODMAN} ps -q --filter name=^sk- | xargs -r ${CONTAINER_STOP_PODMAN} stop'
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target"
+
+if [[ "$(cat "$CONTAINER_STOP_UNIT" 2>/dev/null)" == "$CONTAINER_STOP_DESIRED" ]] \
+    && systemctl is-active --quiet signalk-container-stop.service 2>/dev/null; then
+    ok "plugin containers stop before the user manager at shutdown (skipping)"
+elif [[ "$SUDO" = "MISSING" ]]; then
+    warn "Cannot install signalk-container-stop.service without sudo; shutdown may wait up to 2 min for the plugin containers"
+elif printf '%s\n' "$CONTAINER_STOP_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$CONTAINER_STOP_UNIT" \
+    && $SUDO systemctl daemon-reload \
+    && $SUDO systemctl enable signalk-container-stop.service \
+    && $SUDO systemctl start signalk-container-stop.service; then
+    ok "plugin containers stop before the user manager at shutdown ($CONTAINER_STOP_UNIT)"
+else
+    warn "could not install signalk-container-stop.service; shutdown may wait up to 2 min for the plugin containers"
+fi
+# ── end of container stop ──
 
 # 18. Mark bootstrap-complete
 section "Recording bootstrap state"
