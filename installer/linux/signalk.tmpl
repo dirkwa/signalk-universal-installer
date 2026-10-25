@@ -2065,11 +2065,15 @@ cmd_uninstall() {
     # when sudo allows it, otherwise listed under "To purge" below.
     rm -f "$HOME/.config/systemd/user/signalk-poweroff.service" \
         "$HOME/.config/systemd/user/signalk-reboot.service"
-    if [[ -e /etc/polkit-1/rules.d/50-signalk-power.rules ]] || sudo -n test -e /etc/polkit-1/rules.d/50-signalk-power.rules 2>/dev/null; then
-        if sudo -n rm -f /etc/polkit-1/rules.d/50-signalk-power.rules 2>/dev/null; then
+    # Debian's rules.d is root:polkitd 0750: this account cannot see the rule
+    # there, so an unreadable directory counts as "the rule may exist".
+    local power_rule=/etc/polkit-1/rules.d/50-signalk-power.rules
+    if [[ -e "$power_rule" ]] || [[ -d "${power_rule%/*}" && ! -x "${power_rule%/*}" ]] \
+        || sudo -n test -e "$power_rule" 2>/dev/null; then
+        if sudo -n rm -f "$power_rule" 2>/dev/null; then
             echo "Removed the power off / reboot polkit rule."
         else
-            echo "[WARN] /etc/polkit-1/rules.d/50-signalk-power.rules still lets $(id -un) power off" >&2
+            echo "[WARN] $power_rule may still let $(id -un) power off" >&2
             echo "       and reboot this computer; remove it with sudo (see below)." >&2
         fi
     fi

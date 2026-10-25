@@ -46,11 +46,14 @@ podman volume rm signalk-dbus-socket 2>/dev/null || true
 rm -f "${HOME}/.config/systemd/user/signalk-poweroff.service" \
     "${HOME}/.config/systemd/user/signalk-reboot.service"
 POWER_RULE=/etc/polkit-1/rules.d/50-signalk-power.rules
-if [[ -e "$POWER_RULE" ]] || sudo -n test -e "$POWER_RULE" 2>/dev/null; then
+# Debian's rules.d is root:polkitd 0750: this account cannot see the rule
+# there, so an unreadable directory counts as "the rule may exist".
+if [[ -e "$POWER_RULE" ]] || [[ -d "${POWER_RULE%/*}" && ! -x "${POWER_RULE%/*}" ]] \
+    || sudo -n test -e "$POWER_RULE" 2>/dev/null; then
     if sudo -n rm -f "$POWER_RULE" 2>/dev/null; then
         echo "Removed the power off / reboot polkit rule."
     else
-        echo "[WARN] $POWER_RULE still lets $(id -un) power off and reboot" >&2
+        echo "[WARN] $POWER_RULE may still let $(id -un) power off and reboot" >&2
         echo "       this computer; remove it with sudo (see below)." >&2
     fi
 fi
