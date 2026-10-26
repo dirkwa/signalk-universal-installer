@@ -2323,7 +2323,9 @@ fi
 # password is piped on stdin (never argv/env) and the node script mints
 # a stable secretKey — without one the server generates a fresh random
 # key every boot, logging everyone (and the doctor token) out on each
-# restart. settings.json's security.strategy is what actually switches
+# restart. It mints none when security-secret.key already holds one
+# (newer servers keep the key there): on start a secretKey in
+# security.json replaces that file and every token signed with it. settings.json's security.strategy is what actually switches
 # auth on; security.json alone does nothing. Both writes are guarded:
 # never overwrite an existing security.json users[] array, never clobber
 # an existing security.strategy.
@@ -2351,7 +2353,9 @@ if [[ "$ADMIN_SEED" = "1" ]]; then
                 console.log("exists");
                 process.exit(0);
             }
-            if (!config.secretKey) config.secretKey = crypto.randomBytes(256).toString("hex");
+            const keyFile = "/home/node/.signalk/security-secret.key";
+            const fileKey = fs.existsSync(keyFile) && fs.readFileSync(keyFile, "utf8").trim();
+            if (!config.secretKey && !fileKey) config.secretKey = crypto.randomBytes(256).toString("hex");
             if (typeof config.allow_readonly !== "boolean") config.allow_readonly = false;
             config.users = [{ username, type: "admin", password: bcrypt.hashSync(password, bcrypt.genSaltSync(10)) }];
             fs.writeFileSync(path + ".tmp", JSON.stringify(config, null, 2), { mode: 0o600 });
