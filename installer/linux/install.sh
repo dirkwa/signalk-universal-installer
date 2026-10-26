@@ -3132,14 +3132,18 @@ fi
 # This system unit does that stop. Ordered After=user@<uid>.service, it is
 # stopped before the user manager on every shutdown and reboot, whoever asked
 # for it, while the user manager and the podman socket still run. It stops
-# only containers named sk-*, the prefix signalk-container gives every
-# container and job it creates (its default SIGNALK_CONTAINER_NAMESPACE),
-# so the account's other containers are left alone. The Quadlet containers
+# only containers named <namespace>-*, the prefix signalk-container gives
+# every container and job it creates: SIGNALK_CONTAINER_NAMESPACE when set to
+# a value the plugin accepts (lowercase alphanumerics, at most 32), else `sk`,
+# the same rule as signalk_all_containers in signalk.tmpl. The account's
+# other containers are left alone; `--filter name=` takes a regex, so `^`
+# anchors the prefix. The Quadlet containers
 # are named signalk-* and stop with their own units; a `podman stop` behind
 # their back would bring them straight back through Restart=. Each container
 # keeps its own stop timeout (podman's default is 10 s). A failing `podman ps`
 # fails the unit, so the journal shows that nothing was stopped; `$$` is
-# systemd's escape for a literal `$`. At boot signalk-container starts the
+# systemd's escape for a literal `$`, and `$$ids` stays unquoted so each
+# container ID becomes its own argument to `podman stop`. At boot signalk-container starts the
 # stopped containers again, as it already did after a crash, since rootless
 # podman restarts nothing across a reboot. The unit file is world-readable,
 # so a re-run with nothing to do never touches sudo. CONTAINER_STOP_ROOT
@@ -3149,9 +3153,13 @@ CONTAINER_STOP_ROOT="${CONTAINER_STOP_ROOT:-}"
 CONTAINER_STOP_UNIT="${CONTAINER_STOP_ROOT}/etc/systemd/system/signalk-container-stop.service"
 CONTAINER_STOP_UID=$(id -u)
 CONTAINER_STOP_PODMAN=$(command -v podman || echo /usr/bin/podman)
+CONTAINER_STOP_NS="${SIGNALK_CONTAINER_NAMESPACE:-sk}"
+if [[ ! "$CONTAINER_STOP_NS" =~ ^[a-z0-9]+$ || ${#CONTAINER_STOP_NS} -gt 32 ]]; then
+    CONTAINER_STOP_NS=sk
+fi
 CONTAINER_STOP_DESIRED="# Installed by signalk-universal-installer.
 # Stops the containers signalk-container started over the podman socket
-# (sk-*) before the user manager of $(id -un) stops, so podman does not
+# (${CONTAINER_STOP_NS}-*) before the user manager of $(id -un) stops, so podman does not
 # restart them during the shutdown. Quadlet containers stop with their units.
 [Unit]
 Description=Stop the SignalK plugin containers before shutdown
@@ -3163,7 +3171,7 @@ RemainAfterExit=yes
 User=$(id -un)
 Environment=XDG_RUNTIME_DIR=/run/user/${CONTAINER_STOP_UID}
 ExecStart=/bin/true
-ExecStop=/bin/sh -c 'ids=\$\$(${CONTAINER_STOP_PODMAN} ps -q --filter name=^sk-) || exit 1; [ -z \"\$\$ids\" ] || exec ${CONTAINER_STOP_PODMAN} stop \$\$ids'
+ExecStop=/bin/sh -c 'ids=\$\$(\"${CONTAINER_STOP_PODMAN}\" ps -q --filter name=^${CONTAINER_STOP_NS}-) || exit 1; [ -z \"\$\$ids\" ] || exec \"${CONTAINER_STOP_PODMAN}\" stop \$\$ids'
 TimeoutStopSec=90
 
 [Install]

@@ -194,7 +194,7 @@ systemctl --user daemon-reload
 
 ## Plugin containers at shutdown
 
-The containers signalk-container starts (Grafana, QuestDB, mayara and others) have no systemd unit of their own. `signalk-container-stop.service`, a system unit the installer writes, runs `podman stop` on every `sk-*` container (the name signalk-container gives the containers it creates) before the user manager stops, on every shutdown and reboot. Without it, podman reads the SIGTERM the user manager sends as a crash, applies the container's `--restart=unless-stopped` and starts it again during the shutdown, and the shutdown waits at `Job user@1000.service/stop running ... User job libpod-conmon-<id>` until systemd gives up after up to 2 minutes. signalk-container starts the stopped containers again when signalk-server starts.
+The containers signalk-container starts (Grafana, QuestDB, mayara and others) have no systemd unit of their own. `signalk-container-stop.service`, a system unit the installer writes, runs `podman stop` on every `sk-*` container (the name signalk-container gives the containers it creates; another prefix when `SIGNALK_CONTAINER_NAMESPACE` was set for the installer) before the user manager stops, on every shutdown and reboot. Without it, podman reads the SIGTERM the user manager sends as a crash, applies the container's `--restart=unless-stopped` and starts it again during the shutdown, and the shutdown waits at `Job user@1000.service/stop running ... User job libpod-conmon-<id>` until systemd gives up after up to 2 minutes. signalk-container starts the stopped containers again when signalk-server starts.
 
 Check it, and what the last shutdown did:
 

@@ -7,11 +7,14 @@
 #   2. A re-run without sudo changes nothing; one that finds the unit on
 #      disk but inactive or disabled enables and starts it again; an older
 #      unit is rewritten.
-#   3. No sudo: nothing written.
-#   4. docs/recovery.md and both uninstallers name the unit.
+#   3. SIGNALK_CONTAINER_NAMESPACE picks the prefix; an invalid one is sk.
+#   4. No sudo: nothing written.
+#   5. docs/recovery.md and both uninstallers name the unit.
 # Run from the repo root.
 
 set -euo pipefail
+# The step reads the namespace from the environment; the cases below set it.
+unset SIGNALK_CONTAINER_NAMESPACE
 
 INSTALL_SH="${INSTALL_SH:-installer/linux/install.sh}"
 if [[ ! -f "$INSTALL_SH" ]]; then
@@ -65,7 +68,7 @@ run_step() {
     local root="$tmp/$1"
     mkdir -p "$root"
     : >"$root/log"
-    out=$(CONTAINER_STOP_ROOT="$root" STUB_LOG="$root/log" PATH="$tmp/bin" SUDO="$2" bash -c '
+    out=$(SIGNALK_CONTAINER_NAMESPACE="${SIGNALK_CONTAINER_NAMESPACE:-}" CONTAINER_STOP_ROOT="$root" STUB_LOG="$root/log" PATH="$tmp/bin" SUDO="$2" bash -c '
         set -euo pipefail
         section() { :; }; ok() { echo "ok: $*"; }; info() { echo "info: $*"; }; warn() { echo "warn: $*"; }
         '"$STEP" 2>&1) || { miss "$1: step exited non-zero: $out"; return 0; }
@@ -89,7 +92,7 @@ if [[ "$unit" == *"After=user@${uid}.service"* && "$unit" == *"User=${user}"* \
 else
     miss "fresh unit: [$unit]"
 fi
-if [[ "$unit" == *"ExecStop=/bin/sh -c 'ids=\$\$($tmp/bin/podman ps -q --filter name=^sk-) || exit 1; [ -z \"\$\$ids\" ] || exec $tmp/bin/podman stop \$\$ids'"* ]]; then
+if [[ "$unit" == *"ExecStop=/bin/sh -c 'ids=\$\$(\"$tmp/bin/podman\" ps -q --filter name=^sk-) || exit 1; [ -z \"\$\$ids\" ] || exec \"$tmp/bin/podman\" stop \$\$ids'"* ]]; then
     ok "ExecStop stops only the sk-* containers, with podman's absolute path"
 else
     miss "ExecStop: [$(grep ExecStop <<<"$unit")]"
@@ -137,6 +140,20 @@ if [[ "$(unit_of older)" == "$(unit_of fresh)" && "$log" == "$want_log" ]]; then
     ok "an older unit: rewritten"
 else
     miss "older: unit=[$(unit_of older)] log=[$log]"
+fi
+
+echo "namespace"
+SIGNALK_CONTAINER_NAMESPACE=devpod run_step devpod ""
+if [[ "$(unit_of devpod)" == *"--filter name=^devpod-)"* ]]; then
+    ok "SIGNALK_CONTAINER_NAMESPACE=devpod: stops devpod-* containers"
+else
+    miss "devpod: [$(grep ExecStop <<<"$(unit_of devpod)")]"
+fi
+SIGNALK_CONTAINER_NAMESPACE='bad ns!' run_step badns ""
+if [[ "$(unit_of badns)" == *"--filter name=^sk-)"* ]]; then
+    ok "an invalid namespace falls back to sk"
+else
+    miss "badns: [$(grep ExecStop <<<"$(unit_of badns)")]"
 fi
 
 echo "not set up"
