@@ -3167,8 +3167,11 @@ TimeoutStopSec=90
 [Install]
 WantedBy=multi-user.target"
 
+# Current means on disk as written here, active (so this shutdown runs its
+# ExecStop) and enabled (so the next boot starts it again).
 if [[ "$(cat "$CONTAINER_STOP_UNIT" 2>/dev/null)" == "$CONTAINER_STOP_DESIRED" ]] \
-    && systemctl is-active --quiet signalk-container-stop.service 2>/dev/null; then
+    && systemctl is-active --quiet signalk-container-stop.service 2>/dev/null \
+    && systemctl is-enabled --quiet signalk-container-stop.service 2>/dev/null; then
     ok "plugin containers stop before the user manager at shutdown (skipping)"
 elif [[ "$SUDO" = "MISSING" ]]; then
     warn "Cannot install signalk-container-stop.service without sudo; shutdown may wait up to 2 min for the plugin containers"

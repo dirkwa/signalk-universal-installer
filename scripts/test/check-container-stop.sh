@@ -5,7 +5,8 @@
 #      installing account with its XDG_RUNTIME_DIR, stops only the sk-*
 #      containers signalk-container creates, and is enabled and started.
 #   2. A re-run without sudo changes nothing; one that finds the unit on
-#      disk but inactive starts it again; an older unit is rewritten.
+#      disk but inactive or disabled enables and starts it again; an older
+#      unit is rewritten.
 #   3. No sudo: nothing written.
 #   4. docs/recovery.md and both uninstallers name the unit.
 # Run from the repo root.
@@ -37,12 +38,18 @@ for t in bash cat dirname id install mkdir; do
     ln -s "$(command -v "$t")" "$tmp/bin/$t"
 done
 printf '#!/bin/sh\nexit 0\n' >"$tmp/bin/podman"
-# `start` marks the unit active; `is-active` reports it and is not logged.
+# `enable` and `start` mark the unit enabled and active; `is-enabled` and
+# `is-active` report that and are not logged.
 cat >"$tmp/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 case "$*" in
     "is-active --quiet signalk-container-stop.service")
         [[ -e "$CONTAINER_STOP_ROOT/active" ]] ;;
+    "is-enabled --quiet signalk-container-stop.service")
+        [[ -e "$CONTAINER_STOP_ROOT/enabled" ]] ;;
+    "enable signalk-container-stop.service")
+        echo "systemctl $*" >>"$STUB_LOG"
+        : >"$CONTAINER_STOP_ROOT/enabled" ;;
     "start signalk-container-stop.service")
         echo "systemctl $*" >>"$STUB_LOG"
         : >"$CONTAINER_STOP_ROOT/active" ;;
@@ -65,6 +72,7 @@ run_step() {
     log=$(cat "$root/log")
 }
 
+# The unit file the step writes in sandbox <name>, and its content.
 unit_path() { echo "$tmp/$1/etc/systemd/system/signalk-container-stop.service"; }
 unit_of() { cat "$(unit_path "$1")" 2>/dev/null; }
 uid=$(id -u)
@@ -113,9 +121,18 @@ else
     miss "inactive: out=[$out] log=[$log]"
 fi
 
+rm "$tmp/fresh/enabled"
+run_step fresh ""
+if [[ "$log" == "$want_log" ]]; then
+    ok "unit active but disabled: enabled again"
+else
+    miss "disabled: out=[$out] log=[$log]"
+fi
+
 mkdir -p "$(dirname "$(unit_path older)")"
 printf '# an older unit\n' >"$(unit_path older)"
 : >"$tmp/older/active"
+: >"$tmp/older/enabled"
 run_step older ""
 if [[ "$(unit_of older)" == "$(unit_of fresh)" && "$log" == "$want_log" ]]; then
     ok "an older unit: rewritten"
