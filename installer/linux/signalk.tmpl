@@ -1719,8 +1719,11 @@ cmd_resetadmin() {
     # documented lost-credentials recovery deletes it); recreate it with
     # a fresh secretKey in that case — without one the server would
     # generate a new random key on every boot, logging everyone out on
-    # each restart. Write atomically + 0600, matching the server's own
-    # saveSecurityConfig.
+    # each restart. Newer servers keep the key in security-secret.key
+    # and strip it from security.json, and on start
+    # a secretKey in security.json replaces the key file, so a fresh key
+    # is written only when neither file has one. Write atomically + 0600,
+    # matching the server's own saveSecurityConfig.
     local result
     if ! result=$(printf '%s' "$pw" | podman exec -i -w /home/node/signalk signalk-server node -e '
         const fs = require("fs");
@@ -1730,7 +1733,9 @@ cmd_resetadmin() {
         const username = process.argv[1];
         const password = fs.readFileSync(0, "utf8");
         const config = fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, "utf8")) : {};
-        if (!config.secretKey) config.secretKey = crypto.randomBytes(256).toString("hex");
+        const keyFile = "/home/node/.signalk/security-secret.key";
+        const fileKey = fs.existsSync(keyFile) && fs.readFileSync(keyFile, "utf8").trim();
+        if (!config.secretKey && !fileKey) config.secretKey = crypto.randomBytes(256).toString("hex");
         if (!Array.isArray(config.users)) config.users = [];
         const hash = bcrypt.hashSync(password, bcrypt.genSaltSync(10));
         const user = config.users.find((u) => u.username === username);

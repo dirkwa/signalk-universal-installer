@@ -2323,7 +2323,9 @@ fi
 # password is piped on stdin (never argv/env) and the node script mints
 # a stable secretKey — without one the server generates a fresh random
 # key every boot, logging everyone (and the doctor token) out on each
-# restart. settings.json's security.strategy is what actually switches
+# restart. It mints none when security-secret.key already holds one
+# (newer servers keep the key there): on start a secretKey in
+# security.json replaces that file and every token signed with it. settings.json's security.strategy is what actually switches
 # auth on; security.json alone does nothing. Both writes are guarded:
 # never overwrite an existing security.json users[] array, never clobber
 # an existing security.strategy.
@@ -2351,7 +2353,9 @@ if [[ "$ADMIN_SEED" = "1" ]]; then
                 console.log("exists");
                 process.exit(0);
             }
-            if (!config.secretKey) config.secretKey = crypto.randomBytes(256).toString("hex");
+            const keyFile = "/home/node/.signalk/security-secret.key";
+            const fileKey = fs.existsSync(keyFile) && fs.readFileSync(keyFile, "utf8").trim();
+            if (!config.secretKey && !fileKey) config.secretKey = crypto.randomBytes(256).toString("hex");
             if (typeof config.allow_readonly !== "boolean") config.allow_readonly = false;
             config.users = [{ username, type: "admin", password: bcrypt.hashSync(password, bcrypt.genSaltSync(10)) }];
             fs.writeFileSync(path + ".tmp", JSON.stringify(config, null, 2), { mode: 0o600 });
@@ -2508,9 +2512,37 @@ fi
 # a brand-new install. We check for security.json's `users[]` array
 # before attempting; if security isn't enabled the warning explains
 # the next step (enable security in the admin UI, then re-run).
+#
+# The token is signed inside the server container with the server's own
+# jsonwebtoken, not with its bin/signalk-generate-token: that script reads
+# the key from security.json only, and newer servers keep it in
+# security-secret.key and strip it from security.json on start
+# (SignalK/signalk-server#3227). SK_TOKEN_JS takes the key where the server
+# does: security.json's secretKey when set (the server moves it into the key
+# file on its next start), else security-secret.key. The script comes in on
+# stdin, so the key never appears on a command line; its arguments are the
+# config dir, the user and the expiry.
 DOCTOR_TOKEN_PATH="$HOME/.signalk-doctor/signalk-token"
-SK_TOKEN_BIN=/home/node/signalk/node_modules/signalk-server/bin/signalk-generate-token
 SK_SECURITY_PATH=/home/node/.signalk/security.json
+SK_TOKEN_JS='
+const fs = require("fs");
+const jwt = require("jsonwebtoken");
+const [dir, user, expiresIn] = process.argv.slice(2);
+let key;
+try {
+    key = JSON.parse(fs.readFileSync(dir + "/security.json", "utf8")).secretKey;
+} catch (e) {}
+if (!key) {
+    try {
+        key = fs.readFileSync(dir + "/security-secret.key", "utf8").trim();
+    } catch (e) {}
+}
+if (!key) {
+    console.error("no secretKey in " + dir + "/security.json or " + dir + "/security-secret.key");
+    process.exit(1);
+}
+console.log(jwt.sign({ id: user }, key, { expiresIn }));
+'
 section "Doctor admin token"
 # This step is OPTIONAL and best-effort: it mints a token so the doctor's drift
 # scanner can hit the admin-gated diagnostics endpoint. It only does anything
@@ -2535,11 +2567,12 @@ elif ! podman exec signalk-server test -s "$SK_SECURITY_PATH" 2>/dev/null; then
 elif ! podman exec signalk-server grep -q '"users"' "$SK_SECURITY_PATH" 2>/dev/null; then
     warn "signalk-server security.json exists but has no users — finish security setup in the admin UI, then re-run"
 else
-    # The token generator writes to stdout. -e 5y is long enough that we
+    # SK_TOKEN_JS prints the token on stdout. A 5y expiry is long enough that we
     # don't need to babysit rotation. The doctor invalidates its own
     # cache on 401/403, so rotating later is "regenerate, overwrite this
     # file" — no doctor restart needed.
-    if token=$(podman exec signalk-server "$SK_TOKEN_BIN" -u "$sk_admin_user" -e 5y -s "$SK_SECURITY_PATH" 2>/dev/null); then
+    if token=$(podman exec -i -w /home/node/signalk signalk-server node - /home/node/.signalk "$sk_admin_user" 5y \
+        <<<"$SK_TOKEN_JS" 2>/dev/null); then
         if [[ -n "$token" ]]; then
             mkdir -p "$(dirname "$DOCTOR_TOKEN_PATH")"
             old_umask=$(umask)
@@ -2549,11 +2582,11 @@ else
             chmod 0600 "$DOCTOR_TOKEN_PATH"
             ok "wrote doctor token to $DOCTOR_TOKEN_PATH (mode 0600)"
         else
-            warn "signalk-generate-token produced empty output; doctor drift will stay offline"
+            warn "token signing produced empty output; doctor drift will stay offline"
         fi
     else
-        warn "signalk-generate-token failed; doctor drift will stay offline"
-        warn "you can retry with:  podman exec signalk-server $SK_TOKEN_BIN -u $sk_admin_user -e 5y -s $SK_SECURITY_PATH"
+        warn "could not sign an admin token in the signalk-server container; doctor drift will stay offline"
+        warn "re-run the installer to retry"
     fi
 fi
 set -e   # end of the relaxed-set-e doctor-token section

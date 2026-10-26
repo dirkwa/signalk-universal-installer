@@ -104,10 +104,29 @@ DOCK_APPS='[
 SK_KIOSK_USER="signalk-kiosk"
 TOKEN="/etc/signalk-kiosk.token"
 TOKEN_FILE="${KIOSK_ROOT}${TOKEN}"
-# Minted the way install.sh mints the doctor's admin token.
+# Minted the way install.sh mints the doctor's admin token, with the same
+# SK_TOKEN_JS (see the comment there: the server's signalk-generate-token
+# cannot read the key from security-secret.key).
 SK_CONTAINER="signalk-server"
-SK_TOKEN_BIN=/home/node/signalk/node_modules/signalk-server/bin/signalk-generate-token
-SK_SECURITY_PATH=/home/node/.signalk/security.json
+SK_TOKEN_JS='
+const fs = require("fs");
+const jwt = require("jsonwebtoken");
+const [dir, user, expiresIn] = process.argv.slice(2);
+let key;
+try {
+    key = JSON.parse(fs.readFileSync(dir + "/security.json", "utf8")).secretKey;
+} catch (e) {}
+if (!key) {
+    try {
+        key = fs.readFileSync(dir + "/security-secret.key", "utf8").trim();
+    } catch (e) {}
+}
+if (!key) {
+    console.error("no secretKey in " + dir + "/security.json or " + dir + "/security-secret.key");
+    process.exit(1);
+}
+console.log(jwt.sign({ id: user }, key, { expiresIn }));
+'
 
 # ─── output helpers ────────────────────────────────────────────────────
 # Mirrors installer/linux/lib/colors.sh (same escapes, same gate); inlined
@@ -974,10 +993,10 @@ ensure_sign_in() {
     fi
     SIGNIN_USER_TYPE="$sk_type"
 
-    tok=$(podman exec "$SK_CONTAINER" "$SK_TOKEN_BIN" -u "$SK_KIOSK_USER" -e 10y \
-        -s "$SK_SECURITY_PATH" 2>/dev/null | tail -1 || true)
+    tok=$(podman exec -i -w /home/node/signalk "$SK_CONTAINER" node - /home/node/.signalk "$SK_KIOSK_USER" 10y \
+        <<<"$SK_TOKEN_JS" 2>/dev/null | tail -1 || true)
     if [[ ! "$tok" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
-        warn "could not mint a token for ${SK_KIOSK_USER} (podman exec ${SK_CONTAINER} signalk-generate-token)"
+        warn "could not mint a token for ${SK_KIOSK_USER} (podman exec ${SK_CONTAINER} node)"
         return 1
     fi
     # The same request the kiosk's seed page makes: proof the token signs in.

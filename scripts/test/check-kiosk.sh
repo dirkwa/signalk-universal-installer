@@ -979,7 +979,7 @@ if [[ "$(cat "$state/user-calls" 2>/dev/null)" == 'POST {"type":"admin"}' ]]; th
 else
     miss "Signal K user calls: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
 fi
-call_made 'podman exec signalk-server /home/node/signalk/node_modules/signalk-server/bin/signalk-generate-token -u signalk-kiosk -e 10y -s /home/node/.signalk/security.json' \
+call_made 'podman exec -i -w /home/node/signalk signalk-server node - /home/node/.signalk signalk-kiosk 10y' \
     "mints the kiosk's token inside the server container"
 if [[ "$(cat "$state/session-tokens" 2>/dev/null)" == "$JWT" ]]; then
     ok "checks that the token signs in before relying on it"
