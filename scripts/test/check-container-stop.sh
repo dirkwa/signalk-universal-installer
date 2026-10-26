@@ -72,7 +72,6 @@ run_step() {
     log=$(cat "$root/log")
 }
 
-# The unit file the step writes in sandbox <name>, and its content.
 unit_path() { echo "$tmp/$1/etc/systemd/system/signalk-container-stop.service"; }
 unit_of() { cat "$(unit_path "$1")" 2>/dev/null; }
 uid=$(id -u)
@@ -90,7 +89,7 @@ if [[ "$unit" == *"After=user@${uid}.service"* && "$unit" == *"User=${user}"* \
 else
     miss "fresh unit: [$unit]"
 fi
-if [[ "$unit" == *"ExecStop=/bin/sh -c '$tmp/bin/podman ps -q --filter name=^sk- | xargs -r $tmp/bin/podman stop'"* ]]; then
+if [[ "$unit" == *"ExecStop=/bin/sh -c 'ids=\$\$($tmp/bin/podman ps -q --filter name=^sk-) || exit 1; [ -z \"\$\$ids\" ] || exec $tmp/bin/podman stop \$\$ids'"* ]]; then
     ok "ExecStop stops only the sk-* containers, with podman's absolute path"
 else
     miss "ExecStop: [$(grep ExecStop <<<"$unit")]"

@@ -3137,7 +3137,9 @@ fi
 # so the account's other containers are left alone. The Quadlet containers
 # are named signalk-* and stop with their own units; a `podman stop` behind
 # their back would bring them straight back through Restart=. Each container
-# keeps its own stop timeout (podman's default is 10 s). At boot signalk-container starts the
+# keeps its own stop timeout (podman's default is 10 s). A failing `podman ps`
+# fails the unit, so the journal shows that nothing was stopped; `$$` is
+# systemd's escape for a literal `$`. At boot signalk-container starts the
 # stopped containers again, as it already did after a crash, since rootless
 # podman restarts nothing across a reboot. The unit file is world-readable,
 # so a re-run with nothing to do never touches sudo. CONTAINER_STOP_ROOT
@@ -3161,7 +3163,7 @@ RemainAfterExit=yes
 User=$(id -un)
 Environment=XDG_RUNTIME_DIR=/run/user/${CONTAINER_STOP_UID}
 ExecStart=/bin/true
-ExecStop=/bin/sh -c '${CONTAINER_STOP_PODMAN} ps -q --filter name=^sk- | xargs -r ${CONTAINER_STOP_PODMAN} stop'
+ExecStop=/bin/sh -c 'ids=\$\$(${CONTAINER_STOP_PODMAN} ps -q --filter name=^sk-) || exit 1; [ -z \"\$\$ids\" ] || exec ${CONTAINER_STOP_PODMAN} stop \$\$ids'
 TimeoutStopSec=90
 
 [Install]
