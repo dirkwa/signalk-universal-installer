@@ -143,6 +143,9 @@ jobs:
       - name: kiosk scan, rendered units, launcher, enable/disable
         run: bash scripts/test/check-kiosk.sh
 
+      - name: JWT secret key location (token signing, resetadmin)
+        run: bash scripts/test/check-token-secret-key.sh
+
       - name: SocketCAN recipe (bitrate, BUS-OFF recovery)
         run: bash scripts/test/check-socketcan-recipe.sh
 
