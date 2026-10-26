@@ -101,6 +101,11 @@ DOCK_APPS='[
   {"enabled": true, "autostart": false, "url": "/admin/", "label": "Settings",
    "icon": "/@signalk/app-dock/icon-settings.svg", "color": "#78788c"}
 ]'
+# Inserted right before Settings when the installer has installed it, so
+# Settings stays the last entry.
+RPI_MANAGER_PKG="signalk-universal-installer-rpi-mgmt"
+RPI_MANAGER_APP='{"enabled": true, "autostart": false, "url": "/signalk-universal-installer-rpi-mgmt/",
+   "label": "RPI Manager", "icon": "/signalk-universal-installer-rpi-mgmt/icon.svg", "color": ""}'
 SK_KIOSK_USER="signalk-kiosk"
 TOKEN="/etc/signalk-kiosk.token"
 TOKEN_FILE="${KIOSK_ROOT}${TOKEN}"
@@ -870,9 +875,14 @@ seed_dock_config() {
     local f="${SK_DATA}/plugin-config-data/${DOCK_ID}.json"
     [[ -e "$f" ]] && return 0
     mkdir -p "${f%/*}"
+    local apps="$DOCK_APPS"
+    if [[ -d "${SK_DATA}/node_modules/${RPI_MANAGER_PKG}" ]]; then
+        apps=$(jq -n --argjson apps "$DOCK_APPS" --argjson app "$RPI_MANAGER_APP" \
+            '$apps[:-1] + [$app] + $apps[-1:]')
+    fi
     # tourDismissed: on a screen with no input device the welcome tour would
     # never go away.
-    jq -n --argjson apps "$DOCK_APPS" '{enabled: true, configuration: {
+    jq -n --argjson apps "$apps" '{enabled: true, configuration: {
         showNightModeButton: true, showFullscreenButton: false,
         showExitButton: false, tourDismissed: true, apps: $apps}}' >"$f"
 }
