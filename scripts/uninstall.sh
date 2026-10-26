@@ -60,6 +60,19 @@ if [[ -e "$POWER_RULE" ]] || [[ -d "${POWER_RULE%/*}" && ! -x "${POWER_RULE%/*}"
     fi
 fi
 
+# The unit that stops the plugin containers at shutdown (install.sh step 17f).
+# Stopping it runs its ExecStop, which stops the sk-* containers.
+CONTAINER_STOP_UNIT=/etc/systemd/system/signalk-container-stop.service
+if [[ -e "$CONTAINER_STOP_UNIT" ]]; then
+    if sudo -n systemctl disable --now signalk-container-stop.service 2>/dev/null \
+        && sudo -n rm -f "$CONTAINER_STOP_UNIT" 2>/dev/null \
+        && sudo -n systemctl daemon-reload 2>/dev/null; then
+        echo "Removed signalk-container-stop.service."
+    else
+        echo "[WARN] Could not remove $CONTAINER_STOP_UNIT; remove it with sudo (see below)." >&2
+    fi
+fi
+
 # The app.slice CPUWeight drop-in the installer wrote. Deleting the file
 # alone leaves the running slice at 300 until re-login (systemd does not
 # write the default back), so also reset the live value.
@@ -83,6 +96,7 @@ echo "  ~/.local/bin/signalk-recovery — Host recovery script"
 echo "  ~/.local/bin/signalk-{socketcan,bluetooth,kiosk} — hardware helpers"
 echo "  signalk-timesync (system timer)   — disable: sudo systemctl disable --now signalk-timesync.timer"
 echo "  power off/reboot polkit rule (if the warning above showed) — remove: sudo rm /etc/polkit-1/rules.d/50-signalk-power.rules"
+echo "  signalk-container-stop.service (if the warning above showed) — remove: sudo systemctl disable --now signalk-container-stop.service && sudo rm /etc/systemd/system/signalk-container-stop.service"
 echo
 echo "To purge ALL data, run:  rm -rf ~/.signalk ~/.signalk-updater ~/.signalk-doctor ~/.signalk-backup"
 echo "Done."
