@@ -33,6 +33,7 @@ The installer ends by printing the box's address. Open these in a browser on any
 | Address | What it is |
 |---|---|
 | `http://<address>` | Signal K: its webapps and the admin UI |
+| `http://<address>/signalk-universal-installer-rpi-mgmt/` | RPI Manager: the computer's temperature, load, memory and storage, and buttons to restart Signal K, reboot or power off |
 | `http://<address>:3003` | Updater Console: Signal K versions, rollback, updates for both consoles |
 | `http://<address>:3004` | Doctor Console: health checks, snapshots, recovery |
 
