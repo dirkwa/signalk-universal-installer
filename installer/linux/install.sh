@@ -2567,7 +2567,7 @@ elif ! podman exec signalk-server test -s "$SK_SECURITY_PATH" 2>/dev/null; then
 elif ! podman exec signalk-server grep -q '"users"' "$SK_SECURITY_PATH" 2>/dev/null; then
     warn "signalk-server security.json exists but has no users — finish security setup in the admin UI, then re-run"
 else
-    # The token generator writes to stdout. -e 5y is long enough that we
+    # SK_TOKEN_JS prints the token on stdout. A 5y expiry is long enough that we
     # don't need to babysit rotation. The doctor invalidates its own
     # cache on 401/403, so rotating later is "regenerate, overwrite this
     # file" — no doctor restart needed.
