@@ -575,6 +575,8 @@ EOF
 
 render_unit() {
     local cage_args
+    # Fixed when enable writes the unit: a later change to cage or to the
+    # kernel's video= entries needs another enable.
     cage_args=$(cage_output_args)
     cat <<EOF
 # Written by \`signalk kiosk enable\`; removed by \`signalk kiosk disable\`.
