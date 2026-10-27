@@ -300,10 +300,34 @@ monitor_warnings() {
             fi
         fi
         for tok in $cmdline; do
-            [[ "$tok" == "video=${conn}:"* && "$tok" =~ [De]$ ]] || continue
+            # Options such as margin_left=40 follow the mode after a comma.
+            [[ "$tok" == "video=${conn}:"* && "${tok%%,*}" =~ [De]$ ]] || continue
             echo "  ${conn}: forced on by ${tok} in the kernel command line; it shows as connected even with nothing plugged in"
         done
     done
+}
+
+# cage 0.1.4 (Debian Bookworm) dereferences an invalid list entry when -m last
+# meets its first output and crashes; 0.1.5 added the guard. Prints the option
+# for a cage that has it, nothing for an older one, and the option when no
+# cage is installed yet (enable installs a current one before rendering).
+cage_output_args() {
+    local v
+    v=$(cage -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
+    if [[ -n "$v" ]] && [[ "$(printf '%s\n' "$v" 0.1.5 | sort -V | head -1)" != 0.1.5 ]]; then
+        return 0
+    fi
+    printf '%s' '-m last'
+}
+
+# Whether the browser spans all outputs: read from the installed unit, or,
+# before enable, from what enable would write.
+kiosk_spans_outputs() {
+    if [[ -f "$UNIT_FILE" ]]; then
+        if grep -q '^ExecStart=.* -m last ' "$UNIT_FILE"; then return 1; fi
+    else
+        [[ -z "$(cage_output_args)" ]]
+    fi
 }
 
 print_scan() {
@@ -318,7 +342,13 @@ print_scan() {
             printf '  %-14s %-13s %-11s %s\n' "$conn" "$status" "$mode" "$name"
         done <<<"$mons"
         (( n > 0 )) || echo "  (nothing connected — the kiosk needs a monitor to show anything)"
-        (( n > 1 )) && echo "  (${n} connected — the browser shows on the one connected last, usually the last listed)"
+        if (( n > 1 )); then
+            if kiosk_spans_outputs; then
+                echo "  (${n} connected — cage spans the browser across all of them)"
+            else
+                echo "  (${n} connected — the browser shows on the one connected last, usually the last listed)"
+            fi
+        fi
         monitor_warnings <<<"$mons"
     fi
     section "Touchscreens"
@@ -529,6 +559,8 @@ EOF
 }
 
 render_unit() {
+    local cage_args
+    cage_args=$(cage_output_args)
     cat <<EOF
 # Written by \`signalk kiosk enable\`; removed by \`signalk kiosk disable\`.
 [Unit]
@@ -556,7 +588,7 @@ UtmpMode=user
 # -s keeps Ctrl+Alt+F2 working, so a keyboard can still reach a console.
 # -m last shows the browser on one output: spanning several makes the window
 # wider than the GPU's 4096 px limit, and Chromium then draws in software.
-ExecStart=/usr/bin/cage -s -d -m last -- ${LAUNCHER}
+ExecStart=/usr/bin/cage -s -d ${cage_args:+${cage_args} }-- ${LAUNCHER}
 Restart=always
 RestartSec=5
 

@@ -119,7 +119,7 @@ The browser shows on one output only: cage runs with `-m last`, which uses the o
 - a monitor whose preferred mode is wider or taller than 4096 px (some ultrawide monitors), which Chromium draws in software;
 - a connector forced on with `video=<connector>:<mode>D` in `/boot/firmware/cmdline.txt`, which reports a monitor as connected even with nothing plugged in. Remove that entry unless a monitor that fails to report itself needs it.
 
-A kiosk enabled before this change keeps spanning all outputs until `signalk kiosk enable` runs again and rewrites the unit.
+With cage 0.1.4 (Debian Bookworm), whose `-m last` crashes cage at start, the kiosk leaves the option out and the browser spans all outputs; `signalk kiosk scan` says which applies. A kiosk enabled before this change keeps spanning all outputs until `signalk kiosk enable` runs again and rewrites the unit. `enable` starts from its defaults, so repeat the options the kiosk was enabled with, such as `--readwrite`, `--url` or `--no-screen-pause`; `signalk kiosk status` shows the current settings.
 
 ## Getting a console
 

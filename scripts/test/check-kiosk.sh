@@ -106,12 +106,12 @@ fi
 
 echo "monitor warnings"
 cmdline="$tmp/cmdline"
-echo 'console=tty1 video=HDMI-A-1:1920x1080@60D video=HDMI-A-2:1280x720@60 quiet' >"$cmdline"
+echo 'console=tty1 video=HDMI-A-1:1920x1080@60D,margin_left=40 video=HDMI-A-2:1280x720@60 quiet' >"$cmdline"
 warn=$(printf '%s\n' $'HDMI-A-1\tconnected\t1920x1080\t-' $'HDMI-A-2\tconnected\t5120x1440\tLG ULTRAWIDE' \
            $'DSI-1\tdisconnected\t5120x1440\t-' \
        | PATH="$sysbin" KIOSK_CMDLINE="$cmdline" bash -c ". '$TMPL'; monitor_warnings")
-if grep -q '^  HDMI-A-1: forced on by video=HDMI-A-1:1920x1080@60D ' <<<"$warn"; then
-    ok "connector forced on with video=...D is reported"
+if grep -q '^  HDMI-A-1: forced on by video=HDMI-A-1:1920x1080@60D,margin_left=40 ' <<<"$warn"; then
+    ok "connector forced on with video=...D (options after a comma) is reported"
 else
     miss "forced connector not reported: $(tr '\n' '|' <<<"$warn")"
 fi
@@ -165,6 +165,39 @@ for want in 'User=signalk-kiosk' 'PAMName=signalk-kiosk' 'TTYPath=/dev/tty1' \
         miss "unit lacks: $want"
     fi
 done
+# cage 0.1.4 crashes on -m last; the unit leaves it out there.
+for v in 0.1.4 0.1.5; do
+    mkdir -p "$tmp/cage-$v"
+    printf '#!/bin/sh\necho "Cage version %s"\n' "$v" >"$tmp/cage-$v/cage"
+    chmod +x "$tmp/cage-$v/cage"
+done
+unit_old=$(PATH="$tmp/cage-0.1.4:$sysbin" bash -c ". '$TMPL'; render_unit")
+if grep -qxF 'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_old"; then
+    ok "unit: no -m last with cage 0.1.4"
+else
+    miss "cage 0.1.4 unit: $(grep '^ExecStart=' <<<"$unit_old")"
+fi
+unit_new=$(PATH="$tmp/cage-0.1.5:$sysbin" bash -c ". '$TMPL'; render_unit")
+if grep -qxF 'ExecStart=/usr/bin/cage -s -d -m last -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_new"; then
+    ok "unit: -m last with cage 0.1.5"
+else
+    miss "cage 0.1.5 unit: $(grep '^ExecStart=' <<<"$unit_new")"
+fi
+# scan reports what the installed unit does, not what enable would write now.
+spanroot="$tmp/spanroot"
+mkdir -p "$spanroot/etc/systemd/system"
+printf '%s\n' "$unit_old" >"$spanroot/etc/systemd/system/signalk-kiosk.service"
+if PATH="$tmp/cage-0.1.5:$sysbin" KIOSK_ROOT="$spanroot" bash -c ". '$TMPL'; kiosk_spans_outputs"; then
+    ok "an installed unit without -m last spans the outputs"
+else
+    miss "an installed unit without -m last reported as one output"
+fi
+printf '%s\n' "$unit_new" >"$spanroot/etc/systemd/system/signalk-kiosk.service"
+if ! PATH="$tmp/cage-0.1.4:$sysbin" KIOSK_ROOT="$spanroot" bash -c ". '$TMPL'; kiosk_spans_outputs"; then
+    ok "an installed unit with -m last shows one output"
+else
+    miss "an installed unit with -m last reported as spanning"
+fi
 # The kiosk's processes leave the unit's cgroup for the kiosk user's slice,
 # so a Slice= here would weight an empty cgroup.
 if grep -q '^Slice=' <<<"$unit"; then
