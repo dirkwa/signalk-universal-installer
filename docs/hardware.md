@@ -15,7 +15,7 @@ The installer detects host hardware at install time and passes it through to the
 | **ALSA audio** | Presence of `/dev/snd` | **Enabled when present** — the mount is a read-only *metadata view* for signalk-container's device probe, not direct audio access (see [Audio passthrough](#audio-passthrough)); the low risk doesn't warrant install-time friction for voice-stack users | `{ present, enabled }` |
 | **Input devices** | Presence of `/dev/input` | **Enabled when present** — same read-only *metadata view* as audio, for encoders and keypads (see [Input passthrough](#input-passthrough)) | `{ present, enabled }` |
 
-The renderer (`render-server-quadlet.sh`) emits a `Volume=` line for each enabled DBus, GPIO, audio and input entry, and for the halpid socket on a HALPI2, inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. An enabled SocketCAN entry gets no line. Enabled serial devices (USB serial and onboard serial) go into a second managed block in the `[Service]` section, `# === BEGIN SERIAL DEVICES / END SERIAL DEVICES ===`, as one `Environment="SIGNALK_SERIAL_DEVICES=…"` line. Anything outside those blocks — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
+The renderer (`render-server-quadlet.sh`) emits a `Volume=` line for each enabled DBus, audio and input entry, and for the halpid socket on a HALPI2, inside a managed `# === BEGIN HARDWARE / END HARDWARE ===` block in `signalk-server.container`. An enabled SocketCAN entry gets no line. Enabled serial devices (USB serial and onboard serial) go into a second managed block in the `[Service]` section, `# === BEGIN SERIAL DEVICES / END SERIAL DEVICES ===`, as one `Environment="SIGNALK_SERIAL_DEVICES=…"` line, and enabled GPIO goes there as `Environment="SIGNALK_GPIO=1"`. Anything outside those blocks — including the separate `# === BEGIN USER ADDITIONS ===` block — is preserved verbatim across re-detects and version switches.
 
 Serial devices are checked at every start of `signalk-server`, not when the Quadlet is rendered. podman refuses to create the container (exit 125) when a `--device` path is missing, so with `AddDevice=` lines one unplugged device kept the whole server down ([#309](https://github.com/dirkwa/signalk-universal-installer/issues/309): a touchscreen's serial port that disappears whenever the monitor is switched off). Instead, an `ExecStartPre` in the server unit waits up to 15 seconds for any listed device that is missing, then writes `--device` arguments for the devices that exist to `$XDG_RUNTIME_DIR/signalk-server-devices.env`, which `PodmanArgs=$SIGNALK_DEVICE_ARGS` hands to podman. A device that is still missing is left out, and the server starts without it; `journalctl --user -u signalk-server` shows `starting without absent serial device(s): …`. A device that comes back is passed at the next start of the server, without a re-render.
 
@@ -26,7 +26,7 @@ Rootless Podman needs the calling user in the right Unix groups to forward devic
 | Group | Required for |
 |---|---|
 | `dialout` | USB serial (`/dev/ttyUSB*`, `/dev/serial/by-id/*`) |
-| `gpio` | Raspberry Pi GPIO (`/dev/gpiomem`) |
+| `gpio` | Raspberry Pi GPIO (`/dev/gpiomem*`, `/dev/gpiochip*`) |
 | `netdev` | SocketCAN (`vcan` setup, `ip` administration) |
 | `audio` | ALSA devices (`/dev/snd/*`) opened by managed audio containers (see [Audio passthrough](#audio-passthrough)) |
 
@@ -226,7 +226,9 @@ Detected automatically via `/proc/device-tree/model`. On the Pi the installer al
 
 The installer arms the Pi's hardware watchdog through systemd, so a Pi whose kernel or systemd hangs resets itself. [docs/recovery.md](recovery.md#hardware-watchdog-raspberry-pi) has the check, the manual recipe and the opt-out.
 
-GPIO passthrough mounts `/dev/gpiomem` only — not `/dev/mem`. Plugins that need the full memory map for low-level peripherals won't work in this configuration; they'd need to run on the host, not in the container.
+GPIO passthrough passes the GPIO nodes that exist at each start of `signalk-server`, through the same `ExecStartPre` as serial devices: `/dev/gpiomem` on a Pi 4 and older, `/dev/gpiomem0` to `/dev/gpiomem4` on a Pi 5, and every `/dev/gpiochip*`, including a USB GPIO adapter's. The `gpiochip` nodes are the kernel's GPIO character devices, which libgpiod and its `gpioset`/`gpioget` tools use; on a Pi 5 they are the only interface that works, since the sysfs GPIO interface and the libraries built on `/dev/gpiomem` (RPi.GPIO, pigpio) do not support its RP1 chip. They are checked at start rather than rendered as `Volume=` lines because they change under a rendered unit: a Pi 5 has no `/dev/gpiomem` at all, a 2024 Raspberry Pi kernel update renumbered the Pi 5's gpiochips (the RP1 moved from `gpiochip4` to `gpiochip0`), and a USB adapter can be unplugged. Pi OS makes all of these nodes `root:gpio 0660`, so the container reaches them through your `gpio` membership. `/dev/mem` is not passed; plugins that need the full memory map would have to run on the host.
+
+GPIO is off by default. To switch it on, set `gpio.enabled` to `true` in `~/.signalk-updater/hardware.json` and run `signalk render-server`.
 
 ### Hat Labs HALPI2 (Compute Module 5 carrier)
 

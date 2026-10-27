@@ -117,7 +117,7 @@ fi
 # something else is not hardware leaking into the render. Grepping the raw
 # output made this assertion fire on documentation.
 if grep -vE '^[[:space:]]*#' <<<"$out" \
-    | grep -qE 'can0|/run/dbus|signalk-dbus-socket|/dev/gpiomem|/dev/snd|/dev/input'; then
+    | grep -qE 'can0|/run/dbus|signalk-dbus-socket|Volume=/dev/gpio|SIGNALK_GPIO=|/dev/snd|/dev/input'; then
     echo "  [MISS] disabled hardware leaked into output"
     fail=1
 else
@@ -176,6 +176,46 @@ if grep -vE '^[[:space:]]*#' <<<"$out_can" | grep -q 'can0'; then
 else
     echo "  [OK]   enabled CAN interface renders no AddDevice= line"
 fi
+
+# 4c. Enabled GPIO renders one flag into the SERIAL DEVICES block and no
+#     Volume= line: the nodes differ between a Pi 4 and a Pi 5 and change
+#     with a kernel update, so the start script picks them (case 7). Only
+#     the boolean true enables it, and a .gpio that is not an object is
+#     ignored without a jq error.
+jq '.gpio = {platform:"rpi5", enabled:true}' "$tmp/hardware.json" >"$tmp/hardware-gpio.json"
+err_gpio="$tmp/stderr-gpio.log"
+out_gpio=$(bash "$RENDER" "$tmp/hardware-gpio.json" "$TEMPLATE" 2>"$err_gpio") || {
+    echo "  [MISS] render (gpio enabled) exited non-zero"
+    fail=1
+}
+if [[ -s "$err_gpio" ]]; then
+    echo "  [MISS] render (gpio enabled) wrote to stderr:"
+    sed 's/^/         /' "$err_gpio"
+    fail=1
+fi
+if serial_block <<<"$out_gpio" | grep -qxF 'Environment="SIGNALK_GPIO=1"'; then
+    echo "  [OK]   enabled GPIO sets SIGNALK_GPIO=1 in the SERIAL DEVICES block"
+else
+    echo "  [MISS] enabled GPIO did not set SIGNALK_GPIO=1:"
+    serial_block <<<"$out_gpio" | sed 's/^/         /'
+    fail=1
+fi
+if grep -q '^Volume=[^:]*gpio' <<<"$out_gpio"; then
+    echo "  [MISS] enabled GPIO rendered a Volume= line (fails the unit when the node is missing)"
+    fail=1
+else
+    echo "  [OK]   enabled GPIO renders no Volume= line"
+fi
+for odd in '{platform:"rpi5", enabled:"true"}' '"on"'; do
+    jq ".gpio = $odd" "$tmp/hardware.json" >"$tmp/hardware-gpio-odd.json"
+    out_odd=$(bash "$RENDER" "$tmp/hardware-gpio-odd.json" "$TEMPLATE" 2>"$tmp/stderr-gpio-odd.log") || true
+    if grep -qxF 'Environment="SIGNALK_GPIO=1"' <<<"$out_odd" || [[ -s "$tmp/stderr-gpio-odd.log" ]]; then
+        echo "  [MISS] .gpio = $odd enabled GPIO or wrote to stderr"
+        fail=1
+    else
+        echo "  [OK]   .gpio = $odd leaves GPIO off, quietly"
+    fi
+done
 
 # 5. Enabled audio renders the read-only /dev/snd view — but only while the
 #    host path exists: a Volume= with a missing source fails the whole unit
@@ -453,6 +493,55 @@ else
         echo "  [OK]   no serial devices: empty arguments, nothing logged"
     else
         echo "  [MISS] empty device list did not give empty arguments"
+        fail=1
+    fi
+fi
+
+# 7b. With SIGNALK_GPIO=1 the same start script passes each GPIO node present
+#     at this start, once, and none without the flag. The script's /dev/gpio
+#     paths are pointed at a fixture laid out like a Pi 5 (gpiomem0..1 and
+#     gpiochip0, no plain gpiomem), then like a Pi 4 (gpiomem, gpiochip0..1).
+if [[ -n "${pre_script:-}" ]]; then
+    gdev="$tmp/gpiodev"
+    gpio_script=${pre_script//\/dev\/gpio/$gdev\/gpio}
+    mkdir -p "$gdev"
+    : >"$gdev/gpiomem0"; : >"$gdev/gpiomem1"; : >"$gdev/gpiochip0"
+    SIGNALK_SERIAL_DEVICES="" SIGNALK_GPIO=1 sh -c "$gpio_script" 2>/dev/null || true
+    want="SIGNALK_DEVICE_ARGS= --device $gdev/gpiomem0 --device $gdev/gpiomem1 --device $gdev/gpiochip0"
+    if [[ "$(cat "$env_file")" == "$want" ]]; then
+        echo "  [OK]   Pi 5 layout: gpiomem0..N and gpiochip* passed, no plain gpiomem"
+    else
+        echo "  [MISS] Pi 5 layout wrote:"
+        sed 's/^/         /' "$env_file"
+        echo "         expected: $want"
+        fail=1
+    fi
+    rm -f "$gdev"/*
+    : >"$gdev/gpiomem"; : >"$gdev/gpiochip0"; : >"$gdev/gpiochip1"
+    SIGNALK_SERIAL_DEVICES="$node" SIGNALK_GPIO=1 sh -c "$gpio_script" 2>/dev/null || true
+    want="SIGNALK_DEVICE_ARGS= --device $node --device $gdev/gpiomem --device $gdev/gpiochip0 --device $gdev/gpiochip1"
+    if [[ "$(cat "$env_file")" == "$want" ]]; then
+        echo "  [OK]   Pi 4 layout: gpiomem and every gpiochip passed after the serial device"
+    else
+        echo "  [MISS] Pi 4 layout wrote:"
+        sed 's/^/         /' "$env_file"
+        echo "         expected: $want"
+        fail=1
+    fi
+    SIGNALK_SERIAL_DEVICES="" sh -c "$gpio_script" 2>/dev/null || true
+    if [[ "$(cat "$env_file")" == "SIGNALK_DEVICE_ARGS=" ]]; then
+        echo "  [OK]   without SIGNALK_GPIO no GPIO node is passed"
+    else
+        echo "  [MISS] GPIO nodes passed without SIGNALK_GPIO:"
+        sed 's/^/         /' "$env_file"
+        fail=1
+    fi
+    rm -f "$gdev"/*
+    SIGNALK_SERIAL_DEVICES="" SIGNALK_GPIO=1 sh -c "$gpio_script" 2>"$tmp/pre-gpio.err" || true
+    if [[ "$(cat "$env_file")" == "SIGNALK_DEVICE_ARGS=" && ! -s "$tmp/pre-gpio.err" ]]; then
+        echo "  [OK]   SIGNALK_GPIO=1 with no GPIO node: empty arguments, nothing logged"
+    else
+        echo "  [MISS] SIGNALK_GPIO=1 with no node did not give empty arguments"
         fail=1
     fi
 fi

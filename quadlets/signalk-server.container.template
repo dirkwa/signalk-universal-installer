@@ -236,7 +236,8 @@ RestartSec=10
 ExecStartPre=/bin/sh -c 'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -qs "^nameserver" /etc/resolv.conf && break; sleep 1; done; exit 0'
 # Serial devices (USB by-id paths and onboard UARTs), rendered from
 # ~/.signalk-updater/hardware.json by render-server-quadlet.sh as
-# SIGNALK_SERIAL_DEVICES. Do not edit by hand.
+# SIGNALK_SERIAL_DEVICES, and SIGNALK_GPIO=1 when GPIO is enabled there.
+# Do not edit by hand.
 # === BEGIN SERIAL DEVICES (managed by signalk-universal-installer) ===
 # === END SERIAL DEVICES ===
 # Pass only the serial devices that exist at this start. podman fails
@@ -258,6 +259,12 @@ ExecStartPre=/bin/sh -c 'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -
 # restart used to do that by accident. No wait when every device is present.
 # Devices left out are named in this unit's journal. Always exits 0, and the
 # file is replaced on every start, so no start reuses an earlier list.
+#
+# With SIGNALK_GPIO=1 it also passes every GPIO node present at this start,
+# not waited for: /dev/gpiomem (Pi 4 and older), /dev/gpiomem0..4 (Pi 5) and
+# each /dev/gpiochip*, the character devices libgpiod's gpioset opens and
+# the only GPIO interface that works on the Pi 5's RP1. Pi OS makes them
+# root:gpio 0660; GroupAdd=keep-groups carries the user's gpio membership.
 EnvironmentFile=-%t/signalk-server-devices.env
 ExecStartPre=/bin/sh -c 'f=%t/signalk-server-devices.env; n=$${SIGNALK_DEVICE_WAIT:-15}; \
     while :; do \
@@ -271,6 +278,9 @@ ExecStartPre=/bin/sh -c 'f=%t/signalk-server-devices.env; n=$${SIGNALK_DEVICE_WA
         [ -e "$$d" ] || continue; \
         if [ -L "$$d" ]; then args="$$args --device $$d:$$d --device $$d"; else args="$$args --device $$d"; fi; \
     done; \
+    if [ "$${SIGNALK_GPIO:-}" = 1 ]; then \
+        for d in /dev/gpiomem /dev/gpiomem[0-9]* /dev/gpiochip[0-9]*; do [ -e "$$d" ] || continue; args="$$args --device $$d"; done; \
+    fi; \
     if [ -n "$$missing" ]; then echo "starting without absent serial device(s):$$missing" >&2; fi; \
     echo "SIGNALK_DEVICE_ARGS=$$args" >"$$f.tmp" && mv -f "$$f.tmp" "$$f"; \
     exit 0'

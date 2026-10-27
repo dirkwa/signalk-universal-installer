@@ -145,8 +145,7 @@ hardware_block() {
         # "Volume=..." string and errors with "Cannot index string".
         jq -r '
           [
-            ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=signalk-dbus-socket:/run/dbus:rw"),
-            ((.gpio // {}) | select(.enabled == true) | "Volume=/dev/gpiomem:/dev/gpiomem")
+            ((.bluetooth // {}) | select(.enabled == true and .dbusAvailable == true) | "Volume=signalk-dbus-socket:/run/dbus:rw")
           ] | .[]
         ' "$HW_FILE"
     fi
@@ -237,14 +236,30 @@ hardware_block() {
     fi
 }
 
-serial_block=$(serial_devices_block)
+# GPIO nodes are not Volume= lines either, for the same reason as serial
+# devices: a Volume= whose source is missing fails every start (exit 125),
+# and the GPIO nodes differ between hosts and change under a rendered unit.
+# A Pi 4 has /dev/gpiomem, a Pi 5 /dev/gpiomem0..4 and no /dev/gpiomem; a
+# 2024 Raspberry Pi kernel update renumbered the Pi 5's gpiochips (the RP1
+# moved from gpiochip4 to gpiochip0); a USB GPIO adapter can be unplugged.
+# So enabled GPIO renders one flag into the SERIAL DEVICES block, and the
+# template's device ExecStartPre passes the gpiomem* and gpiochip* nodes
+# that exist at that start. Needs jq, like bluetooth.
+gpio_flag() {
+    if command -v jq >/dev/null 2>&1 \
+        && [ "$(jq -r 'if (.gpio | type) == "object" and .gpio.enabled == true then "on" else "off" end' "$HW_FILE")" = "on" ]; then
+        echo 'Environment="SIGNALK_GPIO=1"'
+    fi
+}
+
+serial_block=$(serial_devices_block; gpio_flag)
 
 # A template from before the SERIAL DEVICES block has no place for the list,
 # and its ExecStart would not read it: rendering against it would drop every
-# serial device without a word. Refuse instead, so `signalk render-server`
-# leaves the live Quadlet as it is.
+# serial device, and GPIO, without a word. Refuse instead, so
+# `signalk render-server` leaves the live Quadlet as it is.
 if [ -n "$serial_block" ] && ! grep -q '^# === BEGIN SERIAL DEVICES' "$TEMPLATE"; then
-    echo "render-server-quadlet: $TEMPLATE has no SERIAL DEVICES block; refusing to drop the serial devices in $HW_FILE" >&2
+    echo "render-server-quadlet: $TEMPLATE has no SERIAL DEVICES block; refusing to drop the serial and GPIO devices in $HW_FILE" >&2
     exit 1
 fi
 
