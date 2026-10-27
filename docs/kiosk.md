@@ -112,7 +112,14 @@ At boot the kiosk usually starts before the server, whose container waits for th
 
 ## Several monitors
 
-cage spans the browser across every connected output, and the kiosk does not pick one; `signalk kiosk scan` shows what is connected.
+The browser shows on one output only: cage runs with `-m last`, which uses the output connected last and blanks the others. Spanning several outputs would make the browser window wider than 4096 px, the largest texture the Raspberry Pi's GPU handles, and Chromium then draws the page in software at a few frames per second. To choose the monitor, connect only that one, or connect it last.
+
+`signalk kiosk scan` shows what is connected and warns about two cases that make the kiosk slow or show it on the wrong output:
+
+- a monitor whose preferred mode is wider or taller than 4096 px (some ultrawide monitors), which Chromium draws in software;
+- a connector forced on with `video=<connector>:<mode>D` in `/boot/firmware/cmdline.txt`, which reports a monitor as connected even with nothing plugged in. Remove that entry unless a monitor that fails to report itself needs it.
+
+A kiosk enabled before this change keeps spanning all outputs until `signalk kiosk enable` runs again and rewrites the unit.
 
 ## Getting a console
 

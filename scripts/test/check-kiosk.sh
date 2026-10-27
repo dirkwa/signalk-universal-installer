@@ -2,7 +2,9 @@
 # Verifies installer/linux/signalk-kiosk.tmpl without a display, root or a
 # running server.
 #
-#   1. Monitor scan against a fake sysfs tree, including the EDID name decode.
+#   1. Monitor scan against a fake sysfs tree, including the EDID name decode,
+#      and the warnings for a mode over the GPU's 4096 px and for a connector
+#      forced on by video= in the kernel command line.
 #   2. Touchscreen detection against a stubbed udevadm.
 #   3. The rendered unit, PAM stack and user-slice drop-in carry the lines the
 #      kiosk depends on (seat session on tty1, getty conflict, the low CPU
@@ -102,6 +104,28 @@ else
     miss "DSI-1 line wrong: $(tr '\n' '|' <<<"$scan")"
 fi
 
+echo "monitor warnings"
+cmdline="$tmp/cmdline"
+echo 'console=tty1 video=HDMI-A-1:1920x1080@60D video=HDMI-A-2:1280x720@60 quiet' >"$cmdline"
+warn=$(printf '%s\n' $'HDMI-A-1\tconnected\t1920x1080\t-' $'HDMI-A-2\tconnected\t5120x1440\tLG ULTRAWIDE' \
+           $'DSI-1\tdisconnected\t5120x1440\t-' \
+       | PATH="$sysbin" KIOSK_CMDLINE="$cmdline" bash -c ". '$TMPL'; monitor_warnings")
+if grep -q '^  HDMI-A-1: forced on by video=HDMI-A-1:1920x1080@60D ' <<<"$warn"; then
+    ok "connector forced on with video=...D is reported"
+else
+    miss "forced connector not reported: $(tr '\n' '|' <<<"$warn")"
+fi
+if grep -q '^  HDMI-A-2: 5120x1440 is larger than 4096 px' <<<"$warn"; then
+    ok "mode wider than 4096 px is reported"
+else
+    miss "wide mode not reported: $(tr '\n' '|' <<<"$warn")"
+fi
+if [[ $(wc -l <<<"$warn") -eq 2 ]]; then
+    ok "no warning for a video= without D, a 1080p mode or a disconnected output"
+else
+    miss "unexpected warnings: $(tr '\n' '|' <<<"$warn")"
+fi
+
 # ── 2. touchscreens ───────────────────────────────────────────────────────
 echo "touchscreen detection"
 stubs="$tmp/stubs"
@@ -133,7 +157,7 @@ echo "rendered unit, PAM stack and user-slice drop-in"
 unit=$(PATH="$sysbin" bash -c ". '$TMPL'; render_unit")
 for want in 'User=signalk-kiosk' 'PAMName=signalk-kiosk' 'TTYPath=/dev/tty1' \
             'Conflicts=getty@tty1.service' \
-            'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' \
+            'ExecStart=/usr/bin/cage -s -d -m last -- /usr/local/lib/signalk-kiosk/browser' \
             'Restart=always' 'WantedBy=multi-user.target'; do
     if grep -qxF "$want" <<<"$unit"; then
         ok "unit: $want"

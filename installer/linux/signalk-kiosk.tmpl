@@ -280,6 +280,32 @@ detect_touchscreens() {
     done
 }
 
+# The Pi's GPU (V3D) handles textures up to 4096 px a side; Chromium draws a
+# larger window in software, at a few frames per second.
+GPU_MAX_PX=4096
+
+# Warnings about connected outputs, read from scan_monitors output on stdin:
+# a mode wider or taller than the GPU limit, and a connector forced on with
+# video=<connector>:...D (or e) in the kernel command line, which reports a
+# monitor that may not be there.
+monitor_warnings() {
+    local cmdline conn status mode name w h tok
+    cmdline=$(cat "${KIOSK_CMDLINE:-/proc/cmdline}" 2>/dev/null || true)
+    while IFS=$'\t' read -r conn status mode name; do
+        [[ "$status" == connected ]] || continue
+        if [[ "$mode" =~ ^([0-9]+)x([0-9]+) ]]; then
+            w=${BASH_REMATCH[1]} h=${BASH_REMATCH[2]}
+            if (( w > GPU_MAX_PX || h > GPU_MAX_PX )); then
+                echo "  ${conn}: ${w}x${h} is larger than ${GPU_MAX_PX} px; the browser draws it in software and runs slowly"
+            fi
+        fi
+        for tok in $cmdline; do
+            [[ "$tok" == "video=${conn}:"* && "$tok" =~ [De]$ ]] || continue
+            echo "  ${conn}: forced on by ${tok} in the kernel command line; it shows as connected even with nothing plugged in"
+        done
+    done
+}
+
 print_scan() {
     local mons touch n=0 line
     section "Monitors"
@@ -292,7 +318,8 @@ print_scan() {
             printf '  %-14s %-13s %-11s %s\n' "$conn" "$status" "$mode" "$name"
         done <<<"$mons"
         (( n > 0 )) || echo "  (nothing connected — the kiosk needs a monitor to show anything)"
-        (( n > 1 )) && echo "  (${n} connected — cage spans the browser across all of them)"
+        (( n > 1 )) && echo "  (${n} connected — the browser shows on the one connected last, usually the last listed)"
+        monitor_warnings <<<"$mons"
     fi
     section "Touchscreens"
     touch=$(detect_touchscreens)
@@ -527,7 +554,9 @@ StandardError=journal
 UtmpIdentifier=tty1
 UtmpMode=user
 # -s keeps Ctrl+Alt+F2 working, so a keyboard can still reach a console.
-ExecStart=/usr/bin/cage -s -d -- ${LAUNCHER}
+# -m last shows the browser on one output: spanning several makes the window
+# wider than the GPU's 4096 px limit, and Chromium then draws in software.
+ExecStart=/usr/bin/cage -s -d -m last -- ${LAUNCHER}
 Restart=always
 RestartSec=5
 
