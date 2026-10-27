@@ -126,6 +126,18 @@ else
     miss "unexpected warnings: $(tr '\n' '|' <<<"$warn")"
 fi
 
+# video=<mode>D without a connector forces every connector that has no entry
+# of its own.
+cmdline_any="$tmp/cmdline-any"
+echo 'video=HDMI-A-2:1280x720@60 video=1920x1080@60D quiet' >"$cmdline_any"
+warn_any=$(printf '%s\n' $'HDMI-A-1\tconnected\t1920x1080\t-' $'HDMI-A-2\tconnected\t1280x720\t-' \
+       | PATH="$sysbin" KIOSK_CMDLINE="$cmdline_any" bash -c ". '$TMPL'; monitor_warnings")
+if [[ "$warn_any" == '  HDMI-A-1: forced on by video=1920x1080@60D in the kernel command line; it shows as connected even with nothing plugged in' ]]; then
+    ok "video=<mode>D without a connector is reported for connectors without their own entry"
+else
+    miss "connectorless video= warnings: $(tr '\n' '|' <<<"$warn_any")"
+fi
+
 gpu_max=$(sed -n 's/^GPU_MAX_PX=//p' "$TMPL")
 if [[ -n "$gpu_max" ]] && [[ $(grep -c "$gpu_max px" "${KIOSK_DOC:-docs/kiosk.md}") -ge 2 ]]; then
     ok "docs/kiosk.md states the ${gpu_max} px limit the template checks"
@@ -196,6 +208,12 @@ if grep -qxF 'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/brow
     ok "unit: no -m last while video=...D forces a connector on"
 else
     miss "forced-connector unit: $(grep '^ExecStart=' <<<"$unit_forced")"
+fi
+unit_any=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" KIOSK_CMDLINE="$cmdline_any" bash -c ". '$TMPL'; render_unit")
+if grep -qxF 'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_any"; then
+    ok "unit: no -m last while video=<mode>D forces connectors on"
+else
+    miss "connectorless forced unit: $(grep '^ExecStart=' <<<"$unit_any")"
 fi
 # scan reports what the installed unit does, not what enable would write now.
 spanroot="$tmp/spanroot"

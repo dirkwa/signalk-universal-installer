@@ -284,25 +284,53 @@ detect_touchscreens() {
 # larger window in software, at a few frames per second.
 GPU_MAX_PX=4096
 
-# The video=<connector>:<mode>D (or e) entries of the kernel command line,
-# one per line. Such a connector reports a monitor even with nothing plugged in.
-forced_video_args() {
+# The video= entries of the kernel command line, one per line.
+video_args() {
     local tok
     local -a cmdline=()
     read -r -a cmdline <"${KIOSK_CMDLINE:-/proc/cmdline}" 2>/dev/null || true
     for tok in "${cmdline[@]}"; do
-        # Options such as margin_left=40 follow the mode after a comma.
-        [[ "$tok" == video=*:* && "${tok%%,*}" =~ [De]$ ]] && printf '%s\n' "$tok"
+        [[ "$tok" == video=* ]] && printf '%s\n' "$tok"
     done
     return 0
+}
+
+# Whether a video= entry forces its connector on (mode ending in D or e).
+# Such a connector reports a monitor even with nothing plugged in.
+video_arg_forces() {
+    # Options such as margin_left=40 follow the mode after a comma.
+    [[ "${1%%,*}" =~ [De]$ ]]
+}
+
+# The forcing video= entries, one per line: video=<connector>:<mode>D for one
+# connector, or video=<mode>D for every connector without an entry of its own.
+forced_video_args() {
+    local tok
+    while IFS= read -r tok; do
+        [[ -n "$tok" ]] && video_arg_forces "$tok" && printf '%s\n' "$tok"
+    done <<<"$(video_args)"
+    return 0
+}
+
+# The video= entry that applies to a connector: its own, else the one without
+# a connector.
+video_arg_for() {
+    local conn=$1 tok own="" any=""
+    while IFS= read -r tok; do
+        if [[ "$tok" == "video=${conn}:"* ]]; then
+            own=$tok
+        elif [[ -n "$tok" && "$tok" != video=*:* ]]; then
+            any=$tok
+        fi
+    done <<<"$(video_args)"
+    printf '%s' "${own:-$any}"
 }
 
 # Warnings about connected outputs, read from scan_monitors output on stdin:
 # a mode wider or taller than the GPU limit, and a connector forced on in the
 # kernel command line.
 monitor_warnings() {
-    local conn status mode name w h tok forced
-    forced=$(forced_video_args)
+    local conn status mode name w h tok
     while IFS=$'\t' read -r conn status mode name; do
         [[ "$status" == connected ]] || continue
         if [[ "$mode" =~ ^([0-9]+)x([0-9]+) ]]; then
@@ -311,10 +339,10 @@ monitor_warnings() {
                 echo "  ${conn}: ${w}x${h} is larger than ${GPU_MAX_PX} px; the browser may draw in software and run slowly if it uses this output"
             fi
         fi
-        while IFS= read -r tok; do
-            [[ "$tok" == "video=${conn}:"* ]] || continue
+        tok=$(video_arg_for "$conn")
+        if [[ -n "$tok" ]] && video_arg_forces "$tok"; then
             echo "  ${conn}: forced on by ${tok} in the kernel command line; it shows as connected even with nothing plugged in"
-        done <<<"$forced"
+        fi
     done
 }
 
@@ -361,7 +389,7 @@ print_scan() {
             if kiosk_spans_outputs; then
                 echo "  (${n} connected — cage spans the browser across all of them)"
             else
-                echo "  (${n} connected — the browser shows on the one connected last, usually the last listed)"
+                echo "  (${n} connected — the browser shows on the one connected last)"
             fi
         fi
         monitor_warnings <<<"$mons"
