@@ -112,7 +112,16 @@ At boot the kiosk usually starts before the server, whose container waits for th
 
 ## Several monitors
 
-cage spans the browser across every connected output, and the kiosk does not pick one; `signalk kiosk scan` shows what is connected.
+The browser shows on one output only: cage runs with `-m last`, which uses the output cage finds last and blanks the others. With several monitors connected when the kiosk starts, that order comes from the graphics driver, not from when each was plugged in. Spanning several outputs can make the browser window wider or taller than 4096 px, the largest texture the Raspberry Pi's GPU handles in either direction (two 3440 px monitors side by side make 6880 px, two 1920 px ones 3840 px), and Chromium then draws the page in software at a few frames per second. To choose the monitor, leave only that one connected when the kiosk starts (at boot or on `signalk kiosk restart`).
+
+`signalk kiosk scan` shows what is connected and warns about two cases that make the kiosk slow or show it on the wrong output:
+
+- a monitor whose preferred mode is wider or taller than 4096 px (some ultrawide monitors), which Chromium may draw in software if the kiosk uses that output;
+- a connector forced on with `video=<connector>:<mode>e`, or `video=<connector>:<mode>D` for a digital output (or `video=<mode>e` / `video=<mode>D` without a connector, which applies to every connector without an entry of its own), in the kernel command line (`/boot/firmware/cmdline.txt` on Raspberry Pi OS), which reports a monitor as connected even with nothing plugged in. Remove that entry unless a monitor that fails to report itself needs it.
+
+While such an entry is there, the kiosk leaves `-m last` out and the browser spans all outputs: cage may receive the forced connector last, and `-m last` would then put the browser on a screen nobody sees. `enable` makes this choice when it writes the unit, so after adding or removing such an entry, reboot to apply the kernel command line, then run `signalk kiosk enable` again with the options it was enabled with (see below); `signalk kiosk restart` keeps the unit as it is.
+
+With cage 0.1.4 (Debian Bookworm), whose `-m last` crashes cage at start, the kiosk leaves the option out and the browser spans all outputs; `signalk kiosk scan` says which applies. A kiosk enabled before this change keeps spanning all outputs until `signalk kiosk enable` runs again and rewrites the unit. `enable` starts from its defaults, so repeat the options the kiosk was enabled with, such as `--readwrite`, `--url` or `--no-screen-pause`; `signalk kiosk status` shows the current settings.
 
 ## Getting a console
 

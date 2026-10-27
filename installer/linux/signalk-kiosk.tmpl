@@ -280,6 +280,99 @@ detect_touchscreens() {
     done
 }
 
+# The Pi's GPU (V3D) handles textures up to 4096 px a side; Chromium draws a
+# larger window in software, at a few frames per second.
+GPU_MAX_PX=4096
+
+# The video= entries of the kernel command line, one per line.
+video_args() {
+    local tok
+    local -a cmdline=()
+    read -r -a cmdline <"${KIOSK_CMDLINE:-/proc/cmdline}" 2>/dev/null || true
+    for tok in "${cmdline[@]}"; do
+        [[ "$tok" == video=* ]] && printf '%s\n' "$tok"
+    done
+    return 0
+}
+
+# Whether a video= entry forces its connector on (mode ending in D or e).
+# Such a connector reports a monitor even with nothing plugged in.
+video_arg_forces() {
+    # Options such as margin_left=40 follow the mode after a comma.
+    [[ "${1%%,*}" =~ [De]$ ]]
+}
+
+# The forcing video= entries, one per line: video=<connector>:<mode>D for one
+# connector, or video=<mode>D for every connector without an entry of its own.
+forced_video_args() {
+    local tok
+    while IFS= read -r tok; do
+        [[ -n "$tok" ]] && video_arg_forces "$tok" && printf '%s\n' "$tok"
+    done <<<"$(video_args)"
+    return 0
+}
+
+# The video= entry that applies to a connector: its own, else the one without
+# a connector.
+video_arg_for() {
+    local conn="$1" tok own="" any=""
+    while IFS= read -r tok; do
+        if [[ "$tok" == "video=${conn}:"* ]]; then
+            own="$tok"
+        elif [[ -n "$tok" && "$tok" != video=*:* ]]; then
+            any="$tok"
+        fi
+    done <<<"$(video_args)"
+    printf '%s' "${own:-$any}"
+}
+
+# Warnings about connected outputs, read from scan_monitors output on stdin:
+# a mode wider or taller than the GPU limit, and a connector forced on in the
+# kernel command line.
+monitor_warnings() {
+    local conn status mode name w h tok
+    while IFS=$'\t' read -r conn status mode name; do
+        [[ "$status" == connected ]] || continue
+        if [[ "$mode" =~ ^([0-9]+)x([0-9]+) ]]; then
+            w="${BASH_REMATCH[1]}" h="${BASH_REMATCH[2]}"
+            if (( w > GPU_MAX_PX || h > GPU_MAX_PX )); then
+                echo "  ${conn}: ${w}x${h} is larger than ${GPU_MAX_PX} px; the browser may draw in software and run slowly if it uses this output"
+            fi
+        fi
+        tok=$(video_arg_for "$conn")
+        if [[ -n "$tok" ]] && video_arg_forces "$tok"; then
+            echo "  ${conn}: forced on by ${tok} in the kernel command line; it shows as connected even with nothing plugged in"
+        fi
+    done
+}
+
+# cage 0.1.4 (Debian Bookworm) dereferences an invalid list entry when -m last
+# meets its first output and crashes; 0.1.5 added the guard. Prints the option
+# for a cage that has it, nothing for an older one, and the option when no
+# cage is installed yet (enable installs a current one before rendering).
+# Nothing either while the kernel forces a connector on: cage may receive
+# that output last and put the browser on a screen nobody sees.
+cage_output_args() {
+    local v
+    [[ -z "$(forced_video_args)" ]] || return 0
+    # The binary the unit runs, not whichever cage comes first on PATH.
+    v=$("${KIOSK_CAGE:-/usr/bin/cage}" -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
+    if [[ -n "$v" ]] && [[ "$(printf '%s\n' "$v" 0.1.5 | sort -V | head -1)" != 0.1.5 ]]; then
+        return 0
+    fi
+    printf '%s' '-m last'
+}
+
+# Whether the browser spans all outputs: read from the installed unit, or,
+# before enable, from what enable would write.
+kiosk_spans_outputs() {
+    if [[ -f "$UNIT_FILE" ]]; then
+        if grep -q '^ExecStart=.* -m last ' "$UNIT_FILE"; then return 1; fi
+    else
+        [[ -z "$(cage_output_args)" ]]
+    fi
+}
+
 print_scan() {
     local mons touch n=0 line
     section "Monitors"
@@ -292,7 +385,17 @@ print_scan() {
             printf '  %-14s %-13s %-11s %s\n' "$conn" "$status" "$mode" "$name"
         done <<<"$mons"
         (( n > 0 )) || echo "  (nothing connected — the kiosk needs a monitor to show anything)"
-        (( n > 1 )) && echo "  (${n} connected — cage spans the browser across all of them)"
+        if (( n > 1 )); then
+            if [[ ! -f "$UNIT_FILE" && ! -x "${KIOSK_CAGE:-/usr/bin/cage}" && -z "$(forced_video_args)" ]]; then
+                # enable installs cage first; its version decides.
+                echo "  (${n} connected — the browser will show on the one cage finds last with cage 0.1.5 or newer, and span all of them with an older cage; leave only the one to use connected)"
+            elif kiosk_spans_outputs; then
+                echo "  (${n} connected — cage spans the browser across all of them)"
+            else
+                echo "  (${n} connected — the browser shows on the one cage finds last; leave only the one to use connected)"
+            fi
+        fi
+        monitor_warnings <<<"$mons"
     fi
     section "Touchscreens"
     touch=$(detect_touchscreens)
@@ -502,6 +605,10 @@ EOF
 }
 
 render_unit() {
+    local cage_args
+    # Fixed when enable writes the unit: a later change to cage or to the
+    # kernel's video= entries needs another enable.
+    cage_args=$(cage_output_args)
     cat <<EOF
 # Written by \`signalk kiosk enable\`; removed by \`signalk kiosk disable\`.
 [Unit]
@@ -527,7 +634,9 @@ StandardError=journal
 UtmpIdentifier=tty1
 UtmpMode=user
 # -s keeps Ctrl+Alt+F2 working, so a keyboard can still reach a console.
-ExecStart=/usr/bin/cage -s -d -- ${LAUNCHER}
+# -m last shows the browser on one output: spanning several makes the window
+# wider than the GPU's 4096 px limit, and Chromium then draws in software.
+ExecStart=/usr/bin/cage -s -d ${cage_args:+${cage_args} }-- ${LAUNCHER}
 Restart=always
 RestartSec=5
 

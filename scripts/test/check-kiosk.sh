@@ -2,7 +2,9 @@
 # Verifies installer/linux/signalk-kiosk.tmpl without a display, root or a
 # running server.
 #
-#   1. Monitor scan against a fake sysfs tree, including the EDID name decode.
+#   1. Monitor scan against a fake sysfs tree, including the EDID name decode,
+#      and the warnings for a mode over the GPU's 4096 px and for a connector
+#      forced on by video= in the kernel command line.
 #   2. Touchscreen detection against a stubbed udevadm.
 #   3. The rendered unit, PAM stack and user-slice drop-in carry the lines the
 #      kiosk depends on (seat session on tty1, getty conflict, the low CPU
@@ -102,6 +104,47 @@ else
     miss "DSI-1 line wrong: $(tr '\n' '|' <<<"$scan")"
 fi
 
+echo "monitor warnings"
+cmdline="$tmp/cmdline"
+echo 'console=tty1 video=HDMI-A-1:1920x1080@60D,margin_left=40 video=HDMI-A-2:1280x720@60 quiet *' >"$cmdline"
+warn=$(printf '%s\n' $'HDMI-A-1\tconnected\t1920x1080\t-' $'HDMI-A-2\tconnected\t5120x1440\tLG ULTRAWIDE' \
+           $'DSI-1\tdisconnected\t5120x1440\t-' \
+       | PATH="$sysbin" KIOSK_CMDLINE="$cmdline" bash -c ". '$TMPL'; monitor_warnings")
+if grep -q '^  HDMI-A-1: forced on by video=HDMI-A-1:1920x1080@60D,margin_left=40 ' <<<"$warn"; then
+    ok "connector forced on with video=...D (options after a comma) is reported"
+else
+    miss "forced connector not reported: $(tr '\n' '|' <<<"$warn")"
+fi
+if grep -q '^  HDMI-A-2: 5120x1440 is larger than 4096 px' <<<"$warn"; then
+    ok "mode wider than 4096 px is reported"
+else
+    miss "wide mode not reported: $(tr '\n' '|' <<<"$warn")"
+fi
+if [[ $(wc -l <<<"$warn") -eq 2 ]]; then
+    ok "no warning for a video= without D, a 1080p mode or a disconnected output"
+else
+    miss "unexpected warnings: $(tr '\n' '|' <<<"$warn")"
+fi
+
+# video=<mode>D without a connector forces every connector that has no entry
+# of its own.
+cmdline_any="$tmp/cmdline-any"
+echo 'video=HDMI-A-2:1280x720@60 video=1920x1080@60D quiet' >"$cmdline_any"
+warn_any=$(printf '%s\n' $'HDMI-A-1\tconnected\t1920x1080\t-' $'HDMI-A-2\tconnected\t1280x720\t-' \
+       | PATH="$sysbin" KIOSK_CMDLINE="$cmdline_any" bash -c ". '$TMPL'; monitor_warnings")
+if [[ "$warn_any" == '  HDMI-A-1: forced on by video=1920x1080@60D in the kernel command line; it shows as connected even with nothing plugged in' ]]; then
+    ok "video=<mode>D without a connector is reported for connectors without their own entry"
+else
+    miss "connectorless video= warnings: $(tr '\n' '|' <<<"$warn_any")"
+fi
+
+gpu_max=$(sed -n 's/^GPU_MAX_PX=//p' "$TMPL")
+if [[ -n "$gpu_max" ]] && [[ $(grep -c "$gpu_max px" "${KIOSK_DOC:-docs/kiosk.md}") -ge 2 ]]; then
+    ok "docs/kiosk.md states the ${gpu_max} px limit the template checks"
+else
+    miss "docs/kiosk.md does not state the template's GPU limit (${gpu_max:-unset} px)"
+fi
+
 # ── 2. touchscreens ───────────────────────────────────────────────────────
 echo "touchscreen detection"
 stubs="$tmp/stubs"
@@ -130,10 +173,10 @@ fi
 
 # ── 3. rendered files ─────────────────────────────────────────────────────
 echo "rendered unit, PAM stack and user-slice drop-in"
-unit=$(PATH="$sysbin" bash -c ". '$TMPL'; render_unit")
+unit=$(PATH="$sysbin" KIOSK_CAGE="$tmp/no-cage" KIOSK_CMDLINE=/dev/null bash -c ". '$TMPL'; render_unit")
 for want in 'User=signalk-kiosk' 'PAMName=signalk-kiosk' 'TTYPath=/dev/tty1' \
             'Conflicts=getty@tty1.service' \
-            'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' \
+            'ExecStart=/usr/bin/cage -s -d -m last -- /usr/local/lib/signalk-kiosk/browser' \
             'Restart=always' 'WantedBy=multi-user.target'; do
     if grep -qxF "$want" <<<"$unit"; then
         ok "unit: $want"
@@ -141,6 +184,61 @@ for want in 'User=signalk-kiosk' 'PAMName=signalk-kiosk' 'TTYPath=/dev/tty1' \
         miss "unit lacks: $want"
     fi
 done
+# cage 0.1.4 crashes on -m last; the unit leaves it out there.
+for v in 0.1.4 0.1.5; do
+    mkdir -p "$tmp/cage-$v"
+    printf '#!/bin/sh\necho "Cage version %s"\n' "$v" >"$tmp/cage-$v/cage"
+    chmod +x "$tmp/cage-$v/cage"
+done
+unit_old=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.4/cage" KIOSK_CMDLINE=/dev/null bash -c ". '$TMPL'; render_unit")
+if grep -qxF 'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_old"; then
+    ok "unit: no -m last with cage 0.1.4"
+else
+    miss "cage 0.1.4 unit: $(grep '^ExecStart=' <<<"$unit_old")"
+fi
+unit_new=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" KIOSK_CMDLINE=/dev/null bash -c ". '$TMPL'; render_unit")
+if grep -qxF 'ExecStart=/usr/bin/cage -s -d -m last -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_new"; then
+    ok "unit: -m last with cage 0.1.5"
+else
+    miss "cage 0.1.5 unit: $(grep '^ExecStart=' <<<"$unit_new")"
+fi
+# A connector forced on may be the output cage receives last.
+unit_forced=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" KIOSK_CMDLINE="$cmdline" bash -c ". '$TMPL'; render_unit")
+if grep -qxF 'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_forced"; then
+    ok "unit: no -m last while video=...D forces a connector on"
+else
+    miss "forced-connector unit: $(grep '^ExecStart=' <<<"$unit_forced")"
+fi
+unit_any=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" KIOSK_CMDLINE="$cmdline_any" bash -c ". '$TMPL'; render_unit")
+if grep -qxF 'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_any"; then
+    ok "unit: no -m last while video=<mode>D forces connectors on"
+else
+    miss "connectorless forced unit: $(grep '^ExecStart=' <<<"$unit_any")"
+fi
+# scan reports what the installed unit does, not what enable would write now.
+spanroot="$tmp/spanroot"
+mkdir -p "$spanroot/etc/systemd/system"
+printf '%s\n' "$unit_old" >"$spanroot/etc/systemd/system/signalk-kiosk.service"
+if PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" KIOSK_ROOT="$spanroot" bash -c ". '$TMPL'; kiosk_spans_outputs"; then
+    ok "an installed unit without -m last spans the outputs"
+else
+    miss "an installed unit without -m last reported as one output"
+fi
+printf '%s\n' "$unit_new" >"$spanroot/etc/systemd/system/signalk-kiosk.service"
+if ! PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.4/cage" KIOSK_ROOT="$spanroot" bash -c ". '$TMPL'; kiosk_spans_outputs"; then
+    ok "an installed unit with -m last shows one output"
+else
+    miss "an installed unit with -m last reported as spanning"
+fi
+# Before enable on a box without cage, the version enable installs decides.
+mkdir -p "$tmp/emptyroot"
+scan_pre=$(PATH="$sysbin" KIOSK_CAGE="$tmp/no-cage" KIOSK_ROOT="$tmp/emptyroot" KIOSK_CMDLINE=/dev/null bash -c \
+    ". '$TMPL'; scan_monitors() { printf '%s\\n' \$'HDMI-A-1\\tconnected\\t1920x1080\\t-' \$'HDMI-A-2\\tconnected\\t1920x1080\\t-'; }; detect_touchscreens() { :; }; print_scan")
+if grep -qF '(2 connected — the browser will show on the one cage finds last with cage 0.1.5 or newer, and span all of them with an older cage; leave only the one to use connected)' <<<"$scan_pre"; then
+    ok "scan before cage is installed names both outcomes"
+else
+    miss "scan before cage: $(tr '\n' '|' <<<"$scan_pre")"
+fi
 # The kiosk's processes leave the unit's cgroup for the kiosk user's slice,
 # so a Slice= here would weight an empty cgroup.
 if grep -q '^Slice=' <<<"$unit"; then
