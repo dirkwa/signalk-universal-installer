@@ -289,8 +289,9 @@ GPU_MAX_PX=4096
 # video=<connector>:...D (or e) in the kernel command line, which reports a
 # monitor that may not be there.
 monitor_warnings() {
-    local cmdline conn status mode name w h tok
-    cmdline=$(cat "${KIOSK_CMDLINE:-/proc/cmdline}" 2>/dev/null || true)
+    local conn status mode name w h tok
+    local -a cmdline=()
+    read -r -a cmdline <"${KIOSK_CMDLINE:-/proc/cmdline}" 2>/dev/null || true
     while IFS=$'\t' read -r conn status mode name; do
         [[ "$status" == connected ]] || continue
         if [[ "$mode" =~ ^([0-9]+)x([0-9]+) ]]; then
@@ -299,7 +300,7 @@ monitor_warnings() {
                 echo "  ${conn}: ${w}x${h} is larger than ${GPU_MAX_PX} px; the browser draws it in software and runs slowly"
             fi
         fi
-        for tok in $cmdline; do
+        for tok in "${cmdline[@]}"; do
             # Options such as margin_left=40 follow the mode after a comma.
             [[ "$tok" == "video=${conn}:"* && "${tok%%,*}" =~ [De]$ ]] || continue
             echo "  ${conn}: forced on by ${tok} in the kernel command line; it shows as connected even with nothing plugged in"

@@ -106,7 +106,7 @@ fi
 
 echo "monitor warnings"
 cmdline="$tmp/cmdline"
-echo 'console=tty1 video=HDMI-A-1:1920x1080@60D,margin_left=40 video=HDMI-A-2:1280x720@60 quiet' >"$cmdline"
+echo 'console=tty1 video=HDMI-A-1:1920x1080@60D,margin_left=40 video=HDMI-A-2:1280x720@60 quiet *' >"$cmdline"
 warn=$(printf '%s\n' $'HDMI-A-1\tconnected\t1920x1080\t-' $'HDMI-A-2\tconnected\t5120x1440\tLG ULTRAWIDE' \
            $'DSI-1\tdisconnected\t5120x1440\t-' \
        | PATH="$sysbin" KIOSK_CMDLINE="$cmdline" bash -c ". '$TMPL'; monitor_warnings")
