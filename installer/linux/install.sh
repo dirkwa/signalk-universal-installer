@@ -2136,7 +2136,12 @@ fi
 # need a Node toolchain. --ignore-scripts matches the appstore's install
 # posture (some plugins try to compile native bindings that fail silently).
 section "Installing SignalK plugins"
-SK_PLUGINS=(signalk-container signalk-updater signalk-doctor)
+# signalk-rpi-stats measures the computer (CPU, memory, storage, and on a
+# Raspberry Pi the supply voltage); RPI Manager shows it and puts the
+# restart, reboot and power-off buttons on one page, which call the Updater
+# and Signal K APIs. Neither needs Raspberry Pi hardware (rpi-stats reads
+# /proc, /sys and statfs), so both are installed on every Linux host.
+SK_PLUGINS=(signalk-container signalk-updater signalk-doctor signalk-rpi-stats signalk-universal-installer-rpi-mgmt)
 # Support libraries (not plugins — no auto-enable, no appstore entry).
 # tz-lookup: 70KB pure-JS lat/lon → IANA-zone lookup the host's
 # signalk-timesync agent invokes inside the container (the host has no
@@ -2145,12 +2150,12 @@ SK_PLUGINS=(signalk-container signalk-updater signalk-doctor)
 SK_LIBS=(tz-lookup)
 mkdir -p "$HOME/.signalk"
 
-# Cold install of three plugins + their transitive deps over the network
+# Cold install of the plugins + their transitive deps over the network
 # is silent (output goes to $NPM_LOG, --no-progress) and routinely takes a
 # few minutes on a fresh VM. Say so up front and tail-able, so the operator
 # doesn't read the quiet as a hang.
 info "running 'npm install' inside the signalk-server image"
-info "cold install pulls 3 plugins + deps — can take a few minutes"
+info "cold install pulls ${#SK_PLUGINS[@]} plugins + deps — can take a few minutes"
 # UserNS mapping: the signalk-server image runs as `node` (UID 1000).
 # Bare --userns=keep-id maps the invoking HOST user's UID to the same
 # number inside — but on hosts where the invoking user isn't UID 1000
@@ -2235,9 +2240,10 @@ fi
 # override that.
 mkdir -p "$HOME/.signalk/plugin-config-data"
 for p in "${SK_PLUGINS[@]}"; do
-    # signalk-container is auto-enabled by its own metadata
-    # (signalk-plugin-enabled-by-default: true); skip writing a config for it.
-    [[ "$p" == "signalk-container" ]] && continue
+    # signalk-container and RPI Manager are auto-enabled by their own
+    # metadata (signalk-plugin-enabled-by-default: true); skip writing a
+    # config for them.
+    [[ "$p" == "signalk-container" || "$p" == "signalk-universal-installer-rpi-mgmt" ]] && continue
     cfg="$HOME/.signalk/plugin-config-data/${p}.json"
     if [[ ! -f "$cfg" ]]; then
         printf '{\n  "enabled": true,\n  "configuration": {}\n}\n' >"$cfg"
