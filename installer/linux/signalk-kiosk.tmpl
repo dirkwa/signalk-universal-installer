@@ -284,27 +284,37 @@ detect_touchscreens() {
 # larger window in software, at a few frames per second.
 GPU_MAX_PX=4096
 
-# Warnings about connected outputs, read from scan_monitors output on stdin:
-# a mode wider or taller than the GPU limit, and a connector forced on with
-# video=<connector>:...D (or e) in the kernel command line, which reports a
-# monitor that may not be there.
-monitor_warnings() {
-    local conn status mode name w h tok
+# The video=<connector>:<mode>D (or e) entries of the kernel command line,
+# one per line. Such a connector reports a monitor even with nothing plugged in.
+forced_video_args() {
+    local tok
     local -a cmdline=()
     read -r -a cmdline <"${KIOSK_CMDLINE:-/proc/cmdline}" 2>/dev/null || true
+    for tok in "${cmdline[@]}"; do
+        # Options such as margin_left=40 follow the mode after a comma.
+        [[ "$tok" == video=*:* && "${tok%%,*}" =~ [De]$ ]] && printf '%s\n' "$tok"
+    done
+    return 0
+}
+
+# Warnings about connected outputs, read from scan_monitors output on stdin:
+# a mode wider or taller than the GPU limit, and a connector forced on in the
+# kernel command line.
+monitor_warnings() {
+    local conn status mode name w h tok forced
+    forced=$(forced_video_args)
     while IFS=$'\t' read -r conn status mode name; do
         [[ "$status" == connected ]] || continue
         if [[ "$mode" =~ ^([0-9]+)x([0-9]+) ]]; then
             w=${BASH_REMATCH[1]} h=${BASH_REMATCH[2]}
             if (( w > GPU_MAX_PX || h > GPU_MAX_PX )); then
-                echo "  ${conn}: ${w}x${h} is larger than ${GPU_MAX_PX} px; the browser draws it in software and runs slowly"
+                echo "  ${conn}: ${w}x${h} is larger than ${GPU_MAX_PX} px; the browser may draw in software and run slowly if it uses this output"
             fi
         fi
-        for tok in "${cmdline[@]}"; do
-            # Options such as margin_left=40 follow the mode after a comma.
-            [[ "$tok" == "video=${conn}:"* && "${tok%%,*}" =~ [De]$ ]] || continue
+        while IFS= read -r tok; do
+            [[ "$tok" == "video=${conn}:"* ]] || continue
             echo "  ${conn}: forced on by ${tok} in the kernel command line; it shows as connected even with nothing plugged in"
-        done
+        done <<<"$forced"
     done
 }
 
@@ -312,8 +322,11 @@ monitor_warnings() {
 # meets its first output and crashes; 0.1.5 added the guard. Prints the option
 # for a cage that has it, nothing for an older one, and the option when no
 # cage is installed yet (enable installs a current one before rendering).
+# Nothing either while the kernel forces a connector on: cage may receive
+# that output last and put the browser on a screen nobody sees.
 cage_output_args() {
     local v
+    [[ -z "$(forced_video_args)" ]] || return 0
     # The binary the unit runs, not whichever cage comes first on PATH.
     v=$("${KIOSK_CAGE:-/usr/bin/cage}" -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
     if [[ -n "$v" ]] && [[ "$(printf '%s\n' "$v" 0.1.5 | sort -V | head -1)" != 0.1.5 ]]; then

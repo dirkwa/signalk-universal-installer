@@ -126,6 +126,13 @@ else
     miss "unexpected warnings: $(tr '\n' '|' <<<"$warn")"
 fi
 
+gpu_max=$(sed -n 's/^GPU_MAX_PX=//p' "$TMPL")
+if [[ -n "$gpu_max" ]] && [[ $(grep -c "$gpu_max px" "${KIOSK_DOC:-docs/kiosk.md}") -ge 2 ]]; then
+    ok "docs/kiosk.md states the ${gpu_max} px limit the template checks"
+else
+    miss "docs/kiosk.md does not state the template's GPU limit (${gpu_max:-unset} px)"
+fi
+
 # ── 2. touchscreens ───────────────────────────────────────────────────────
 echo "touchscreen detection"
 stubs="$tmp/stubs"
@@ -154,7 +161,7 @@ fi
 
 # ── 3. rendered files ─────────────────────────────────────────────────────
 echo "rendered unit, PAM stack and user-slice drop-in"
-unit=$(PATH="$sysbin" KIOSK_CAGE="$tmp/no-cage" bash -c ". '$TMPL'; render_unit")
+unit=$(PATH="$sysbin" KIOSK_CAGE="$tmp/no-cage" KIOSK_CMDLINE=/dev/null bash -c ". '$TMPL'; render_unit")
 for want in 'User=signalk-kiosk' 'PAMName=signalk-kiosk' 'TTYPath=/dev/tty1' \
             'Conflicts=getty@tty1.service' \
             'ExecStart=/usr/bin/cage -s -d -m last -- /usr/local/lib/signalk-kiosk/browser' \
@@ -171,17 +178,24 @@ for v in 0.1.4 0.1.5; do
     printf '#!/bin/sh\necho "Cage version %s"\n' "$v" >"$tmp/cage-$v/cage"
     chmod +x "$tmp/cage-$v/cage"
 done
-unit_old=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.4/cage" bash -c ". '$TMPL'; render_unit")
+unit_old=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.4/cage" KIOSK_CMDLINE=/dev/null bash -c ". '$TMPL'; render_unit")
 if grep -qxF 'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_old"; then
     ok "unit: no -m last with cage 0.1.4"
 else
     miss "cage 0.1.4 unit: $(grep '^ExecStart=' <<<"$unit_old")"
 fi
-unit_new=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" bash -c ". '$TMPL'; render_unit")
+unit_new=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" KIOSK_CMDLINE=/dev/null bash -c ". '$TMPL'; render_unit")
 if grep -qxF 'ExecStart=/usr/bin/cage -s -d -m last -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_new"; then
     ok "unit: -m last with cage 0.1.5"
 else
     miss "cage 0.1.5 unit: $(grep '^ExecStart=' <<<"$unit_new")"
+fi
+# A connector forced on may be the output cage receives last.
+unit_forced=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" KIOSK_CMDLINE="$cmdline" bash -c ". '$TMPL'; render_unit")
+if grep -qxF 'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_forced"; then
+    ok "unit: no -m last while video=...D forces a connector on"
+else
+    miss "forced-connector unit: $(grep '^ExecStart=' <<<"$unit_forced")"
 fi
 # scan reports what the installed unit does, not what enable would write now.
 spanroot="$tmp/spanroot"
