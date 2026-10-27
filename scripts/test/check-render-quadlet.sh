@@ -546,6 +546,29 @@ if [[ -n "${pre_script:-}" ]]; then
     fi
 fi
 
+# 8a. A template whose device ExecStartPre does not read SIGNALK_GPIO must
+#     make the render fail while GPIO is enabled, and still render without.
+nogpio_template="$tmp/nogpio.template"
+sed '/if \[ "\$\${SIGNALK_GPIO/,/^ *fi; *\\$/d' "$TEMPLATE" >"$nogpio_template"
+if grep -q '^[^#]*SIGNALK_GPIO' "$nogpio_template"; then
+    echo "  [MISS] could not strip the GPIO handling from the template for this test"
+    fail=1
+fi
+jq '.gpio = {"enabled": true, "platform": "rpi5"}' "$tmp/hardware.json" >"$tmp/hardware-gpio-old.json"
+if bash "$RENDER" "$tmp/hardware-gpio-old.json" "$nogpio_template" >/dev/null 2>&1; then
+    echo "  [MISS] render against a template without GPIO handling succeeded with GPIO enabled"
+    fail=1
+else
+    echo "  [OK]   render refuses a template without GPIO handling while GPIO is enabled"
+fi
+jq '.gpio = {"enabled": false}' "$tmp/hardware.json" >"$tmp/hardware-gpio-off.json"
+if bash "$RENDER" "$tmp/hardware-gpio-off.json" "$nogpio_template" >/dev/null 2>&1; then
+    echo "  [OK]   the same template renders when GPIO is off"
+else
+    echo "  [MISS] render failed on the template without GPIO handling with GPIO off"
+    fail=1
+fi
+
 # 8. A template without the SERIAL DEVICES block (from before #309) must make
 #    the render fail while serial devices are enabled: its ExecStart would
 #    not read the list, so rendering would drop every serial device silently.

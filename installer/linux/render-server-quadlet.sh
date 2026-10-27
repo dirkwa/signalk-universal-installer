@@ -263,6 +263,14 @@ if [ -n "$serial_block" ] && ! grep -q '^# === BEGIN SERIAL DEVICES' "$TEMPLATE"
     exit 1
 fi
 
+# A template from before GPIO moved into the device ExecStartPre has the
+# block but would pass no GPIO node for the flag, so GPIO would stop
+# working without a word. Refuse that too.
+if [ -n "$(gpio_flag)" ] && ! grep -q '^[^#]*SIGNALK_GPIO' "$TEMPLATE"; then
+    echo "render-server-quadlet: $TEMPLATE does not pass GPIO devices at start; refusing to drop the GPIO devices in $HW_FILE" >&2
+    exit 1
+fi
+
 # Stream the template, replacing the HARDWARE and SERIAL DEVICES blocks.
 awk -v hw_block="$(hardware_block)" -v serial_block="$serial_block" '
     BEGIN { skip = 0 }
