@@ -2138,8 +2138,9 @@ fi
 section "Installing SignalK plugins"
 # signalk-rpi-stats measures the computer (CPU, memory, storage, and on a
 # Raspberry Pi the supply voltage); RPI Manager shows it and puts the
-# restart, reboot and power-off buttons of the Updater on one page. Both
-# read only Linux interfaces, so they are installed on every Linux host.
+# restart, reboot and power-off buttons on one page, which call the Updater
+# and Signal K APIs. Neither needs Raspberry Pi hardware (rpi-stats reads
+# /proc, /sys and statfs), so both are installed on every Linux host.
 SK_PLUGINS=(signalk-container signalk-updater signalk-doctor signalk-rpi-stats signalk-universal-installer-rpi-mgmt)
 # Support libraries (not plugins — no auto-enable, no appstore entry).
 # tz-lookup: 70KB pure-JS lat/lon → IANA-zone lookup the host's
