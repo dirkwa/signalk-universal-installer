@@ -388,11 +388,11 @@ print_scan() {
         if (( n > 1 )); then
             if [[ ! -f "$UNIT_FILE" && ! -x "${KIOSK_CAGE:-/usr/bin/cage}" && -z "$(forced_video_args)" ]]; then
                 # enable installs cage first; its version decides.
-                echo "  (${n} connected — the browser will show on the one connected last with cage 0.1.5 or newer, and span all of them with an older cage)"
+                echo "  (${n} connected — the browser will show on the one cage finds last with cage 0.1.5 or newer, and span all of them with an older cage; leave only the one to use connected)"
             elif kiosk_spans_outputs; then
                 echo "  (${n} connected — cage spans the browser across all of them)"
             else
-                echo "  (${n} connected — the browser shows on the one connected last)"
+                echo "  (${n} connected — the browser shows on the one cage finds last; leave only the one to use connected)"
             fi
         fi
         monitor_warnings <<<"$mons"

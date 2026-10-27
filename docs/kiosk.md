@@ -112,7 +112,7 @@ At boot the kiosk usually starts before the server, whose container waits for th
 
 ## Several monitors
 
-The browser shows on one output only: cage runs with `-m last`, which uses the output connected last and blanks the others. Spanning several outputs can make the browser window wider or taller than 4096 px, the largest texture the Raspberry Pi's GPU handles in either direction (two 3440 px monitors side by side make 6880 px, two 1920 px ones 3840 px), and Chromium then draws the page in software at a few frames per second. To choose the monitor, connect only that one, or connect it last.
+The browser shows on one output only: cage runs with `-m last`, which uses the output cage finds last and blanks the others. With several monitors connected when the kiosk starts, that order comes from the graphics driver, not from when each was plugged in. Spanning several outputs can make the browser window wider or taller than 4096 px, the largest texture the Raspberry Pi's GPU handles in either direction (two 3440 px monitors side by side make 6880 px, two 1920 px ones 3840 px), and Chromium then draws the page in software at a few frames per second. To choose the monitor, leave only that one connected when the kiosk starts (at boot or on `signalk kiosk restart`).
 
 `signalk kiosk scan` shows what is connected and warns about two cases that make the kiosk slow or show it on the wrong output:
 

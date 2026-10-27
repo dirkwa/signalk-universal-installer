@@ -234,7 +234,7 @@ fi
 mkdir -p "$tmp/emptyroot"
 scan_pre=$(PATH="$sysbin" KIOSK_CAGE="$tmp/no-cage" KIOSK_ROOT="$tmp/emptyroot" KIOSK_CMDLINE=/dev/null bash -c \
     ". '$TMPL'; scan_monitors() { printf '%s\\n' \$'HDMI-A-1\\tconnected\\t1920x1080\\t-' \$'HDMI-A-2\\tconnected\\t1920x1080\\t-'; }; detect_touchscreens() { :; }; print_scan")
-if grep -qF '(2 connected — the browser will show on the one connected last with cage 0.1.5 or newer, and span all of them with an older cage)' <<<"$scan_pre"; then
+if grep -qF '(2 connected — the browser will show on the one cage finds last with cage 0.1.5 or newer, and span all of them with an older cage; leave only the one to use connected)' <<<"$scan_pre"; then
     ok "scan before cage is installed names both outcomes"
 else
     miss "scan before cage: $(tr '\n' '|' <<<"$scan_pre")"
