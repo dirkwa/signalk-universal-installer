@@ -315,12 +315,12 @@ forced_video_args() {
 # The video= entry that applies to a connector: its own, else the one without
 # a connector.
 video_arg_for() {
-    local conn=$1 tok own="" any=""
+    local conn="$1" tok own="" any=""
     while IFS= read -r tok; do
         if [[ "$tok" == "video=${conn}:"* ]]; then
-            own=$tok
+            own="$tok"
         elif [[ -n "$tok" && "$tok" != video=*:* ]]; then
-            any=$tok
+            any="$tok"
         fi
     done <<<"$(video_args)"
     printf '%s' "${own:-$any}"
@@ -334,7 +334,7 @@ monitor_warnings() {
     while IFS=$'\t' read -r conn status mode name; do
         [[ "$status" == connected ]] || continue
         if [[ "$mode" =~ ^([0-9]+)x([0-9]+) ]]; then
-            w=${BASH_REMATCH[1]} h=${BASH_REMATCH[2]}
+            w="${BASH_REMATCH[1]}" h="${BASH_REMATCH[2]}"
             if (( w > GPU_MAX_PX || h > GPU_MAX_PX )); then
                 echo "  ${conn}: ${w}x${h} is larger than ${GPU_MAX_PX} px; the browser may draw in software and run slowly if it uses this output"
             fi
@@ -386,7 +386,10 @@ print_scan() {
         done <<<"$mons"
         (( n > 0 )) || echo "  (nothing connected — the kiosk needs a monitor to show anything)"
         if (( n > 1 )); then
-            if kiosk_spans_outputs; then
+            if [[ ! -f "$UNIT_FILE" && ! -x "${KIOSK_CAGE:-/usr/bin/cage}" && -z "$(forced_video_args)" ]]; then
+                # enable installs cage first; its version decides.
+                echo "  (${n} connected — the browser will show on the one connected last with cage 0.1.5 or newer, and span all of them with an older cage)"
+            elif kiosk_spans_outputs; then
                 echo "  (${n} connected — cage spans the browser across all of them)"
             else
                 echo "  (${n} connected — the browser shows on the one connected last)"
