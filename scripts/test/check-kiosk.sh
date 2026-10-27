@@ -154,7 +154,7 @@ fi
 
 # ── 3. rendered files ─────────────────────────────────────────────────────
 echo "rendered unit, PAM stack and user-slice drop-in"
-unit=$(PATH="$sysbin" bash -c ". '$TMPL'; render_unit")
+unit=$(PATH="$sysbin" KIOSK_CAGE="$tmp/no-cage" bash -c ". '$TMPL'; render_unit")
 for want in 'User=signalk-kiosk' 'PAMName=signalk-kiosk' 'TTYPath=/dev/tty1' \
             'Conflicts=getty@tty1.service' \
             'ExecStart=/usr/bin/cage -s -d -m last -- /usr/local/lib/signalk-kiosk/browser' \
@@ -171,13 +171,13 @@ for v in 0.1.4 0.1.5; do
     printf '#!/bin/sh\necho "Cage version %s"\n' "$v" >"$tmp/cage-$v/cage"
     chmod +x "$tmp/cage-$v/cage"
 done
-unit_old=$(PATH="$tmp/cage-0.1.4:$sysbin" bash -c ". '$TMPL'; render_unit")
+unit_old=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.4/cage" bash -c ". '$TMPL'; render_unit")
 if grep -qxF 'ExecStart=/usr/bin/cage -s -d -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_old"; then
     ok "unit: no -m last with cage 0.1.4"
 else
     miss "cage 0.1.4 unit: $(grep '^ExecStart=' <<<"$unit_old")"
 fi
-unit_new=$(PATH="$tmp/cage-0.1.5:$sysbin" bash -c ". '$TMPL'; render_unit")
+unit_new=$(PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" bash -c ". '$TMPL'; render_unit")
 if grep -qxF 'ExecStart=/usr/bin/cage -s -d -m last -- /usr/local/lib/signalk-kiosk/browser' <<<"$unit_new"; then
     ok "unit: -m last with cage 0.1.5"
 else
@@ -187,13 +187,13 @@ fi
 spanroot="$tmp/spanroot"
 mkdir -p "$spanroot/etc/systemd/system"
 printf '%s\n' "$unit_old" >"$spanroot/etc/systemd/system/signalk-kiosk.service"
-if PATH="$tmp/cage-0.1.5:$sysbin" KIOSK_ROOT="$spanroot" bash -c ". '$TMPL'; kiosk_spans_outputs"; then
+if PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.5/cage" KIOSK_ROOT="$spanroot" bash -c ". '$TMPL'; kiosk_spans_outputs"; then
     ok "an installed unit without -m last spans the outputs"
 else
     miss "an installed unit without -m last reported as one output"
 fi
 printf '%s\n' "$unit_new" >"$spanroot/etc/systemd/system/signalk-kiosk.service"
-if ! PATH="$tmp/cage-0.1.4:$sysbin" KIOSK_ROOT="$spanroot" bash -c ". '$TMPL'; kiosk_spans_outputs"; then
+if ! PATH="$sysbin" KIOSK_CAGE="$tmp/cage-0.1.4/cage" KIOSK_ROOT="$spanroot" bash -c ". '$TMPL'; kiosk_spans_outputs"; then
     ok "an installed unit with -m last shows one output"
 else
     miss "an installed unit with -m last reported as spanning"

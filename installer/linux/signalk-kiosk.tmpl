@@ -314,7 +314,8 @@ monitor_warnings() {
 # cage is installed yet (enable installs a current one before rendering).
 cage_output_args() {
     local v
-    v=$(cage -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
+    # The binary the unit runs, not whichever cage comes first on PATH.
+    v=$("${KIOSK_CAGE:-/usr/bin/cage}" -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
     if [[ -n "$v" ]] && [[ "$(printf '%s\n' "$v" 0.1.5 | sort -V | head -1)" != 0.1.5 ]]; then
         return 0
     fi
