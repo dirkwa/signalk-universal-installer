@@ -15,7 +15,7 @@ signalk kiosk restart          # restart the browser, e.g. after installing a we
 signalk kiosk disable          # put the boot back and revoke the kiosk's sign-in (sudo)
 ```
 
-`enable` shows [App Dock](https://github.com/SignalK/app-dock) (`/@signalk/app-dock/`), which switches between webapps — double-tap the screen to bring it up. Installed by `enable`, it starts with Freeboard-SK, opened at once, and Settings, the Admin UI. `--readwrite` opens Freeboard-SK instead (see below). To show another page on this server, pass its path: `signalk kiosk enable --url /@signalk/freeboard-sk/`.
+`enable` shows [App Dock](https://github.com/SignalK/app-dock) (`/@signalk/app-dock/`), which switches between webapps — double-tap the screen to bring it up. Installed by `enable`, it starts with Freeboard-SK, opened at once, RPI Manager (the computer's health and its restart, reboot and power-off buttons) when the installer has installed it, and Settings, the Admin UI, as the last entry. `--readwrite` opens Freeboard-SK instead (see below). To show another page on this server, pass its path: `signalk kiosk enable --url /@signalk/freeboard-sk/`.
 
 ## What `enable` does
 

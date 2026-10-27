@@ -21,7 +21,8 @@
 #      the Signal K server stubbed: packages, the kiosk's Signal K user and its
 #      token, signalk-autologin installed or switched to token sign-in only, the
 #      display manager disabled — and disable putting all of it back. Each
-#      branch of the sign-in setup starts from a fresh box.
+#      branch of the sign-in setup starts from a fresh box. App Dock's app
+#      list gets RPI Manager before Settings when it is installed.
 #   6. Both uninstall paths refuse to run while the kiosk is enabled, before
 #      they stop the server that `kiosk disable` needs.
 #
@@ -1572,6 +1573,20 @@ out_has 'the kiosk shows Freeboard-SK instead' "says it falls back to Freeboard-
 conf_has 'KIOSK_URL=http://127.0.0.1:80/@signalk/freeboard-sk/' "the kiosk opens Freeboard-SK"
 conf_has 'KIOSK_SIGNIN=token' "and still signs in"
 no_unexpected_requests
+
+echo "  fresh box with RPI Manager installed"
+reset_box
+mkdir -p "$home/.signalk/node_modules/signalk-universal-installer-rpi-mgmt"
+run_enable
+if jq -e '[.configuration.apps[] | {label, url}] == [
+        {label: "Freeboard-SK", url: "/@signalk/freeboard-sk/"},
+        {label: "RPI Manager", url: "/signalk-universal-installer-rpi-mgmt/"},
+        {label: "Settings", url: "/admin/"}]' \
+        "$state/dock-config-at-install" >/dev/null 2>&1; then
+    ok "App Dock lists RPI Manager right before Settings"
+else
+    miss "App Dock config when the install ran: $(cat "$state/dock-config-at-install" 2>/dev/null)"
+fi
 
 echo "  App Dock installed but not loaded yet"
 reset_box
