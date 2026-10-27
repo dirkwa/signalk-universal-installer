@@ -549,6 +549,7 @@ fi
 # 8a. A template whose device ExecStartPre does not read SIGNALK_GPIO must
 #     make the render fail while GPIO is enabled, and still render without.
 nogpio_template="$tmp/nogpio.template"
+# shellcheck disable=SC2016  # literal template text
 sed '/if \[ "\$\${SIGNALK_GPIO/,/^ *fi; *\\$/d' "$TEMPLATE" >"$nogpio_template"
 if grep -q '^[^#]*SIGNALK_GPIO' "$nogpio_template"; then
     echo "  [MISS] could not strip the GPIO handling from the template for this test"
