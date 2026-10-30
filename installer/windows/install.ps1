@@ -1483,7 +1483,7 @@ switch (`$sub) {
     # Optional filebin upload + issue-page open, on the WINDOWS side. The in-VM
     # CLI skips these (no TTY/browser in the VM); here we have both. Same flow,
     # endpoints, and default-Y prompts as the Linux cmd_bug_report.
-    `$issueBase = 'https://github.com/SignalK/signalk-server/issues/new'
+    `$issueBase = 'https://github.com/dirkwa/signalk-universal-installer/issues/new'
     # Stamp from the filename: signalk-bug-report-<stamp>.tar.gz
     `$stamp = `$name -replace '^signalk-bug-report-', '' -replace '\.tar\.gz`$', ''
     `$tarballUrl = ''
