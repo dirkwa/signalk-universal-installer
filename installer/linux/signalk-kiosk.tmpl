@@ -1659,6 +1659,30 @@ cmd_restart() {
     ok "kiosk restarted"
 }
 
+# Whether the kiosk's browser runs or is stopped right now. The screen watch
+# stops it with SIGSTOP and finds it by user and name; these are the names of
+# its BROWSER_NAMES. A stopped process shows state T in ps. A zombie (Z), a
+# browser process that exited and is not yet reaped, keeps its name and is
+# not counted.
+browser_state() {
+    local pids states=""
+    if ! command -v pgrep >/dev/null 2>&1 || ! command -v ps >/dev/null 2>&1; then
+        echo "unknown (needs pgrep and ps)"
+        return
+    fi
+    pids=$(pgrep -u "$SK_KIOSK_USER" -x 'chromium|chrome|chromium-browse' 2>/dev/null) || true
+    if [[ -n "$pids" ]]; then
+        states=$(ps -o stat= -p "${pids//$'\n'/,}" 2>/dev/null | grep -v '^Z') || true
+    fi
+    if [[ -z "$states" ]]; then
+        echo "not running"
+    elif grep -q '^T' <<<"$states"; then
+        echo "paused (its processes are stopped)"
+    else
+        echo "running"
+    fi
+}
+
 cmd_status() {
     local enabled active
     print_scan
@@ -1677,13 +1701,16 @@ cmd_status() {
     else
         printf '  %-12s %s\n' "colours" "dark (enable --light for light)"
     fi
-    # Off only when enable was given --no-screen-pause; a conf from before the
+    # The setting, and the state of its watch (signalk-kiosk-screen.service);
+    # "browser now" below says whether the watch has paused the browser. Off
+    # only when enable was given --no-screen-pause; a conf from before the
     # setting has no watch installed.
     if [[ -f "$SCREEN_UNIT_FILE" ]]; then
-        printf '  %-12s %s\n' "screen off" "browser paused, $(systemctl is-active "$SCREEN_UNIT" 2>/dev/null || true) (enable --no-screen-pause to keep it running)"
+        printf '  %-12s %s\n' "screen pause" "on, watch $(systemctl is-active "$SCREEN_UNIT" 2>/dev/null || true): it pauses the browser while every monitor that answers DDC/CI is off (enable --no-screen-pause to turn off)"
     else
-        printf '  %-12s %s\n' "screen off" "browser keeps running"
+        printf '  %-12s %s\n' "screen pause" "off: no screen watch pauses the browser"
     fi
+    printf '  %-12s %s\n' "browser now" "$(browser_state)"
     if [[ "$(conf_get KIOSK_SIGNIN)" == token ]]; then
         printf '  %-12s %s\n' "sign-in" "token, as Signal K user ${SK_KIOSK_USER} ($(conf_get KIOSK_SK_USER_TYPE))"
     else
