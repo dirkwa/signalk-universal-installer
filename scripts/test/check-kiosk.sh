@@ -1267,6 +1267,15 @@ if grep -qE '^  browser now +paused \(its processes are stopped\)$' <<<"$status_
 else
     miss "status with a stopped browser: $(grep 'browser now' <<<"$status_out")"
 fi
+# A browser process started after the watch's STOP round runs until the next
+# round, beside the stopped ones.
+printf 'Sl\nTl\n' >"$state/browser-stat"
+status_out=$(run_helper status 2>&1)
+if grep -qE '^  browser now +paused \(its processes are stopped\)$' <<<"$status_out"; then
+    ok "status: one stopped browser process beside a running one shows as paused"
+else
+    miss "status with mixed browser states: $(grep 'browser now' <<<"$status_out")"
+fi
 printf 'Z\nZ\n' >"$state/browser-stat"
 status_out=$(run_helper status 2>&1)
 if grep -qE '^  browser now +not running$' <<<"$status_out"; then
