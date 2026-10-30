@@ -435,10 +435,13 @@ fi
 #    Publishing only the mapped form replaces "permission denied" with "No
 #    such file or directory" for anyone with an existing config -- a different
 #    error, not a fixed install. That regression was shipped once and caught
-#    on a live boat. A plain node (an onboard UART) is passed once. An absent
-#    device is left out and named on stderr (the unit's journal), a stale file
-#    from an earlier start is replaced, and a device that appears during the
-#    wait is passed.
+#    on a live boat. A plain node (an onboard UART) is passed once. A path with
+#    a colon (an ESP32's USB serial/JTAG by-id name ends in its MAC address) is
+#    bind-mounted with --mount and its real node passed with --device: podman
+#    splits a --device argument at every colon and fails the start (exit 125).
+#    An absent device is left out and named on stderr (the unit's journal), a
+#    stale file from an earlier start is replaced, and a device that appears
+#    during the wait is passed.
 pre_line=$(awk '/^ExecStartPre=\/bin\/sh -c .f=%t\/signalk-server-devices\.env/ { grab = 1 }
     grab { if (sub(/\\$/, "")) { buf = buf $0; next } print buf $0; exit }' "$TEMPLATE")
 pre_script=${pre_line#"ExecStartPre=/bin/sh -c '"}
@@ -467,6 +470,18 @@ else
         echo "  [OK]   start script passes the by-id link in both forms and the node once"
     else
         echo "  [MISS] start script (rc=$pre_rc) wrote:"
+        sed 's/^/         /' "$env_file"
+        echo "         expected: $want"
+        fail=1
+    fi
+    colon="$devs/usb-Espressif_USB_JTAG_serial_debug_unit_3C:DC:75:82:91:74-if00"
+    ln -s /dev/null "$colon"
+    SIGNALK_SERIAL_DEVICES="$colon $link" SIGNALK_DEVICE_WAIT=0 sh -c "$pre_script" 2>/dev/null || true
+    want="SIGNALK_DEVICE_ARGS= --mount type=bind,src=$colon,dst=$colon --device /dev/null --device $link:$link --device $link"
+    if [[ "$(cat "$env_file")" == "$want" ]]; then
+        echo "  [OK]   a by-id path with a colon is bind-mounted, its node passed with --device"
+    else
+        echo "  [MISS] a by-id path with a colon was passed as:"
         sed 's/^/         /' "$env_file"
         echo "         expected: $want"
         fail=1
