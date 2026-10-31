@@ -1140,6 +1140,9 @@ PathChanged=/dev/serial/by-id
 
 [Install]
 WantedBy=default.target'
+# Set by _signalk_ensure_hardware_watch when it installed the units in this
+# run; cmd_render_server reads it after its render to start the first pass.
+HARDWARE_WATCH_INSTALLED_NOW=0
 HARDWARE_WATCH_SERVICE_UNIT='# Installed by signalk-universal-installer (signalk hardware-watch)
 [Unit]
 Description=Pass a USB serial device plugged in after signalk-server started
@@ -1194,12 +1197,7 @@ _signalk_ensure_hardware_watch() {
         return 1
     }
     echo "[OK] signalk-hardware-watch units installed and watching /dev/serial/by-id."
-    # The path unit fires on changes only, so a device already plugged in
-    # when the units arrive (`signalk update` on an existing box) would wait
-    # for the next plug event. One pass now covers it. --no-block: the pass
-    # may re-render, and cmd_render_server is one of this function's callers.
-    systemctl --user start --no-block signalk-hardware-watch.service >/dev/null 2>&1 \
-        || echo "[WARN] could not start a first signalk-hardware-watch pass; run 'signalk hardware-watch heal'." >&2
+    HARDWARE_WATCH_INSTALLED_NOW=1
 }
 
 # The oneshot's entry point.
@@ -1395,7 +1393,28 @@ cmd_hardware() {
     fi
 }
 
+# The path unit fires on changes only, so a device already plugged in when
+# `signalk update` installs the units would wait for the next plug event.
+# The first pass starts here, after the render has written the Quadlet: a
+# pass started earlier could rescan while the render still works from the
+# old hardware.json, and the render's write would drop the device again.
+# install.sh needs no pass: it detects the hardware itself in the same run.
 cmd_render_server() {
+    local rc=0 arg no_restart=false
+    for arg in "$@"; do [[ "$arg" == --no-restart ]] && no_restart=true; done
+    HARDWARE_WATCH_INSTALLED_NOW=0
+    _signalk_render_server "$@" || rc=$?
+    if [[ "$HARDWARE_WATCH_INSTALLED_NOW" == 1 ]]; then
+        if [[ "$no_restart" == true ]]; then
+            echo "[i] --no-restart: run 'signalk hardware-watch heal' to pick up a USB serial device that is already plugged in."
+        elif ! systemctl --user start --no-block signalk-hardware-watch.service >/dev/null 2>&1; then
+            echo "[WARN] could not start a first signalk-hardware-watch pass; run 'signalk hardware-watch heal'." >&2
+        fi
+    fi
+    return "$rc"
+}
+
+_signalk_render_server() {
     # Rebuild the LIVE ~/.config/containers/systemd/signalk-server.container
     # from the staged template, so a template-only improvement (e.g.
     # Timezone=local, #212) reaches an already-deployed box without a full

@@ -73,8 +73,8 @@ fi
 
 if grep -q 'daemon-reload' "$SYSTEMCTL_LOG" \
     && grep -q -- '--user enable --now signalk-hardware-watch.path' "$SYSTEMCTL_LOG" \
-    && grep -q -- '--user start --no-block signalk-hardware-watch.service' "$SYSTEMCTL_LOG"; then
-    ok "daemon-reload + enable --now + one non-blocking first pass issued"
+    && ! grep -q -- 'start --no-block signalk-hardware-watch.service' "$SYSTEMCTL_LOG"; then
+    ok "daemon-reload + enable --now issued; no pass from a bare install (install.sh detects itself)"
 else
     miss "expected systemctl calls not recorded"
     sed 's/^/         /' "$SYSTEMCTL_LOG"
@@ -161,21 +161,24 @@ run_heal() {
     ' >/dev/null
 }
 
+# Exit status, rescan calls and restarts are recorded and compared as one
+# string, so a case that exits 75 after a rescan, or restarts after a
+# render-only pass, fails.
 heal_case() {
-    local desc="$1" want="$2" got=none
+    local desc="$1" want="$2" got rescans=none restarts=0
     shift 2
     run_heal "$@"
-    if [[ "$(cat "$tmp/marks/rc")" != 0 ]]; then
-        got="exit:$(cat "$tmp/marks/rc")"
-    elif [[ -f "$tmp/marks/rescan.log" ]]; then
-        got="rescan:$(paste -sd ';' "$tmp/marks/rescan.log")"
-    elif [[ -f "$tmp/marks/restart.log" ]]; then
-        got=restart
+    if [[ -f "$tmp/marks/rescan.log" ]]; then
+        rescans=$(paste -sd ';' "$tmp/marks/rescan.log")
     fi
+    if [[ -f "$tmp/marks/restart.log" ]]; then
+        restarts=$(wc -l <"$tmp/marks/restart.log" | tr -d ' ')
+    fi
+    got="rc=$(cat "$tmp/marks/rc") rescan=${rescans} restarts=${restarts}"
     if [[ "$got" == "$want" ]]; then
         ok "heal: $desc"
     else
-        miss "heal: $desc (got $got, want $want)"
+        miss "heal: $desc (got '$got', want '$want')"
     fi
 }
 
@@ -183,17 +186,60 @@ name=$(basename "$gw")
 listed_on="[{\"byId\":\"$gw\",\"enabled\":true}]"
 listed_off="[{\"byId\":\"$gw\",\"enabled\":false}]"
 
-heal_case "unlisted device → rescan" "rescan:rescan" "$name" "[]" lacks
-heal_case "listed device the container lacks → restart" restart "$name" "$listed_on" lacks
-heal_case "listed device the container has → nothing" none "$name" "$listed_on" has
-heal_case "device switched off → nothing" none "$name" "$listed_off" lacks
-heal_case "unplug (no device on host) → nothing" none "" "$listed_on" lacks
-heal_case "listed device replugged as another node → restart" restart "$name" "$listed_on" stale
+heal_case "unlisted device → rescan" "rc=0 rescan=rescan restarts=0" "$name" "[]" lacks
+heal_case "listed device the container lacks → restart" "rc=0 rescan=none restarts=1" "$name" "$listed_on" lacks
+heal_case "listed device the container has → nothing" "rc=0 rescan=none restarts=0" "$name" "$listed_on" has
+heal_case "device switched off → nothing" "rc=0 rescan=none restarts=0" "$name" "$listed_off" lacks
+heal_case "unplug (no device on host) → nothing" "rc=0 rescan=none restarts=0" "" "$listed_on" lacks
+heal_case "listed device replugged as another node → restart" "rc=0 rescan=none restarts=1" "$name" "$listed_on" stale
 heal_case "server stopped, unlisted device → hardware.json + Quadlet, no restart" \
-    "rescan:rescan --no-render;render --no-restart" "$name" "[]" down
-heal_case "server stopped, listed device → nothing" none "$name" "$listed_on" down
-heal_case "operation.lock held → exit 75, nothing else" "exit:75" "$name" "[]" lacks held
-heal_case "no hardware.json → nothing" none "$name" none lacks
+    "rc=0 rescan=rescan --no-render;render --no-restart restarts=0" "$name" "[]" down
+heal_case "server stopped, listed device → nothing" "rc=0 rescan=none restarts=0" "$name" "$listed_on" down
+heal_case "operation.lock held → exit 75, nothing else" "rc=75 rescan=none restarts=0" "$name" "[]" lacks held
+heal_case "no hardware.json → nothing" "rc=0 rescan=none restarts=0" "$name" none lacks
+
+# ── 3b. render-server starts the first pass after its render ──────────────
+# A pass started before the render's write could rescan while the render
+# still works from the old hardware.json. The render body is stubbed to call
+# the real ensure (as the real body does) and then log its write.
+
+first_pass() {
+    local h="$tmp/fp-home"
+    rm -rf "$h"
+    mkdir -p "$h"
+    : >"$tmp/fp.log"
+    HOME="$h" FP_LOG="$tmp/fp.log" bash -c '
+        set -euo pipefail
+        # shellcheck source=/dev/null
+        . "'"$funcs"'"
+        systemctl() {
+            case "$*" in *is-enabled*) return 1 ;; esac
+            echo "systemctl $*" >>"$FP_LOG"
+        }
+        _signalk_render_server() {
+            _signalk_ensure_hardware_watch >/dev/null
+            echo "render-written" >>"$FP_LOG"
+        }
+        cmd_render_server "$@"
+    ' _ "$@" >/dev/null
+}
+
+first_pass
+order=$(grep -n -e 'render-written' -e 'start --no-block signalk-hardware-watch.service' "$tmp/fp.log" | cut -d: -f2-)
+if [[ "$order" == "render-written
+systemctl --user start --no-block signalk-hardware-watch.service" ]]; then
+    ok "render-server starts the first pass after the render is written"
+else
+    miss "first pass not started after the render"
+    sed 's/^/         /' "$tmp/fp.log"
+fi
+
+first_pass --no-restart
+if ! grep -q 'start --no-block signalk-hardware-watch.service' "$tmp/fp.log"; then
+    ok "render-server --no-restart starts no pass (a pass may restart the server)"
+else
+    miss "render-server --no-restart started a pass"
+fi
 
 # ── 4. Second run is idempotent ─────────────────────────────────────────────
 
