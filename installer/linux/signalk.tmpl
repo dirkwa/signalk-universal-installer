@@ -46,8 +46,11 @@
 #                          /dev/serial/by-id plus a oneshot that runs
 #                          `hardware rescan` when a USB serial device appears
 #                          that hardware.json does not list, and restarts
-#                          signalk-server when a listed one was plugged in
-#                          after it started. Idempotent; render-server runs it
+#                          signalk-server when a listed, enabled one is
+#                          missing from the running container or held there
+#                          as a different device node (major:minor); entries
+#                          with enabled: false are skipped. Idempotent;
+#                          render-server runs it
 #                          automatically. `heal` runs one pass now (what the
 #                          oneshot calls).
 #   signalk resetadmin [user]
@@ -1155,7 +1158,11 @@ ConditionPathExists=%h/.local/bin/signalk
 Type=oneshot
 ExecStart=%h/.local/bin/signalk hardware-watch heal
 # heal exits 75 when an engine operation holds operation.lock; run the
-# pass again a minute later instead of dropping the device.
+# pass again a minute later instead of dropping the device. One retry a
+# minute stays under the default start limit (5 starts per 10 s), so the
+# retries outlast the 15-minute stale-lock window. Any other failure is
+# not retried: a failed rescan or restart needs the operator, and the
+# next hotplug or a manual signalk hardware-watch heal runs the pass again.
 RestartForceExitStatus=75
 RestartSec=60'
 
@@ -1251,7 +1258,23 @@ _signalk_hardware_heal() {
         if [[ "$running" == true ]]; then
             cmd_hardware rescan
         else
-            cmd_hardware rescan --no-render && cmd_render_server --no-restart
+            # rescan writes hardware.json before the render; put the old
+            # copy back if the render fails, so the next pass still sees
+            # the device as new and retries instead of skipping it.
+            local hw_bak
+            if ! hw_bak=$(mktemp) || ! cp -p "$hw" "$hw_bak"; then
+                echo "[ERR] could not back up $hw before the rescan." >&2
+                rm -f "${hw_bak:-}"
+                return 1
+            fi
+            if cmd_hardware rescan --no-render && cmd_render_server --no-restart; then
+                rm -f "$hw_bak"
+            else
+                cp -p "$hw_bak" "$hw" \
+                    || echo "[ERR] could not restore $hw after the render failed." >&2
+                rm -f "$hw_bak"
+                return 1
+            fi
         fi
     elif [[ -n "$stale" ]]; then
         echo "[i] USB serial device(s) plugged in after signalk-server started:${stale} — restarting it."
