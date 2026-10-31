@@ -58,7 +58,7 @@ svc_unit="$unit_dir/signalk-hardware-watch.service"
 
 # ── 1. First run installs + enables both units ──────────────────────────────
 
-out1=$(bash "$CLI_TMPL" hardware-watch 2>&1) || {
+out1=$(SIGNALK_HARDWARE_WATCH_DEFER_INITIAL=1 bash "$CLI_TMPL" hardware-watch 2>&1) || {
     echo "[ERR] 'signalk hardware-watch' failed:" >&2
     printf '%s\n' "$out1" >&2
     exit 1
@@ -74,7 +74,7 @@ fi
 if grep -q 'daemon-reload' "$SYSTEMCTL_LOG" \
     && grep -q -- '--user enable --now signalk-hardware-watch.path' "$SYSTEMCTL_LOG" \
     && ! grep -q -- 'start --no-block signalk-hardware-watch.service' "$SYSTEMCTL_LOG"; then
-    ok "daemon-reload + enable --now issued; no pass from a bare install (install.sh detects itself)"
+    ok "daemon-reload + enable --now issued; no pass under SIGNALK_HARDWARE_WATCH_DEFER_INITIAL=1 (install.sh)"
 else
     miss "expected systemctl calls not recorded"
     sed 's/^/         /' "$SYSTEMCTL_LOG"
@@ -249,6 +249,29 @@ if awk '/^cmd_update\(\) \{/{inside=1} inside && /"\$cli" render-server/{found=1
     ok "signalk update renders through the refreshed CLI"
 else
     miss "cmd_update renders in-process; the first update after this change would not install the units"
+fi
+
+# A standalone `signalk hardware-watch` (no defer) starts the first pass,
+# once, on the run that installed the units.
+sa_home="$tmp/sa-home"
+mkdir -p "$sa_home"
+: >"$tmp/sa.log"
+rm -rf "$SYSTEMCTL_STATE" && mkdir -p "$SYSTEMCTL_STATE"
+HOME="$sa_home" SYSTEMCTL_LOG="$tmp/sa.log" bash "$CLI_TMPL" hardware-watch >/dev/null 2>&1
+HOME="$sa_home" SYSTEMCTL_LOG="$tmp/sa.log" bash "$CLI_TMPL" hardware-watch >/dev/null 2>&1
+starts=$(grep -c -- 'start --no-block signalk-hardware-watch.service' "$tmp/sa.log" || true)
+if [[ "$starts" == 1 ]]; then
+    ok "standalone install starts one first pass; a second run starts none"
+else
+    miss "standalone install started $starts first passes (want 1)"
+fi
+rm -rf "$SYSTEMCTL_STATE" && mkdir -p "$SYSTEMCTL_STATE" && touch "$SYSTEMCTL_STATE/enabled"
+
+if grep -q '^if ! SIGNALK_HARDWARE_WATCH_DEFER_INITIAL=1 "$HOME/.local/bin/signalk" hardware-watch; then$' \
+        "${INSTALL_SH:-installer/linux/install.sh}"; then
+    ok "install.sh defers the first pass"
+else
+    miss "install.sh installs the units without SIGNALK_HARDWARE_WATCH_DEFER_INITIAL=1"
 fi
 
 # ── 4. Second run is idempotent ─────────────────────────────────────────────

@@ -1261,7 +1261,17 @@ _signalk_hardware_heal() {
 
 cmd_hardware_watch() {
     case "${1:-}" in
-        '') _signalk_ensure_hardware_watch ;;
+        '')
+            _signalk_ensure_hardware_watch || return 1
+            # A standalone install gets the first pass that render-server
+            # would start. install.sh sets SIGNALK_HARDWARE_WATCH_DEFER_INITIAL:
+            # it detects the hardware itself and starts the server afterwards.
+            if [[ "${SIGNALK_HARDWARE_WATCH_DEFER_INITIAL:-0}" != 1 \
+                && "$HARDWARE_WATCH_INSTALLED_NOW" == 1 ]] \
+                && ! systemctl --user start --no-block signalk-hardware-watch.service >/dev/null 2>&1; then
+                echo "[WARN] could not start a first signalk-hardware-watch pass; run 'signalk hardware-watch heal'." >&2
+            fi
+            ;;
         heal) _signalk_hardware_heal ;;
         *) echo "[ERR] Unknown hardware-watch argument: $1" >&2; return 1 ;;
     esac
@@ -1398,7 +1408,8 @@ cmd_hardware() {
 # The first pass starts here, after the render has written the Quadlet: a
 # pass started earlier could rescan while the render still works from the
 # old hardware.json, and the render's write would drop the device again.
-# install.sh needs no pass: it detects the hardware itself in the same run.
+# install.sh defers it (SIGNALK_HARDWARE_WATCH_DEFER_INITIAL): it detects
+# the hardware itself in the same run.
 cmd_render_server() {
     local rc=0 arg no_restart=false
     for arg in "$@"; do [[ "$arg" == --no-restart ]] && no_restart=true; done
