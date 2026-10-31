@@ -241,6 +241,16 @@ else
     miss "render-server --no-restart started a pass"
 fi
 
+# `signalk update` must render through the CLI its refresh just wrote: the
+# running process keeps the functions it loaded, so an in-process
+# cmd_render_server would not install units the new CLI adds.
+if awk '/^cmd_update\(\) \{/{inside=1} inside && /"\$cli" render-server/{found=1} inside && /^}/{exit} END{exit !found}' \
+        "$CLI_TMPL"; then
+    ok "signalk update renders through the refreshed CLI"
+else
+    miss "cmd_update renders in-process; the first update after this change would not install the units"
+fi
+
 # ── 4. Second run is idempotent ─────────────────────────────────────────────
 
 out2=$(bash "$CLI_TMPL" hardware-watch 2>&1) || {

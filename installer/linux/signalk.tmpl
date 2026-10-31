@@ -1403,7 +1403,12 @@ cmd_render_server() {
     local rc=0 arg no_restart=false
     for arg in "$@"; do [[ "$arg" == --no-restart ]] && no_restart=true; done
     HARDWARE_WATCH_INSTALLED_NOW=0
-    _signalk_render_server "$@" || rc=$?
+    # A plain call, not `|| rc=$?`: the right side of || would switch errexit
+    # off for the whole render, so a failed splice would carry on to the write.
+    # Under errexit a failure here ends the script as before; in a caller's
+    # conditional, where errexit is already off, $? holds the status.
+    _signalk_render_server "$@"
+    rc=$?
     if [[ "$HARDWARE_WATCH_INSTALLED_NOW" == 1 ]]; then
         if [[ "$no_restart" == true ]]; then
             echo "[i] --no-restart: run 'signalk hardware-watch heal' to pick up a USB serial device that is already plugged in."
@@ -1525,10 +1530,13 @@ _signalk_render_server() {
     if [[ -n "$live_image" ]] && grep -q '^Image=' <<<"$rendered"; then
         # Replace only the FIRST Image= line in the render with the live one.
         # Env-passed so a tag with sed-special chars can't corrupt the program.
-        rendered=$(LIVE_IMAGE="$live_image" awk '
+        if ! rendered=$(LIVE_IMAGE="$live_image" awk '
             !done && /^Image=/ { print ENVIRON["LIVE_IMAGE"]; done = 1; next }
             { print }
-        ' <<<"$rendered")
+        ' <<<"$rendered"); then
+            echo "[ERR] could not carry the live Image= line into the render — refusing to touch the live Quadlet." >&2
+            return 1
+        fi
     fi
 
     # Preserve the operator's hand-edits. The template carries a
@@ -1549,16 +1557,19 @@ _signalk_render_server() {
         && grep -qF "$begin_marker" <<<"$rendered" && grep -qF "$end_marker" <<<"$rendered"; then
         local live_additions
         # Inner lines only (strictly between the markers), verbatim.
-        live_additions=$(awk '
+        if ! live_additions=$(awk '
             /^# === BEGIN USER ADDITIONS ===/ { grab = 1; next }
             /^# === END USER ADDITIONS ===/   { grab = 0 }
             grab { print }
-        ' "$live")
+        ' "$live"); then
+            echo "[ERR] could not read USER ADDITIONS from $live — refusing to touch it." >&2
+            return 1
+        fi
         # Rebuild the rendered body: keep everything except the rendered block
         # inner lines, and drop in the live inner lines right after BEGIN.
         # Passed via an env var so arbitrary operator content (quotes, %, etc.)
         # can't be reinterpreted by awk's program text.
-        rendered=$(LIVE_ADDITIONS="$live_additions" awk '
+        if ! rendered=$(LIVE_ADDITIONS="$live_additions" awk '
             /^# === BEGIN USER ADDITIONS ===/ {
                 print
                 add = ENVIRON["LIVE_ADDITIONS"]
@@ -1569,7 +1580,20 @@ _signalk_render_server() {
             /^# === END USER ADDITIONS ===/ { skip = 0; print; next }
             skip { next }
             { print }
-        ' <<<"$rendered")
+        ' <<<"$rendered"); then
+            echo "[ERR] could not splice USER ADDITIONS into the render — refusing to touch the live Quadlet." >&2
+            return 1
+        fi
+    fi
+
+    # Check again after the two splices: an awk that failed (or a caller's
+    # conditional context, where errexit is off) leaves an empty or partial
+    # string here, and the write below would put it over the live Quadlet.
+    if [[ -z "$rendered" ]] || ! grep -q '^\[Container\]' <<<"$rendered" \
+        || ! grep -q '^Image=' <<<"$rendered"; then
+        echo "[ERR] splicing the live Image= line or USER ADDITIONS into the render failed" >&2
+        echo "      — refusing to touch the live Quadlet." >&2
+        return 1
     fi
 
     # Idempotent short-circuit: if the render matches the live file byte-for-
@@ -1788,7 +1812,16 @@ cmd_update() {
     # every update on every platform.
     if [[ "$do_render" == true ]]; then
         echo
-        cmd_render_server
+        # Run the render from the CLI the refresh just wrote, not from this
+        # process: bash keeps the functions it loaded at start, so the old
+        # cmd_render_server would miss anything the new CLI added to the
+        # render (the hardware-watch units on the first update after them).
+        local cli="$HOME/.local/bin/signalk"
+        if [[ -x "$cli" ]]; then
+            "$cli" render-server
+        else
+            cmd_render_server
+        fi
     fi
 }
 

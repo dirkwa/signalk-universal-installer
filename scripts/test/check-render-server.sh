@@ -287,6 +287,37 @@ else
     echo "  [SKIP] template lacks USER ADDITIONS markers or Image= — preservation N/A"
 fi
 
+# ── 6. A failed splice never reaches the live Quadlet ─────────────────────
+# Called from a caller's conditional (`cmd_render_server || …`), errexit is
+# off inside, so a failing awk would otherwise leave `rendered` empty and the
+# write would put that over the live file. awk fails only for the USER
+# ADDITIONS splice (the one call that carries LIVE_ADDITIONS); the live file
+# must come out byte-identical and nothing may restart.
+if grep -qF '# === BEGIN USER ADDITIONS ===' "$payload/signalk-server.container.template"; then
+    canonical | grep -v '^Timezone=' >"$live"
+    before=$(cat "$live")
+    rm -rf "$root/marks"
+    out=$(HOME="$root" DOCTOR_DATA="$root/.signalk-doctor" QUADLET_DIR="$quadlet_dir" \
+        MARK="$root/marks" bash -c '
+        set -euo pipefail
+        mkdir -p "$MARK"
+        systemctl() { echo "$*" >>"$MARK/systemctl.log"; return 0; }
+        # shellcheck source=/dev/null
+        . "'"$funcs"'"
+        sk_http_port() { printf 80; }
+        _signalk_restart_server() { echo "restart" >>"$MARK/restart.log"; return 0; }
+        awk() { if [[ -n "${LIVE_ADDITIONS+x}" ]]; then return 1; fi; command awk "$@"; }
+        if cmd_render_server; then echo "RC=0"; else echo "RC=$?"; fi
+    ' 2>&1) || true
+    if [[ "$(cat "$live")" == "$before" ]] && [[ ! -f "$root/marks/restart.log" ]] \
+        && grep -q 'RC=1' <<<"$out" && grep -q 'could not splice USER ADDITIONS' <<<"$out"; then
+        ok "a failed USER ADDITIONS splice leaves the live Quadlet untouched (conditional caller)"
+    else
+        miss "a failed splice reached the live Quadlet or restarted the server"
+        printf '         %s\n' "$out"
+    fi
+fi
+
 # Serial passthrough is impossible without this. keep-id maps only uid/gid 1000,
 # so the host's `dialout` (GID 20) arrives inside the container as 100020, and a
 # root:dialout 660 device node cannot be opened -- silently, because SignalK
