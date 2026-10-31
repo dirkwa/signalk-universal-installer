@@ -155,6 +155,7 @@ run_heal() {
         cmd_hardware() {
             echo "$*" >>"$MARK/rescan.log"
             echo rescanned >>"$HOME/.signalk-updater/hardware.json"
+            [[ "${RESCAN_FAIL:-0}" != 1 ]]
         }
         cmd_render_server() {
             echo "render $*" >>"$MARK/rescan.log"
@@ -214,6 +215,33 @@ if [[ "$(cat "$hw_dir/hardware.json")" == '{"serial": []}' ]]; then
     ok "heal: failed render restores hardware.json"
 else
     miss "heal: failed render left the rescanned hardware.json behind"
+fi
+export RESCAN_FAIL=1
+heal_case "server running, rescan fails → exit 1" "rc=1 rescan=rescan restarts=0" "$name" "[]" lacks
+unset RESCAN_FAIL
+if [[ "$(cat "$hw_dir/hardware.json")" == '{"serial": []}' ]]; then
+    ok "heal: failed rescan with the server running restores hardware.json"
+else
+    miss "heal: failed rescan with the server running left the rescanned hardware.json behind"
+fi
+
+# The oneshot runs heal under errexit: a failure inside the rescan ends the
+# run there, and the EXIT trap must still restore hardware.json.
+printf '{"serial": []}\n' >"$hw_dir/hardware.json"
+rm -rf "$by_id" && mkdir -p "$by_id" && : >"$gw"
+SIGNALK_SERIAL_BY_ID="$by_id" SIGNALK_HARDWARE_SETTLE=0 \
+    SIGNALK_OPERATION_LOCK="$tmp/op.lock" bash -c '
+    set -euo pipefail
+    # shellcheck source=/dev/null
+    . "'"$funcs"'"
+    podman() { [[ "$*" == "exec signalk-server true" ]] || return 1; }
+    cmd_hardware() { echo rescanned >>"$HOME/.signalk-updater/hardware.json"; false; echo unreached; }
+    _signalk_hardware_heal
+' >/dev/null 2>&1 && errexit_rc=0 || errexit_rc=$?
+if [[ "$errexit_rc" -ne 0 && "$(cat "$hw_dir/hardware.json")" == '{"serial": []}' ]]; then
+    ok "heal: errexit inside the rescan still restores hardware.json"
+else
+    miss "heal: errexit inside the rescan (rc=$errexit_rc) left hardware.json as $(tr '\n' ' ' <"$hw_dir/hardware.json")"
 fi
 
 # ── 3b. render-server starts the first pass after its render ──────────────
