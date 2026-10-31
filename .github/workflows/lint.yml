@@ -155,6 +155,9 @@ jobs:
       - name: resolv-watch DNS self-heal
         run: bash scripts/test/check-resolv-watch.sh
 
+      - name: hardware-watch USB serial hotplug
+        run: bash scripts/test/check-hardware-watch.sh
+
       - name: pasta route gate (issue #250)
         run: bash scripts/test/check-pasta-route-gate.sh
 

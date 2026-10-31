@@ -40,6 +40,16 @@
 #                          nothing listens on. Idempotent; render-server runs
 #                          it automatically. `heal` runs one check-and-recover
 #                          pass now (what the oneshot calls).
+#   signalk hardware-watch [heal]
+#                          no argument: (re)install the signalk-hardware-watch
+#                          systemd user units — a path unit watching
+#                          /dev/serial/by-id plus a oneshot that runs
+#                          `hardware rescan` when a USB serial device appears
+#                          that hardware.json does not list, and restarts
+#                          signalk-server when a listed one was plugged in
+#                          after it started. Idempotent; render-server runs it
+#                          automatically. `heal` runs one pass now (what the
+#                          oneshot calls).
 #   signalk resetadmin [user]
 #                          reset (or create) an admin user's password for the
 #                          Admin UI login (default user: admin). Prompts for the
@@ -1093,6 +1103,133 @@ cmd_netgate_watch() {
     esac
 }
 
+# --- hardware-watch: pass a USB serial device plugged in later ------------
+# The server Quadlet passes the serial devices listed in hardware.json that
+# exist when the container starts (SIGNALK_SERIAL_DEVICES + the ExecStartPre
+# that writes SIGNALK_DEVICE_ARGS). A gateway plugged in afterwards is in
+# neither place until `signalk hardware rescan`, and one that is listed but
+# was unplugged at the last start is missing until the next restart. This
+# pair of user units does both without the operator: a path unit watches
+# /dev/serial/by-id (udev adds and removes a link there per device; systemd
+# watches /dev until the directory first appears) and a oneshot runs
+# `signalk hardware-watch heal`:
+#   - a link hardware.json does not list      -> `signalk hardware rescan`
+#     (merges the toggles, re-renders, restarts the server)
+#   - a listed, enabled link the running
+#     container does not have                 -> restart the server
+#   - anything else (an unplug, a device the
+#     operator switched off)                  -> nothing
+# Same single-owner and ride-along model as resolv-watch: install.sh calls
+# `signalk hardware-watch`, cmd_render_server re-ensures the units, and the
+# unit text carries no podman or systemctl calls.
+HARDWARE_WATCH_PATH_UNIT='# Installed by signalk-universal-installer (signalk hardware-watch)
+[Unit]
+Description=Watch USB serial devices for the SignalK container stack
+
+[Path]
+PathChanged=/dev/serial/by-id
+
+[Install]
+WantedBy=default.target'
+HARDWARE_WATCH_SERVICE_UNIT='# Installed by signalk-universal-installer (signalk hardware-watch)
+[Unit]
+Description=Pass a USB serial device plugged in after signalk-server started
+# The checks and the restart live in the CLI (`signalk hardware-watch
+# heal`), so the restart goes through the updater REST API first and
+# systemctl --user only as the fallback. Inert when the CLI is missing.
+ConditionPathExists=%h/.local/bin/signalk
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/signalk hardware-watch heal'
+
+_signalk_ensure_hardware_watch() {
+    local unit_dir="${HOME}/.config/systemd/user"
+    local path_file="${unit_dir}/signalk-hardware-watch.path"
+    local svc_file="${unit_dir}/signalk-hardware-watch.service"
+
+    if [[ "$(cat "$path_file" 2>/dev/null)" == "$HARDWARE_WATCH_PATH_UNIT" ]] \
+        && [[ "$(cat "$svc_file" 2>/dev/null)" == "$HARDWARE_WATCH_SERVICE_UNIT" ]] \
+        && systemctl --user is-enabled signalk-hardware-watch.path >/dev/null 2>&1; then
+        echo "[OK] signalk-hardware-watch units already installed."
+        return 0
+    fi
+
+    _signalk_ensure_unit_dir "$unit_dir" || return 1
+    local f content tmp
+    for f in "$path_file" "$svc_file"; do
+        if [[ "$f" == "$path_file" ]]; then
+            content="$HARDWARE_WATCH_PATH_UNIT"
+        else
+            content="$HARDWARE_WATCH_SERVICE_UNIT"
+        fi
+        tmp=$(mktemp "${f}.XXXXXX") || { echo "[ERR] mktemp failed for $f" >&2; return 1; }
+        if ! printf '%s\n' "$content" >"$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$f"; then
+            echo "[ERR] Failed to install $f." >&2
+            rm -f "$tmp"
+            return 1
+        fi
+    done
+
+    systemctl --user daemon-reload || {
+        echo "[ERR] systemctl --user daemon-reload failed; the hardware-watch units are" >&2
+        echo "      on disk but not parsed. Retry:  systemctl --user daemon-reload" >&2
+        return 1
+    }
+    systemctl --user enable --now signalk-hardware-watch.path >/dev/null 2>&1 || {
+        echo "[ERR] could not enable signalk-hardware-watch.path" >&2
+        return 1
+    }
+    echo "[OK] signalk-hardware-watch units installed and watching /dev/serial/by-id."
+}
+
+# The oneshot's entry point. Ordered guards, each a clean no-op exit:
+#   1. no jq or no hardware.json -> rescan would refuse to merge anyway
+#   2. container not running     -> its next start passes what is present;
+#                                   never start a unit the operator stopped
+# The settle delay lets udev finish the links of a device that is still
+# enumerating (one adapter can add several -portN links), so one plug-in
+# leads to one rescan. SIGNALK_SERIAL_BY_ID and SIGNALK_HARDWARE_SETTLE are
+# test seams.
+_signalk_hardware_heal() {
+    local by_id="${SIGNALK_SERIAL_BY_ID:-/dev/serial/by-id}"
+    local hw="$HOME/.signalk-updater/hardware.json"
+    command -v jq >/dev/null 2>&1 || return 0
+    [[ -s "$hw" ]] || return 0
+    sleep "${SIGNALK_HARDWARE_SETTLE:-2}"
+    podman exec signalk-server true 2>/dev/null || return 0
+
+    local link state new="" absent=""
+    for link in "$by_id"/*; do
+        [[ -e "$link" ]] || continue
+        state=$(jq -r --arg p "$link" '
+            [(.serial // [])[] | select(.byId == $p) | .enabled]
+            | if length == 0 then "new"
+              elif .[0] == false then "off"
+              else "on" end' "$hw" 2>/dev/null) || return 0
+        case "$state" in
+            new) new="$new $link" ;;
+            on) podman exec signalk-server test -e "$link" 2>/dev/null || absent="$absent $link" ;;
+        esac
+    done
+
+    if [[ -n "$new" ]]; then
+        echo "[i] New USB serial device(s):${new} — re-detecting hardware."
+        cmd_hardware rescan
+    elif [[ -n "$absent" ]]; then
+        echo "[i] USB serial device(s) plugged in after signalk-server started:${absent} — restarting it."
+        _signalk_restart_server
+    fi
+}
+
+cmd_hardware_watch() {
+    case "${1:-}" in
+        '') _signalk_ensure_hardware_watch ;;
+        heal) _signalk_hardware_heal ;;
+        *) echo "[ERR] Unknown hardware-watch argument: $1" >&2; return 1 ;;
+    esac
+}
+
 cmd_hardware() {
     # Re-detect attached hardware and (by default) re-render the live Quadlet.
     #
@@ -1260,6 +1397,11 @@ cmd_render_server() {
     # it. The timer heals those old Quadlets without rewriting them.
     _signalk_ensure_netgate_watch \
         || echo "[WARN] could not install the signalk-netgate-watch units (continuing)" >&2
+
+    # And for the serial-device watcher, so a box installed before it picks
+    # it up on `signalk update`.
+    _signalk_ensure_hardware_watch \
+        || echo "[WARN] could not install the signalk-hardware-watch units (continuing)" >&2
 
     local payload_dir="${DOCTOR_DATA}/installer-payload"
     local renderer="${payload_dir}/render-server-quadlet.sh"
@@ -4146,6 +4288,7 @@ case "${1:-help}" in
     render-server) shift; cmd_render_server "$@" ;;
     resolv-watch) shift; cmd_resolv_watch "$@" ;;
     netgate-watch) shift; cmd_netgate_watch "$@" ;;
+    hardware-watch) shift; cmd_hardware_watch "$@" ;;
     resetadmin) shift; cmd_resetadmin "$@" ;;
     bug-report) shift; cmd_bug_report "$@" ;;
     stop)       cmd_stop ;;

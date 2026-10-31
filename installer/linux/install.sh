@@ -1983,6 +1983,14 @@ if ! "$HOME/.local/bin/signalk" netgate-watch; then
     warn "starts before the host has a route may stay unreachable until restarted."
 fi
 
+# USB serial hotplug (signalk-hardware-watch.path/.service): a gateway plugged
+# in after install is re-detected and passed to signalk-server without a manual
+# `signalk hardware rescan`. Same single-owner rationale as above.
+if ! "$HOME/.local/bin/signalk" hardware-watch; then
+    warn "could not install the signalk-hardware-watch units; a USB serial device"
+    warn "plugged in later needs 'signalk hardware rescan'."
+fi
+
 # 11a-bis. CPU priority: rank the SK stack above the plugin containers.
 #
 # cgroup v2 cpu.weight compares siblings only. The Quadlet units (signalk-

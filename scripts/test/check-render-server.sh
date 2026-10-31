@@ -142,6 +142,7 @@ HOME="$root" bash -c '
     . "'"$funcs"'"
     _signalk_ensure_resolv_watch >/dev/null
     _signalk_ensure_netgate_watch >/dev/null
+    _signalk_ensure_hardware_watch >/dev/null
 '
 
 # ── 1. Idempotent: live already matches the render ─────────────────────────
@@ -157,7 +158,8 @@ if out=$(run_render 2>&1); then
         && [[ ! -f "$root/marks/restart.log" ]] \
         && [[ "$(cat "$root/marks/systemctl.log" 2>/dev/null)" == \
               "--user is-enabled signalk-resolv-watch.path
---user is-enabled signalk-netgate-watch.timer" ]]; then
+--user is-enabled signalk-netgate-watch.timer
+--user is-enabled signalk-hardware-watch.path" ]]; then
         ok "no-op when live Quadlet already matches the template (no restart, no daemon-reload)"
     else
         miss "idempotent path did work it shouldn't have"
