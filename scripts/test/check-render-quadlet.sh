@@ -439,6 +439,7 @@ fi
 #    a colon (an ESP32's USB serial/JTAG by-id name ends in its MAC address) is
 #    bind-mounted with --mount and its real node passed with --device: podman
 #    splits a --device argument at every colon and fails the start (exit 125).
+#    A path with a colon and a comma is left out: --mount splits at commas.
 #    An absent device is left out and named on stderr (the unit's journal), a
 #    stale file from an earlier start is replaced, and a device that appears
 #    during the wait is passed.
@@ -484,6 +485,18 @@ else
         echo "  [MISS] a by-id path with a colon was passed as:"
         sed 's/^/         /' "$env_file"
         echo "         expected: $want"
+        fail=1
+    fi
+    comma="$devs/usb-CUSTOM_3C:DC,75-if00"
+    ln -s /dev/null "$comma"
+    SIGNALK_SERIAL_DEVICES="$comma $link" SIGNALK_DEVICE_WAIT=0 sh -c "$pre_script" 2>"$tmp/comma.err" || true
+    want="SIGNALK_DEVICE_ARGS= --device $link:$link --device $link"
+    if [[ "$(cat "$env_file")" == "$want" ]] && grep -qF "$comma" "$tmp/comma.err"; then
+        echo "  [OK]   a path with a colon and a comma is left out and named on stderr"
+    else
+        echo "  [MISS] a path with a colon and a comma was passed as:"
+        sed 's/^/         /' "$env_file" "$tmp/comma.err"
+        echo "         expected: $want, and the path on stderr"
         fail=1
     fi
     if grep -qF "starting without absent serial device(s): $absent" "$tmp/pre.err"; then

@@ -287,6 +287,7 @@ ExecStartPre=/bin/sh -c 'f=%t/signalk-server-devices.env; n=$${SIGNALK_DEVICE_WA
     for d in $$SIGNALK_SERIAL_DEVICES; do \
         [ -e "$$d" ] || continue; \
         case "$$d" in \
+            *:*,*|*,*:*) echo "serial device not passed, podman takes no path with both a colon and a comma: $$d" >&2 ;; \
             *:*) args="$$args --mount type=bind,src=$$d,dst=$$d"; \
                 if [ -L "$$d" ]; then args="$$args --device $$(readlink -f "$$d")"; fi ;; \
             *) if [ -L "$$d" ]; then args="$$args --device $$d:$$d --device $$d"; else args="$$args --device $$d"; fi ;; \
