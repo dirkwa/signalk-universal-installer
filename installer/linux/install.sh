@@ -1986,8 +1986,9 @@ fi
 # USB serial hotplug (signalk-hardware-watch.path/.service): a gateway plugged
 # in after install is re-detected and passed to signalk-server without a manual
 # `signalk hardware rescan`. Same single-owner rationale as above.
-# DEFER_INITIAL: this run just detected the hardware and starts the server
-# itself, so the first pass a standalone install starts would only race it.
+# DEFER_INITIAL: this run starts the server later, so the first pass would
+# race it. It is queued instead once the server is set up (before "Recording
+# bootstrap state").
 if ! SIGNALK_HARDWARE_WATCH_DEFER_INITIAL=1 "$HOME/.local/bin/signalk" hardware-watch; then
     warn "could not install the signalk-hardware-watch units; a USB serial device"
     warn "plugged in later needs 'signalk hardware rescan'."
@@ -3245,6 +3246,14 @@ fi
 # ── end of container stop ──
 
 # 18. Mark bootstrap-complete
+# The hardware-watch pass deferred when the units were installed: a USB serial
+# device plugged in after the detection step fires no PathChanged= event of
+# its own, so queue one pass now that the server is configured and started.
+if systemctl --user is-enabled signalk-hardware-watch.path >/dev/null 2>&1; then
+    systemctl --user start --no-block signalk-hardware-watch.service >/dev/null 2>&1 \
+        || warn "could not queue a signalk-hardware-watch pass; a USB serial device plugged in during the install needs 'signalk hardware-watch heal'."
+fi
+
 section "Recording bootstrap state"
 LAST_GOOD="$DOCTOR_DATA/last-good.json"
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")

@@ -275,6 +275,17 @@ else
     miss "install.sh installs the units without SIGNALK_HARDWARE_WATCH_DEFER_INITIAL=1"
 fi
 
+# install.sh queues the deferred pass after the server is started: the
+# queue sits after the "Starting signalk-server" section.
+inst="${INSTALL_SH:-installer/linux/install.sh}"
+start_line=$(grep -n '^section "Starting signalk-server"' "$inst" | head -1 | cut -d: -f1)
+queue_line=$(grep -n 'start --no-block signalk-hardware-watch.service' "$inst" | head -1 | cut -d: -f1)
+if [[ -n "$start_line" && -n "$queue_line" && "$queue_line" -gt "$start_line" ]]; then
+    ok "install.sh queues the deferred pass after starting the server"
+else
+    miss "install.sh does not queue the deferred pass after the server start (start=${start_line:-?} queue=${queue_line:-?})"
+fi
+
 # ── 4. Second run is idempotent ─────────────────────────────────────────────
 
 out2=$(bash "$CLI_TMPL" hardware-watch 2>&1) || {
