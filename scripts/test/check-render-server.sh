@@ -318,6 +318,37 @@ if grep -qF '# === BEGIN USER ADDITIONS ===' "$payload/signalk-server.container.
     fi
 fi
 
+# ── 7. A durable pause (signalk stop) survives a re-render ────────────────
+# The updater pauses by prefixing the [Install] WantedBy= line with
+# "#SK-PAUSED# ". The pristine template has it active, so a render that
+# dropped the marker would start the stopped server at the next boot.
+canonical | grep -v '^Timezone=' \
+    | sed 's/^WantedBy=/#SK-PAUSED# WantedBy=/' >"$live"
+rm -rf "$root/marks"
+if out=$(run_render --no-restart 2>&1); then
+    paused=$(grep -c '^#SK-PAUSED# WantedBy=' "$live" || true)
+    active=$(grep -c '^WantedBy=' "$live" || true)
+    has_tz=0; grep -q '^Timezone=local' "$live" && has_tz=1
+    if [[ "$paused" -eq 1 && "$active" -eq 0 && "$has_tz" -eq 1 ]]; then
+        ok "#SK-PAUSED# WantedBy= carried into the render (template delta still applied)"
+    else
+        miss "pause marker lost or delta missing (paused=$paused active=$active timezone=$has_tz)"
+        printf '         %s\n' "$out"
+    fi
+else
+    miss "render-server errored on the paused case"
+    printf '         %s\n' "$out"
+fi
+# A live file that is not paused gets the active WantedBy= (case 2 covers the
+# whole file; this pins the line).
+canonical | grep -v '^Timezone=' >"$live"
+if run_render --no-restart >/dev/null 2>&1 && grep -q '^WantedBy=' "$live" \
+    && ! grep -q 'SK-PAUSED' "$live"; then
+    ok "unpaused live Quadlet keeps an active WantedBy="
+else
+    miss "unpaused render came out paused or without WantedBy="
+fi
+
 # Serial passthrough is impossible without this. keep-id maps only uid/gid 1000,
 # so the host's `dialout` (GID 20) arrives inside the container as 100020, and a
 # root:dialout 660 device node cannot be opened -- silently, because SignalK

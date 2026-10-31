@@ -1637,7 +1637,28 @@ _signalk_render_server() {
         fi
     fi
 
-    # Check again after the two splices: an awk that failed (or a caller's
+    # Keep a durable pause. `signalk stop` (the updater's /api/signalk/pause)
+    # comments the [Install] WantedBy= line out behind its #SK-PAUSED#
+    # marker so the server does not start at boot (signalk-updater-server
+    # src/quadlet/rewriter.ts). The pristine template carries an active
+    # WantedBy=, so a render without this would bring a server the operator
+    # stopped back at the next boot.
+    if awk '
+        /^[[:space:]]*\[/ { inst = ($0 ~ /^[[:space:]]*\[Install\]/) }
+        inst && /^[[:space:]]*#SK-PAUSED#[[:space:]]*WantedBy[[:space:]]*=/ { found = 1 }
+        END { exit !found }
+    ' "$live"; then
+        if ! rendered=$(awk '
+            /^[[:space:]]*\[/ { inst = ($0 ~ /^[[:space:]]*\[Install\]/) }
+            inst && /^[[:space:]]*WantedBy[[:space:]]*=/ { sub(/^[[:space:]]*/, "&#SK-PAUSED# ") }
+            { print }
+        ' <<<"$rendered"); then
+            echo "[ERR] could not carry the #SK-PAUSED# marker into the render — refusing to touch the live Quadlet." >&2
+            return 1
+        fi
+    fi
+
+    # Check again after the splices: an awk that failed (or a caller's
     # conditional context, where errexit is off) leaves an empty or partial
     # string here, and the write below would put it over the live Quadlet.
     if [[ -z "$rendered" ]] || ! grep -q '^\[Container\]' <<<"$rendered" \
