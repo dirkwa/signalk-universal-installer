@@ -152,8 +152,14 @@ run_heal() {
                 *) return 0 ;;
             esac
         }
-        cmd_hardware() { echo "$*" >>"$MARK/rescan.log"; }
-        cmd_render_server() { echo "render $*" >>"$MARK/rescan.log"; }
+        cmd_hardware() {
+            echo "$*" >>"$MARK/rescan.log"
+            echo rescanned >>"$HOME/.signalk-updater/hardware.json"
+        }
+        cmd_render_server() {
+            echo "render $*" >>"$MARK/rescan.log"
+            [[ "${RENDER_FAIL:-0}" != 1 ]]
+        }
         _signalk_restart_server() { echo restart >>"$MARK/restart.log"; }
         rc=0
         _signalk_hardware_heal || rc=$?
@@ -197,6 +203,18 @@ heal_case "server stopped, unlisted device → hardware.json + Quadlet, no resta
 heal_case "server stopped, listed device → nothing" "rc=0 rescan=none restarts=0" "$name" "$listed_on" down
 heal_case "operation.lock held → exit 75, nothing else" "rc=75 rescan=none restarts=0" "$name" "[]" lacks held
 heal_case "no hardware.json → nothing" "rc=0 rescan=none restarts=0" "$name" none lacks
+
+# A render that fails for a stopped server must leave hardware.json as it
+# was, or the next pass sees the device as listed and never renders it.
+export RENDER_FAIL=1
+heal_case "server stopped, render fails → exit 1" \
+    "rc=1 rescan=rescan --no-render;render --no-restart restarts=0" "$name" "[]" down
+unset RENDER_FAIL
+if [[ "$(cat "$hw_dir/hardware.json")" == '{"serial": []}' ]]; then
+    ok "heal: failed render restores hardware.json"
+else
+    miss "heal: failed render left the rescanned hardware.json behind"
+fi
 
 # ── 3b. render-server starts the first pass after its render ──────────────
 # A pass started before the render's write could rescan while the render
@@ -276,10 +294,12 @@ else
 fi
 
 # install.sh queues the deferred pass after the server is started: the
-# queue sits after the "Starting signalk-server" section.
+# queue sits after the end of the "Starting signalk-server" section, the
+# line of the section that follows it.
 inst="${INSTALL_SH:-installer/linux/install.sh}"
-start_line=$(grep -n '^section "Starting signalk-server"' "$inst" | head -1 | cut -d: -f1)
-queue_line=$(grep -n 'start --no-block signalk-hardware-watch.service' "$inst" | head -1 | cut -d: -f1)
+start_line=$(awk '/^section "Starting signalk-server"/ { seen = 1; next }
+    seen && /^section "/ { print NR; exit }' "$inst" || :)
+queue_line=$(grep -n 'start --no-block signalk-hardware-watch.service' "$inst" | head -1 | cut -d: -f1 || :)
 if [[ -n "$start_line" && -n "$queue_line" && "$queue_line" -gt "$start_line" ]]; then
     ok "install.sh queues the deferred pass after starting the server"
 else
