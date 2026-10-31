@@ -267,6 +267,7 @@ else
 fi
 rm -rf "$SYSTEMCTL_STATE" && mkdir -p "$SYSTEMCTL_STATE" && touch "$SYSTEMCTL_STATE/enabled"
 
+# shellcheck disable=SC2016  # matches the literal $HOME in install.sh
 if grep -q '^if ! SIGNALK_HARDWARE_WATCH_DEFER_INITIAL=1 "$HOME/.local/bin/signalk" hardware-watch; then$' \
         "${INSTALL_SH:-installer/linux/install.sh}"; then
     ok "install.sh defers the first pass"
