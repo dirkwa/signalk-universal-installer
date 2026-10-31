@@ -40,6 +40,19 @@
 #                          nothing listens on. Idempotent; render-server runs
 #                          it automatically. `heal` runs one check-and-recover
 #                          pass now (what the oneshot calls).
+#   signalk hardware-watch [heal]
+#                          no argument: (re)install the signalk-hardware-watch
+#                          systemd user units — a path unit watching
+#                          /dev/serial/by-id plus a oneshot that runs
+#                          `hardware rescan` when a USB serial device appears
+#                          that hardware.json does not list, and restarts
+#                          signalk-server when a listed, enabled one is
+#                          missing from the running container or held there
+#                          as a different device node (major:minor); entries
+#                          with enabled: false are skipped. Idempotent;
+#                          render-server runs it
+#                          automatically. `heal` runs one pass now (what the
+#                          oneshot calls).
 #   signalk resetadmin [user]
 #                          reset (or create) an admin user's password for the
 #                          Admin UI login (default user: admin). Prompts for the
@@ -992,6 +1005,26 @@ _signalk_netgate_gw() {
     fi
 }
 
+# True while an engine operation holds operation.lock, after saying what it
+# skips ($1). A lock older than 15 minutes is stale by docs/recovery.md's
+# ceiling on a legitimate holder (the 180s health-poll plus a rollback
+# budget): warn and return false, so one stuck file cannot disable a
+# self-heal forever. SIGNALK_OPERATION_LOCK is a test seam.
+_signalk_operation_in_progress() {
+    local lock="${SIGNALK_OPERATION_LOCK:-$HOME/.signalk-updater/operation.lock}"
+    [[ -e "$lock" ]] || return 1
+    local lock_mtime lock_age
+    lock_mtime=$(stat -c %Y "$lock" 2>/dev/null || echo 0)
+    lock_age=$(( $(date +%s) - lock_mtime ))
+    if [[ "$lock_mtime" -gt 0 && "$lock_age" -lt 900 ]]; then
+        echo "[i] An engine operation is in progress (operation.lock held ${lock_age}s) — skipping $1."
+        return 0
+    fi
+    echo "[WARN] operation.lock has been held ${lock_age}s — treating it as stale and continuing." >&2
+    echo "       If engine operations are also failing, see 'stuck operation.lock' in docs/recovery.md." >&2
+    return 1
+}
+
 # The oneshot's entry point. Deliberately NO probe of
 # host.containers.internal: that is the thing that hangs, and it cannot tell
 # "pasta is broken" from "signalk-server is down" — which would fire the
@@ -1011,7 +1044,7 @@ _signalk_netgate_gw() {
 # is circular. Each container is healed independently so one failure does
 # not mask the other.
 _signalk_netgate_heal() {
-    local host_gw ctr ctr_gw unit healed=0 lock
+    local host_gw ctr ctr_gw unit healed=0
     host_gw=$(_signalk_netgate_gw)
     [[ -n "$host_gw" ]] || return 0
 
@@ -1032,18 +1065,7 @@ _signalk_netgate_heal() {
     # holder at the 180s health-poll plus a rollback budget, so a lock older
     # than 15min is stale by the project's own definition -- proceed then,
     # and say why.
-    lock="${SIGNALK_OPERATION_LOCK:-$HOME/.signalk-updater/operation.lock}"
-    if [[ -e "$lock" ]]; then
-        local lock_mtime lock_age
-        lock_mtime=$(stat -c %Y "$lock" 2>/dev/null || echo 0)
-        lock_age=$(( $(date +%s) - lock_mtime ))
-        if [[ "$lock_mtime" -gt 0 && "$lock_age" -lt 900 ]]; then
-            echo "[i] An engine operation is in progress (operation.lock held ${lock_age}s) — skipping the pasta gateway check."
-            return 0
-        fi
-        echo "[WARN] operation.lock has been held ${lock_age}s — treating it as stale and continuing." >&2
-        echo "       If engine operations are also failing, see 'stuck operation.lock' in docs/recovery.md." >&2
-    fi
+    _signalk_operation_in_progress "the pasta gateway check" && return 0
 
     for ctr in signalk-doctor-server signalk-updater-server; do
         # Guard 2. Belt and braces with the empty-gateway check below (a
@@ -1090,6 +1112,208 @@ cmd_netgate_watch() {
         '') _signalk_ensure_netgate_watch ;;
         heal) _signalk_netgate_heal ;;
         *) echo "[ERR] Unknown netgate-watch argument: $1" >&2; return 1 ;;
+    esac
+}
+
+# --- hardware-watch: pass a USB serial device plugged in later ------------
+# The server Quadlet passes the serial devices listed in hardware.json that
+# exist when the container starts (SIGNALK_SERIAL_DEVICES + the ExecStartPre
+# that writes SIGNALK_DEVICE_ARGS). A gateway plugged in afterwards is in
+# neither place until `signalk hardware rescan`, and one that is listed but
+# was unplugged at the last start is missing until the next restart. This
+# pair of user units does both without the operator: a path unit watches
+# /dev/serial/by-id (udev adds and removes a link there per device; systemd
+# watches /dev until the directory first appears) and a oneshot runs
+# `signalk hardware-watch heal`:
+#   - a link hardware.json does not list      -> `signalk hardware rescan`
+#     (merges the toggles, re-renders, restarts the server)
+#   - a listed, enabled link the running
+#     container does not have                 -> restart the server
+#   - anything else (an unplug, a device the
+#     operator switched off)                  -> nothing
+# Same single-owner and ride-along model as resolv-watch: install.sh calls
+# `signalk hardware-watch`, cmd_render_server re-ensures the units, and the
+# unit text carries no podman or systemctl calls.
+HARDWARE_WATCH_PATH_UNIT='# Installed by signalk-universal-installer (signalk hardware-watch)
+[Unit]
+Description=Watch USB serial devices for the SignalK container stack
+
+[Path]
+PathChanged=/dev/serial/by-id
+
+[Install]
+WantedBy=default.target'
+# Set by _signalk_ensure_hardware_watch when it installed the units in this
+# run; cmd_render_server reads it after its render to start the first pass.
+HARDWARE_WATCH_INSTALLED_NOW=0
+HARDWARE_WATCH_SERVICE_UNIT='# Installed by signalk-universal-installer (signalk hardware-watch)
+[Unit]
+Description=Pass a USB serial device plugged in after signalk-server started
+# The checks and the restart live in the CLI (`signalk hardware-watch
+# heal`), so the restart goes through the updater REST API first and
+# systemctl --user only as the fallback. Inert when the CLI is missing.
+ConditionPathExists=%h/.local/bin/signalk
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/signalk hardware-watch heal
+# heal exits 75 when an engine operation holds operation.lock; run the
+# pass again a minute later instead of dropping the device. One retry a
+# minute stays under the default start limit (5 starts per 10 s), so the
+# retries outlast the 15-minute stale-lock window. Any other failure is
+# not retried: a failed rescan or restart needs the operator, and the
+# next hotplug or a manual signalk hardware-watch heal runs the pass again.
+RestartForceExitStatus=75
+RestartSec=60'
+
+_signalk_ensure_hardware_watch() {
+    local unit_dir="${HOME}/.config/systemd/user"
+    local path_file="${unit_dir}/signalk-hardware-watch.path"
+    local svc_file="${unit_dir}/signalk-hardware-watch.service"
+
+    if [[ "$(cat "$path_file" 2>/dev/null)" == "$HARDWARE_WATCH_PATH_UNIT" ]] \
+        && [[ "$(cat "$svc_file" 2>/dev/null)" == "$HARDWARE_WATCH_SERVICE_UNIT" ]] \
+        && systemctl --user is-enabled signalk-hardware-watch.path >/dev/null 2>&1; then
+        echo "[OK] signalk-hardware-watch units already installed."
+        return 0
+    fi
+
+    _signalk_ensure_unit_dir "$unit_dir" || return 1
+    local f content tmp
+    for f in "$path_file" "$svc_file"; do
+        if [[ "$f" == "$path_file" ]]; then
+            content="$HARDWARE_WATCH_PATH_UNIT"
+        else
+            content="$HARDWARE_WATCH_SERVICE_UNIT"
+        fi
+        tmp=$(mktemp "${f}.XXXXXX") || { echo "[ERR] mktemp failed for $f" >&2; return 1; }
+        if ! printf '%s\n' "$content" >"$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$f"; then
+            echo "[ERR] Failed to install $f." >&2
+            rm -f "$tmp"
+            return 1
+        fi
+    done
+
+    systemctl --user daemon-reload || {
+        echo "[ERR] systemctl --user daemon-reload failed; the hardware-watch units are" >&2
+        echo "      on disk but not parsed. Retry:  systemctl --user daemon-reload" >&2
+        return 1
+    }
+    systemctl --user enable --now signalk-hardware-watch.path >/dev/null 2>&1 || {
+        echo "[ERR] could not enable signalk-hardware-watch.path" >&2
+        return 1
+    }
+    echo "[OK] signalk-hardware-watch units installed and watching /dev/serial/by-id."
+    HARDWARE_WATCH_INSTALLED_NOW=1
+}
+
+# hardware.json and the copy _signalk_hardware_heal takes before a rescan;
+# globals so the EXIT trap can restore it.
+_SK_HW=""
+_SK_HW_BAK=""
+_signalk_hw_restore() {
+    cp -p "$_SK_HW_BAK" "$_SK_HW" \
+        || echo "[ERR] could not restore $_SK_HW after the rescan failed." >&2
+    rm -f "$_SK_HW_BAK"
+}
+
+# The oneshot's entry point.
+#   - no jq or no hardware.json -> nothing (rescan would refuse to merge)
+#   - operation.lock held       -> exit 75; the service runs again in 60s
+#   - unlisted link             -> rescan; with the server stopped, write
+#                                  hardware.json and the Quadlet only, so
+#                                  its next start passes the device
+#   - listed, enabled link the running container lacks, or holds as a
+#     different device node (unplugged and plugged back in, new ttyUSBn)
+#                               -> restart the server
+# The settle delay lets udev finish the links of a device that is still
+# enumerating (one adapter can add several -portN links), so one plug-in
+# leads to one rescan. SIGNALK_SERIAL_BY_ID and SIGNALK_HARDWARE_SETTLE are
+# test seams.
+_signalk_hardware_heal() {
+    local by_id="${SIGNALK_SERIAL_BY_ID:-/dev/serial/by-id}"
+    local hw="$HOME/.signalk-updater/hardware.json"
+    command -v jq >/dev/null 2>&1 || return 0
+    [[ -s "$hw" ]] || return 0
+    sleep "${SIGNALK_HARDWARE_SETTLE:-2}"
+    _signalk_operation_in_progress "the USB serial check (retrying in 60s)" && return 75
+
+    local running=false
+    podman exec signalk-server true 2>/dev/null && running=true
+
+    local link state host_dev ctr_dev new="" stale=""
+    for link in "$by_id"/*; do
+        [[ -e "$link" ]] || continue
+        state=$(jq -r --arg p "$link" '
+            [(.serial // [])[] | select(.byId == $p) | .enabled]
+            | if length == 0 then "new"
+              elif .[0] == false then "off"
+              else "on" end' "$hw" 2>/dev/null) || return 0
+        case "$state" in
+            new) new="$new $link" ;;
+            on)
+                [[ "$running" == true ]] || continue
+                # Major:minor of the node the link points at, on the host and
+                # as the container holds it. podman copies the node at create
+                # time, so a replug that got a new ttyUSBn leaves the old one.
+                host_dev=$(stat -L -c '%t:%T' "$link" 2>/dev/null) || continue
+                ctr_dev=$(podman exec signalk-server stat -L -c '%t:%T' "$link" 2>/dev/null) || ctr_dev=""
+                [[ "$ctr_dev" == "$host_dev" ]] || stale="$stale $link"
+                ;;
+        esac
+    done
+
+    if [[ -n "$new" ]]; then
+        echo "[i] New USB serial device(s):${new} — re-detecting hardware."
+        # rescan writes hardware.json before the render; put the old copy
+        # back if anything after it fails, so the next pass still sees the
+        # device as new and rescans instead of only restarting. The calls
+        # stay plain so errexit still applies inside them; the EXIT trap
+        # restores when errexit ends the run, rc when a caller turned it off.
+        local rc=0
+        if ! _SK_HW_BAK=$(mktemp) || ! cp -p "$hw" "$_SK_HW_BAK"; then
+            echo "[ERR] could not back up $hw before the rescan." >&2
+            rm -f "${_SK_HW_BAK:-}"
+            return 1
+        fi
+        _SK_HW="$hw"
+        trap _signalk_hw_restore EXIT
+        if [[ "$running" == true ]]; then
+            cmd_hardware rescan; rc=$?
+        else
+            cmd_hardware rescan --no-render; rc=$?
+            if [[ "$rc" -eq 0 ]]; then
+                cmd_render_server --no-restart; rc=$?
+            fi
+        fi
+        trap - EXIT
+        if [[ "$rc" -ne 0 ]]; then
+            _signalk_hw_restore
+        else
+            rm -f "$_SK_HW_BAK"
+        fi
+        return "$rc"
+    elif [[ -n "$stale" ]]; then
+        echo "[i] USB serial device(s) plugged in after signalk-server started:${stale} — restarting it."
+        _signalk_restart_server
+    fi
+}
+
+cmd_hardware_watch() {
+    case "${1:-}" in
+        '')
+            _signalk_ensure_hardware_watch || return 1
+            # A standalone install gets the first pass that render-server
+            # would start. install.sh sets SIGNALK_HARDWARE_WATCH_DEFER_INITIAL
+            # and queues the pass itself once it has started the server.
+            if [[ "${SIGNALK_HARDWARE_WATCH_DEFER_INITIAL:-0}" != 1 \
+                && "$HARDWARE_WATCH_INSTALLED_NOW" == 1 ]] \
+                && ! systemctl --user start --no-block signalk-hardware-watch.service >/dev/null 2>&1; then
+                echo "[WARN] could not start a first signalk-hardware-watch pass; run 'signalk hardware-watch heal'." >&2
+            fi
+            ;;
+        heal) _signalk_hardware_heal ;;
+        *) echo "[ERR] Unknown hardware-watch argument: $1" >&2; return 1 ;;
     esac
 }
 
@@ -1219,7 +1443,34 @@ cmd_hardware() {
     fi
 }
 
+# The path unit fires on changes only, so a device already plugged in when
+# `signalk update` installs the units would wait for the next plug event.
+# The first pass starts here, after the render has written the Quadlet: a
+# pass started earlier could rescan while the render still works from the
+# old hardware.json, and the render's write would drop the device again.
+# install.sh defers it (SIGNALK_HARDWARE_WATCH_DEFER_INITIAL) and queues the
+# pass itself once it has started the server.
 cmd_render_server() {
+    local rc=0 arg no_restart=false
+    for arg in "$@"; do [[ "$arg" == --no-restart ]] && no_restart=true; done
+    HARDWARE_WATCH_INSTALLED_NOW=0
+    # A plain call, not `|| rc=$?`: the right side of || would switch errexit
+    # off for the whole render, so a failed splice would carry on to the write.
+    # Under errexit a failure here ends the script as before; in a caller's
+    # conditional, where errexit is already off, $? holds the status.
+    _signalk_render_server "$@"
+    rc=$?
+    if [[ "$HARDWARE_WATCH_INSTALLED_NOW" == 1 ]]; then
+        if [[ "$no_restart" == true ]]; then
+            echo "[i] --no-restart: run 'signalk hardware-watch heal' to pick up a USB serial device that is already plugged in."
+        elif ! systemctl --user start --no-block signalk-hardware-watch.service >/dev/null 2>&1; then
+            echo "[WARN] could not start a first signalk-hardware-watch pass; run 'signalk hardware-watch heal'." >&2
+        fi
+    fi
+    return "$rc"
+}
+
+_signalk_render_server() {
     # Rebuild the LIVE ~/.config/containers/systemd/signalk-server.container
     # from the staged template, so a template-only improvement (e.g.
     # Timezone=local, #212) reaches an already-deployed box without a full
@@ -1260,6 +1511,11 @@ cmd_render_server() {
     # it. The timer heals those old Quadlets without rewriting them.
     _signalk_ensure_netgate_watch \
         || echo "[WARN] could not install the signalk-netgate-watch units (continuing)" >&2
+
+    # And for the serial-device watcher, so a box installed before it picks
+    # it up on `signalk update`.
+    _signalk_ensure_hardware_watch \
+        || echo "[WARN] could not install the signalk-hardware-watch units (continuing)" >&2
 
     local payload_dir="${DOCTOR_DATA}/installer-payload"
     local renderer="${payload_dir}/render-server-quadlet.sh"
@@ -1325,10 +1581,13 @@ cmd_render_server() {
     if [[ -n "$live_image" ]] && grep -q '^Image=' <<<"$rendered"; then
         # Replace only the FIRST Image= line in the render with the live one.
         # Env-passed so a tag with sed-special chars can't corrupt the program.
-        rendered=$(LIVE_IMAGE="$live_image" awk '
+        if ! rendered=$(LIVE_IMAGE="$live_image" awk '
             !done && /^Image=/ { print ENVIRON["LIVE_IMAGE"]; done = 1; next }
             { print }
-        ' <<<"$rendered")
+        ' <<<"$rendered"); then
+            echo "[ERR] could not carry the live Image= line into the render — refusing to touch the live Quadlet." >&2
+            return 1
+        fi
     fi
 
     # Preserve the operator's hand-edits. The template carries a
@@ -1349,16 +1608,19 @@ cmd_render_server() {
         && grep -qF "$begin_marker" <<<"$rendered" && grep -qF "$end_marker" <<<"$rendered"; then
         local live_additions
         # Inner lines only (strictly between the markers), verbatim.
-        live_additions=$(awk '
+        if ! live_additions=$(awk '
             /^# === BEGIN USER ADDITIONS ===/ { grab = 1; next }
             /^# === END USER ADDITIONS ===/   { grab = 0 }
             grab { print }
-        ' "$live")
+        ' "$live"); then
+            echo "[ERR] could not read USER ADDITIONS from $live — refusing to touch it." >&2
+            return 1
+        fi
         # Rebuild the rendered body: keep everything except the rendered block
         # inner lines, and drop in the live inner lines right after BEGIN.
         # Passed via an env var so arbitrary operator content (quotes, %, etc.)
         # can't be reinterpreted by awk's program text.
-        rendered=$(LIVE_ADDITIONS="$live_additions" awk '
+        if ! rendered=$(LIVE_ADDITIONS="$live_additions" awk '
             /^# === BEGIN USER ADDITIONS ===/ {
                 print
                 add = ENVIRON["LIVE_ADDITIONS"]
@@ -1369,7 +1631,41 @@ cmd_render_server() {
             /^# === END USER ADDITIONS ===/ { skip = 0; print; next }
             skip { next }
             { print }
-        ' <<<"$rendered")
+        ' <<<"$rendered"); then
+            echo "[ERR] could not splice USER ADDITIONS into the render — refusing to touch the live Quadlet." >&2
+            return 1
+        fi
+    fi
+
+    # Keep a durable pause. `signalk stop` (the updater's /api/signalk/pause)
+    # comments the [Install] WantedBy= line out behind its #SK-PAUSED#
+    # marker so the server does not start at boot (signalk-updater-server
+    # src/quadlet/rewriter.ts). The pristine template carries an active
+    # WantedBy=, so a render without this would bring a server the operator
+    # stopped back at the next boot.
+    if awk '
+        /^[[:space:]]*\[/ { inst = ($0 ~ /^[[:space:]]*\[Install\]/) }
+        inst && /^[[:space:]]*#SK-PAUSED#[[:space:]]*WantedBy[[:space:]]*=/ { found = 1 }
+        END { exit !found }
+    ' "$live"; then
+        if ! rendered=$(awk '
+            /^[[:space:]]*\[/ { inst = ($0 ~ /^[[:space:]]*\[Install\]/) }
+            inst && /^[[:space:]]*WantedBy[[:space:]]*=/ { sub(/^[[:space:]]*/, "&#SK-PAUSED# ") }
+            { print }
+        ' <<<"$rendered"); then
+            echo "[ERR] could not carry the #SK-PAUSED# marker into the render — refusing to touch the live Quadlet." >&2
+            return 1
+        fi
+    fi
+
+    # Check again after the splices: an awk that failed (or a caller's
+    # conditional context, where errexit is off) leaves an empty or partial
+    # string here, and the write below would put it over the live Quadlet.
+    if [[ -z "$rendered" ]] || ! grep -q '^\[Container\]' <<<"$rendered" \
+        || ! grep -q '^Image=' <<<"$rendered"; then
+        echo "[ERR] splicing the live Image= line or USER ADDITIONS into the render failed" >&2
+        echo "      — refusing to touch the live Quadlet." >&2
+        return 1
     fi
 
     # Idempotent short-circuit: if the render matches the live file byte-for-
@@ -1588,7 +1884,16 @@ cmd_update() {
     # every update on every platform.
     if [[ "$do_render" == true ]]; then
         echo
-        cmd_render_server
+        # Run the render from the CLI the refresh just wrote, not from this
+        # process: bash keeps the functions it loaded at start, so the old
+        # cmd_render_server would miss anything the new CLI added to the
+        # render (the hardware-watch units on the first update after them).
+        local cli="$HOME/.local/bin/signalk"
+        if [[ -x "$cli" ]]; then
+            "$cli" render-server
+        else
+            cmd_render_server
+        fi
     fi
 }
 
@@ -4146,6 +4451,7 @@ case "${1:-help}" in
     render-server) shift; cmd_render_server "$@" ;;
     resolv-watch) shift; cmd_resolv_watch "$@" ;;
     netgate-watch) shift; cmd_netgate_watch "$@" ;;
+    hardware-watch) shift; cmd_hardware_watch "$@" ;;
     resetadmin) shift; cmd_resetadmin "$@" ;;
     bug-report) shift; cmd_bug_report "$@" ;;
     stop)       cmd_stop ;;

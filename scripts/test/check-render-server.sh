@@ -142,6 +142,7 @@ HOME="$root" bash -c '
     . "'"$funcs"'"
     _signalk_ensure_resolv_watch >/dev/null
     _signalk_ensure_netgate_watch >/dev/null
+    _signalk_ensure_hardware_watch >/dev/null
 '
 
 # ── 1. Idempotent: live already matches the render ─────────────────────────
@@ -157,7 +158,8 @@ if out=$(run_render 2>&1); then
         && [[ ! -f "$root/marks/restart.log" ]] \
         && [[ "$(cat "$root/marks/systemctl.log" 2>/dev/null)" == \
               "--user is-enabled signalk-resolv-watch.path
---user is-enabled signalk-netgate-watch.timer" ]]; then
+--user is-enabled signalk-netgate-watch.timer
+--user is-enabled signalk-hardware-watch.path" ]]; then
         ok "no-op when live Quadlet already matches the template (no restart, no daemon-reload)"
     else
         miss "idempotent path did work it shouldn't have"
@@ -283,6 +285,68 @@ if grep -qF '# === BEGIN USER ADDITIONS ===' "$payload/signalk-server.container.
     fi
 else
     echo "  [SKIP] template lacks USER ADDITIONS markers or Image= — preservation N/A"
+fi
+
+# ── 6. A failed splice never reaches the live Quadlet ─────────────────────
+# Called from a caller's conditional (`cmd_render_server || …`), errexit is
+# off inside, so a failing awk would otherwise leave `rendered` empty and the
+# write would put that over the live file. awk fails only for the USER
+# ADDITIONS splice (the one call that carries LIVE_ADDITIONS); the live file
+# must come out byte-identical and nothing may restart.
+if grep -qF '# === BEGIN USER ADDITIONS ===' "$payload/signalk-server.container.template"; then
+    canonical | grep -v '^Timezone=' >"$live"
+    before=$(cat "$live")
+    rm -rf "$root/marks"
+    out=$(HOME="$root" DOCTOR_DATA="$root/.signalk-doctor" QUADLET_DIR="$quadlet_dir" \
+        MARK="$root/marks" bash -c '
+        set -euo pipefail
+        mkdir -p "$MARK"
+        systemctl() { echo "$*" >>"$MARK/systemctl.log"; return 0; }
+        # shellcheck source=/dev/null
+        . "'"$funcs"'"
+        sk_http_port() { printf 80; }
+        _signalk_restart_server() { echo "restart" >>"$MARK/restart.log"; return 0; }
+        awk() { if [[ -n "${LIVE_ADDITIONS+x}" ]]; then return 1; fi; command awk "$@"; }
+        if cmd_render_server; then echo "RC=0"; else echo "RC=$?"; fi
+    ' 2>&1) || true
+    if [[ "$(cat "$live")" == "$before" ]] && [[ ! -f "$root/marks/restart.log" ]] \
+        && grep -q 'RC=1' <<<"$out" && grep -q 'could not splice USER ADDITIONS' <<<"$out"; then
+        ok "a failed USER ADDITIONS splice leaves the live Quadlet untouched (conditional caller)"
+    else
+        miss "a failed splice reached the live Quadlet or restarted the server"
+        printf '         %s\n' "$out"
+    fi
+fi
+
+# ── 7. A durable pause (signalk stop) survives a re-render ────────────────
+# The updater pauses by prefixing the [Install] WantedBy= line with
+# "#SK-PAUSED# ". The pristine template has it active, so a render that
+# dropped the marker would start the stopped server at the next boot.
+canonical | grep -v '^Timezone=' \
+    | sed 's/^WantedBy=/#SK-PAUSED# WantedBy=/' >"$live"
+rm -rf "$root/marks"
+if out=$(run_render --no-restart 2>&1); then
+    paused=$(grep -c '^#SK-PAUSED# WantedBy=' "$live" || true)
+    active=$(grep -c '^WantedBy=' "$live" || true)
+    has_tz=0; grep -q '^Timezone=local' "$live" && has_tz=1
+    if [[ "$paused" -eq 1 && "$active" -eq 0 && "$has_tz" -eq 1 ]]; then
+        ok "#SK-PAUSED# WantedBy= carried into the render (template delta still applied)"
+    else
+        miss "pause marker lost or delta missing (paused=$paused active=$active timezone=$has_tz)"
+        printf '         %s\n' "$out"
+    fi
+else
+    miss "render-server errored on the paused case"
+    printf '         %s\n' "$out"
+fi
+# A live file that is not paused gets the active WantedBy= (case 2 covers the
+# whole file; this pins the line).
+canonical | grep -v '^Timezone=' >"$live"
+if run_render --no-restart >/dev/null 2>&1 && grep -q '^WantedBy=' "$live" \
+    && ! grep -q 'SK-PAUSED' "$live"; then
+    ok "unpaused live Quadlet keeps an active WantedBy="
+else
+    miss "unpaused render came out paused or without WantedBy="
 fi
 
 # Serial passthrough is impossible without this. keep-id maps only uid/gid 1000,

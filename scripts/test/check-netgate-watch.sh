@@ -361,10 +361,11 @@ fi
 # The ride-along is the ONLY route by which an existing box gets the fix:
 # render-server rewrites signalk-server.container only, so engine Quadlets
 # installed before the route gate are never refreshed.
-# Assert the call sits INSIDE cmd_render_server, not merely somewhere in the
+# Assert the call sits INSIDE _signalk_render_server (the body
+# cmd_render_server runs), not merely somewhere in the
 # file: the definition and the dispatcher arm would satisfy a naive count
 # even with the ride-along deleted.
-if awk '/^cmd_render_server\(\)/{inside=1} inside && /_signalk_ensure_netgate_watch/{found=1} inside && /^}/{exit} END{exit !found}' \
+if awk '/^_signalk_render_server\(\)/{inside=1} inside && /_signalk_ensure_netgate_watch/{found=1} inside && /^}/{exit} END{exit !found}' \
         "$CLI_TMPL"; then
     ok "render-server ride-along calls _signalk_ensure_netgate_watch"
 else

@@ -40,7 +40,7 @@ The server Quadlet therefore carries `GroupAdd=keep-groups`, which tells crun to
 
 ## Re-running detection
 
-`hardware.json` is written once, at detection time. Plug in a USB gateway afterwards and nothing notices until detection runs again.
+`hardware.json` is written at detection time. A USB serial device plugged in afterward is picked up by the `signalk-hardware-watch` user units: a path unit watches `/dev/serial/by-id`, and when a device appears that `hardware.json` does not list it runs `signalk hardware rescan`, which restarts signalk-server with the device passed. While signalk-server is stopped it only updates `hardware.json` and the Quadlet, so the next start passes the device. A listed device that was missing when signalk-server last started, or was unplugged and plugged back in since, gets a restart instead. While an engine operation holds `operation.lock`, the pass is deferred until the operation ends. `signalk update` runs one pass when it installs the units, for a device that was already plugged in. Unplugging a device, and a device you switched off in `hardware.json`, change nothing. A USB stick that only a plugin's own container uses (a Zigbee coordinator) is added to signalk-server too and costs one restart; signalk-container passes it to the plugin's container either way. The commands below do the same by hand. `signalk hardware-watch` reinstalls the units, `signalk hardware-watch heal` runs one pass now, and `signalk update` installs them on a box that predates them.
 
 ```bash
 signalk hardware status    # what was detected, and when
@@ -68,7 +68,7 @@ Worked example with an Actisense NGT-1; a USB GPS or an NMEA 0183 adapter is the
    # usb-Actisense_NGT-1_3A055-if00-port0 -> ../../ttyUSB0
    ```
 
-2. Re-detect and re-render:
+2. Wait for signalk-server to restart; `signalk-hardware-watch` re-detects the device on its own (`journalctl --user -u signalk-hardware-watch` shows the pass). On a box without the units, re-detect by hand:
 
    ```bash
    signalk hardware rescan
@@ -89,7 +89,7 @@ Both work — each device is passed into the container twice, once mapped to its
 | Symptom | Cause |
 |---|---|
 | `Error: No such file or directory, cannot open /dev/ttyUSB0` | The device is not in the Quadlet. Run `signalk hardware status` — if it is not listed, `signalk hardware rescan`. |
-| Same error, and the device is listed | It was missing when the server last started (`journalctl --user -u signalk-server \| grep 'absent serial'`). Plug it in and run `signalk restart`. |
+| Same error, and the device is listed | It was missing when the server last started (`journalctl --user -u signalk-server \| grep 'absent serial'`). Plug it in; `signalk-hardware-watch` restarts the server, or run `signalk restart`. |
 | Connection shows as down, no error | Permissions. Check `GroupAdd=keep-groups` is in `~/.config/containers/systemd/signalk-server.container`, and that `id -nG` includes `dialout`. |
 | `spawn udevadm ENOENT` in the log | Harmless. The serial library shells out to `udevadm` for metadata; it is absent from the image and the port still opens. |
 
