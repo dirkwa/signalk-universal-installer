@@ -1002,6 +1002,26 @@ _signalk_netgate_gw() {
     fi
 }
 
+# True while an engine operation holds operation.lock, after saying what it
+# skips ($1). A lock older than 15 minutes is stale by docs/recovery.md's
+# ceiling on a legitimate holder (the 180s health-poll plus a rollback
+# budget): warn and return false, so one stuck file cannot disable a
+# self-heal forever. SIGNALK_OPERATION_LOCK is a test seam.
+_signalk_operation_in_progress() {
+    local lock="${SIGNALK_OPERATION_LOCK:-$HOME/.signalk-updater/operation.lock}"
+    [[ -e "$lock" ]] || return 1
+    local lock_mtime lock_age
+    lock_mtime=$(stat -c %Y "$lock" 2>/dev/null || echo 0)
+    lock_age=$(( $(date +%s) - lock_mtime ))
+    if [[ "$lock_mtime" -gt 0 && "$lock_age" -lt 900 ]]; then
+        echo "[i] An engine operation is in progress (operation.lock held ${lock_age}s) — skipping $1."
+        return 0
+    fi
+    echo "[WARN] operation.lock has been held ${lock_age}s — treating it as stale and continuing." >&2
+    echo "       If engine operations are also failing, see 'stuck operation.lock' in docs/recovery.md." >&2
+    return 1
+}
+
 # The oneshot's entry point. Deliberately NO probe of
 # host.containers.internal: that is the thing that hangs, and it cannot tell
 # "pasta is broken" from "signalk-server is down" — which would fire the
@@ -1021,7 +1041,7 @@ _signalk_netgate_gw() {
 # is circular. Each container is healed independently so one failure does
 # not mask the other.
 _signalk_netgate_heal() {
-    local host_gw ctr ctr_gw unit healed=0 lock
+    local host_gw ctr ctr_gw unit healed=0
     host_gw=$(_signalk_netgate_gw)
     [[ -n "$host_gw" ]] || return 0
 
@@ -1042,18 +1062,7 @@ _signalk_netgate_heal() {
     # holder at the 180s health-poll plus a rollback budget, so a lock older
     # than 15min is stale by the project's own definition -- proceed then,
     # and say why.
-    lock="${SIGNALK_OPERATION_LOCK:-$HOME/.signalk-updater/operation.lock}"
-    if [[ -e "$lock" ]]; then
-        local lock_mtime lock_age
-        lock_mtime=$(stat -c %Y "$lock" 2>/dev/null || echo 0)
-        lock_age=$(( $(date +%s) - lock_mtime ))
-        if [[ "$lock_mtime" -gt 0 && "$lock_age" -lt 900 ]]; then
-            echo "[i] An engine operation is in progress (operation.lock held ${lock_age}s) — skipping the pasta gateway check."
-            return 0
-        fi
-        echo "[WARN] operation.lock has been held ${lock_age}s — treating it as stale and continuing." >&2
-        echo "       If engine operations are also failing, see 'stuck operation.lock' in docs/recovery.md." >&2
-    fi
+    _signalk_operation_in_progress "the pasta gateway check" && return 0
 
     for ctr in signalk-doctor-server signalk-updater-server; do
         # Guard 2. Belt and braces with the empty-gateway check below (a
@@ -1141,7 +1150,11 @@ ConditionPathExists=%h/.local/bin/signalk
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/signalk hardware-watch heal'
+ExecStart=%h/.local/bin/signalk hardware-watch heal
+# heal exits 75 when an engine operation holds operation.lock; run the
+# pass again a minute later instead of dropping the device.
+RestartForceExitStatus=75
+RestartSec=60'
 
 _signalk_ensure_hardware_watch() {
     local unit_dir="${HOME}/.config/systemd/user"
@@ -1181,12 +1194,23 @@ _signalk_ensure_hardware_watch() {
         return 1
     }
     echo "[OK] signalk-hardware-watch units installed and watching /dev/serial/by-id."
+    # The path unit fires on changes only, so a device already plugged in
+    # when the units arrive (`signalk update` on an existing box) would wait
+    # for the next plug event. One pass now covers it. --no-block: the pass
+    # may re-render, and cmd_render_server is one of this function's callers.
+    systemctl --user start --no-block signalk-hardware-watch.service >/dev/null 2>&1 \
+        || echo "[WARN] could not start a first signalk-hardware-watch pass; run 'signalk hardware-watch heal'." >&2
 }
 
-# The oneshot's entry point. Ordered guards, each a clean no-op exit:
-#   1. no jq or no hardware.json -> rescan would refuse to merge anyway
-#   2. container not running     -> its next start passes what is present;
-#                                   never start a unit the operator stopped
+# The oneshot's entry point.
+#   - no jq or no hardware.json -> nothing (rescan would refuse to merge)
+#   - operation.lock held       -> exit 75; the service runs again in 60s
+#   - unlisted link             -> rescan; with the server stopped, write
+#                                  hardware.json and the Quadlet only, so
+#                                  its next start passes the device
+#   - listed, enabled link the running container lacks, or holds as a
+#     different device node (unplugged and plugged back in, new ttyUSBn)
+#                               -> restart the server
 # The settle delay lets udev finish the links of a device that is still
 # enumerating (one adapter can add several -portN links), so one plug-in
 # leads to one rescan. SIGNALK_SERIAL_BY_ID and SIGNALK_HARDWARE_SETTLE are
@@ -1197,9 +1221,12 @@ _signalk_hardware_heal() {
     command -v jq >/dev/null 2>&1 || return 0
     [[ -s "$hw" ]] || return 0
     sleep "${SIGNALK_HARDWARE_SETTLE:-2}"
-    podman exec signalk-server true 2>/dev/null || return 0
+    _signalk_operation_in_progress "the USB serial check (retrying in 60s)" && return 75
 
-    local link state new="" absent=""
+    local running=false
+    podman exec signalk-server true 2>/dev/null && running=true
+
+    local link state host_dev ctr_dev new="" stale=""
     for link in "$by_id"/*; do
         [[ -e "$link" ]] || continue
         state=$(jq -r --arg p "$link" '
@@ -1209,15 +1236,27 @@ _signalk_hardware_heal() {
               else "on" end' "$hw" 2>/dev/null) || return 0
         case "$state" in
             new) new="$new $link" ;;
-            on) podman exec signalk-server test -e "$link" 2>/dev/null || absent="$absent $link" ;;
+            on)
+                [[ "$running" == true ]] || continue
+                # Major:minor of the node the link points at, on the host and
+                # as the container holds it. podman copies the node at create
+                # time, so a replug that got a new ttyUSBn leaves the old one.
+                host_dev=$(stat -L -c '%t:%T' "$link" 2>/dev/null) || continue
+                ctr_dev=$(podman exec signalk-server stat -L -c '%t:%T' "$link" 2>/dev/null) || ctr_dev=""
+                [[ "$ctr_dev" == "$host_dev" ]] || stale="$stale $link"
+                ;;
         esac
     done
 
     if [[ -n "$new" ]]; then
         echo "[i] New USB serial device(s):${new} — re-detecting hardware."
-        cmd_hardware rescan
-    elif [[ -n "$absent" ]]; then
-        echo "[i] USB serial device(s) plugged in after signalk-server started:${absent} — restarting it."
+        if [[ "$running" == true ]]; then
+            cmd_hardware rescan
+        else
+            cmd_hardware rescan --no-render && cmd_render_server --no-restart
+        fi
+    elif [[ -n "$stale" ]]; then
+        echo "[i] USB serial device(s) plugged in after signalk-server started:${stale} — restarting it."
         _signalk_restart_server
     fi
 }

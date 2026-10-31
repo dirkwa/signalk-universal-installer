@@ -8,8 +8,10 @@
 #   2. The oneshot delegates to `signalk hardware-watch heal`, with no podman
 #      or systemctl in the unit text.
 #   3. The heal pass, with podman, the rescan and the restart stubbed, rescans
-#      for an unlisted device, restarts for a listed device the container
-#      lacks, and does nothing otherwise.
+#      for an unlisted device (render only, no restart, while the server is
+#      stopped), restarts for a listed device the container lacks or holds
+#      as another device node, defers with exit 75 while operation.lock is
+#      held, and does nothing otherwise.
 #
 # Run from the repo root.
 
@@ -70,8 +72,9 @@ else
 fi
 
 if grep -q 'daemon-reload' "$SYSTEMCTL_LOG" \
-    && grep -q -- '--user enable --now signalk-hardware-watch.path' "$SYSTEMCTL_LOG"; then
-    ok "daemon-reload + enable --now issued"
+    && grep -q -- '--user enable --now signalk-hardware-watch.path' "$SYSTEMCTL_LOG" \
+    && grep -q -- '--user start --no-block signalk-hardware-watch.service' "$SYSTEMCTL_LOG"; then
+    ok "daemon-reload + enable --now + one non-blocking first pass issued"
 else
     miss "expected systemctl calls not recorded"
     sed 's/^/         /' "$SYSTEMCTL_LOG"
@@ -93,8 +96,9 @@ fi
 
 if grep -q '^ExecStart=%h/\.local/bin/signalk hardware-watch heal$' "$svc_unit" 2>/dev/null \
     && grep -q '^ConditionPathExists=%h/\.local/bin/signalk$' "$svc_unit" 2>/dev/null \
+    && grep -q '^RestartForceExitStatus=75$' "$svc_unit" 2>/dev/null \
     && ! grep -v '^#' "$svc_unit" | grep -Eq 'podman|systemctl'; then
-    ok "oneshot delegates to 'signalk hardware-watch heal'; unit text has no podman/systemctl"
+    ok "oneshot delegates to 'signalk hardware-watch heal', retries exit 75; unit text has no podman/systemctl"
 else
     miss "oneshot must delegate to the CLI without direct podman/systemctl calls"
     sed 's/^/         /' "$svc_unit" 2>/dev/null || true
@@ -116,7 +120,8 @@ mkdir -p "$hw_dir"
 
 # $1 = devices on the host (space separated names under $by_id)
 # $2 = hardware.json serial entries as JSON, or "none" for no file
-# $3 = container: down | has | lacks
+# $3 = container: down | has | lacks | stale (holds another device node)
+# $4 = operation.lock: none | held
 run_heal() {
     rm -rf "$by_id" "$tmp/marks"
     mkdir -p "$by_id" "$tmp/marks"
@@ -127,7 +132,10 @@ run_heal() {
     else
         printf '{"serial": %s}\n' "$2" >"$hw_dir/hardware.json"
     fi
+    rm -f "$tmp/op.lock"
+    if [[ "${4:-none}" == held ]]; then : >"$tmp/op.lock"; fi
     SIGNALK_SERIAL_BY_ID="$by_id" SIGNALK_HARDWARE_SETTLE=0 \
+        SIGNALK_OPERATION_LOCK="$tmp/op.lock" \
         CONTAINER_STATE="$3" MARK="$tmp/marks" bash -c '
         set -euo pipefail
         # shellcheck source=/dev/null
@@ -135,13 +143,21 @@ run_heal() {
         podman() {
             case "$*" in
                 "exec signalk-server true") [[ "$CONTAINER_STATE" != down ]] ;;
-                "exec signalk-server test -e "*) [[ "$CONTAINER_STATE" == has ]] ;;
+                "exec signalk-server stat "*)
+                    case "$CONTAINER_STATE" in
+                        has) stat -L -c "%t:%T" "${@: -1}" ;;
+                        stale) echo "bc:1" ;;
+                        *) return 1 ;;
+                    esac ;;
                 *) return 0 ;;
             esac
         }
         cmd_hardware() { echo "$*" >>"$MARK/rescan.log"; }
+        cmd_render_server() { echo "render $*" >>"$MARK/rescan.log"; }
         _signalk_restart_server() { echo restart >>"$MARK/restart.log"; }
-        _signalk_hardware_heal
+        rc=0
+        _signalk_hardware_heal || rc=$?
+        echo "$rc" >"$MARK/rc"
     ' >/dev/null
 }
 
@@ -149,8 +165,10 @@ heal_case() {
     local desc="$1" want="$2" got=none
     shift 2
     run_heal "$@"
-    if [[ -f "$tmp/marks/rescan.log" ]]; then
-        got="rescan:$(cat "$tmp/marks/rescan.log")"
+    if [[ "$(cat "$tmp/marks/rc")" != 0 ]]; then
+        got="exit:$(cat "$tmp/marks/rc")"
+    elif [[ -f "$tmp/marks/rescan.log" ]]; then
+        got="rescan:$(paste -sd ';' "$tmp/marks/rescan.log")"
     elif [[ -f "$tmp/marks/restart.log" ]]; then
         got=restart
     fi
@@ -170,7 +188,11 @@ heal_case "listed device the container lacks → restart" restart "$name" "$list
 heal_case "listed device the container has → nothing" none "$name" "$listed_on" has
 heal_case "device switched off → nothing" none "$name" "$listed_off" lacks
 heal_case "unplug (no device on host) → nothing" none "" "$listed_on" lacks
-heal_case "container not running → nothing" none "$name" "[]" down
+heal_case "listed device replugged as another node → restart" restart "$name" "$listed_on" stale
+heal_case "server stopped, unlisted device → hardware.json + Quadlet, no restart" \
+    "rescan:rescan --no-render;render --no-restart" "$name" "[]" down
+heal_case "server stopped, listed device → nothing" none "$name" "$listed_on" down
+heal_case "operation.lock held → exit 75, nothing else" "exit:75" "$name" "[]" lacks held
 heal_case "no hardware.json → nothing" none "$name" none lacks
 
 # ── 4. Second run is idempotent ─────────────────────────────────────────────
