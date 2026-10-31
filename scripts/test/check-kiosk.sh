@@ -736,6 +736,7 @@ case "$*" in
         [[ ! -e "$STUB_STATE/lightdm-stopped" ]]; exit ;;
     "is-enabled signalk-kiosk.service") echo enabled ;;
     "is-active signalk-kiosk.service") echo active ;;
+    "is-active signalk-kiosk-screen.service") echo active ;;
     "stop signalk-kiosk-screen.service")
         if [[ -e "$STUB_STATE/screen-stop-fails" ]]; then
             exit 1
@@ -745,6 +746,19 @@ case "$*" in
         fi ;;
 esac
 exit 0
+EOF
+# status reads the browser's state: pgrep lists the pids in browser-pids
+# (exit 1 when there are none), ps prints the states in browser-stat.
+cat >"$ebin/pgrep" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+[[ -s "$STUB_STATE/browser-pids" ]] || exit 1
+cat "$STUB_STATE/browser-pids"
+EOF
+cat >"$ebin/ps" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+cat "$STUB_STATE/browser-stat" 2>/dev/null
 EOF
 cat >"$ebin/apt-get" <<'EOF'
 #!/bin/bash
@@ -1216,10 +1230,15 @@ for f in etc/systemd/system/signalk-kiosk-screen.service usr/local/lib/signalk-k
 done
 conf_has 'KIOSK_SCREEN_PAUSE=off' "conf: screen pause off"
 status_out=$(run_helper status 2>&1)
-if grep -qF 'browser keeps running' <<<"$status_out"; then
-    ok "status: the browser keeps running while the monitor is off"
+if grep -qF 'screen pause off: no screen watch pauses the browser' <<<"$status_out"; then
+    ok "status: screen pause off says no screen watch pauses the browser"
 else
-    miss "status screen-off line: $(grep 'screen off' <<<"$status_out")"
+    miss "status screen-pause line: $(grep 'screen pause' <<<"$status_out")"
+fi
+if grep -qE '^  browser now +not running$' <<<"$status_out"; then
+    ok "status: no browser process shows as not running"
+else
+    miss "status browser line: $(grep 'browser now' <<<"$status_out")"
 fi
 : >"$state/calls"
 mkdir -p "$root/var/lib/signalk-kiosk-screen"
@@ -1232,6 +1251,39 @@ else
     miss "re-enable kept the screen watch's memory"
 fi
 conf_has 'KIOSK_SCREEN_PAUSE=on' "conf: screen pause on again"
+printf '101\n102\n' >"$state/browser-pids"
+printf 'Sl\nSl\n' >"$state/browser-stat"
+status_out=$(run_helper status 2>&1)
+if grep -qF 'screen pause on, watch active: it pauses the browser while every monitor that answers DDC/CI is off' <<<"$status_out" \
+    && grep -qE '^  browser now +running$' <<<"$status_out"; then
+    ok "status: screen pause on with its watch's state, the browser running"
+else
+    miss "status with screen pause on: $(grep -E 'screen pause|browser now' <<<"$status_out")"
+fi
+printf 'Tl\nTl\n' >"$state/browser-stat"
+status_out=$(run_helper status 2>&1)
+if grep -qE '^  browser now +paused \(its processes are stopped\)$' <<<"$status_out"; then
+    ok "status: a stopped browser shows as paused"
+else
+    miss "status with a stopped browser: $(grep 'browser now' <<<"$status_out")"
+fi
+# A browser process started after the watch's STOP round runs until the next
+# round, beside the stopped ones.
+printf 'Sl\nTl\n' >"$state/browser-stat"
+status_out=$(run_helper status 2>&1)
+if grep -qE '^  browser now +partly paused \(1 of 2 processes stopped\)$' <<<"$status_out"; then
+    ok "status: one stopped browser process beside a running one shows as partly paused"
+else
+    miss "status with mixed browser states: $(grep 'browser now' <<<"$status_out")"
+fi
+printf 'Z\nZ\n' >"$state/browser-stat"
+status_out=$(run_helper status 2>&1)
+if grep -qE '^  browser now +not running$' <<<"$status_out"; then
+    ok "status: browser processes that are only zombies show as not running"
+else
+    miss "status with only zombie processes: $(grep 'browser now' <<<"$status_out")"
+fi
+rm -f "$state/browser-pids" "$state/browser-stat"
 mkdir -p "$root/var/lib/signalk-kiosk-screen"
 echo 'HDMI-A-1:0123456789abcdef' >"$root/var/lib/signalk-kiosk-screen/answered"
 : >"$state/screen-stop-fails"
