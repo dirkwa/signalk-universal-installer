@@ -1271,8 +1271,8 @@ fi
 # round, beside the stopped ones.
 printf 'Sl\nTl\n' >"$state/browser-stat"
 status_out=$(run_helper status 2>&1)
-if grep -qE '^  browser now +paused \(its processes are stopped\)$' <<<"$status_out"; then
-    ok "status: one stopped browser process beside a running one shows as paused"
+if grep -qE '^  browser now +partly paused \(1 of 2 processes stopped\)$' <<<"$status_out"; then
+    ok "status: one stopped browser process beside a running one shows as partly paused"
 else
     miss "status with mixed browser states: $(grep 'browser now' <<<"$status_out")"
 fi

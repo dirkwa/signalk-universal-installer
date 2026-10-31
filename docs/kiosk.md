@@ -77,7 +77,7 @@ The browser starts in dark mode (`--force-dark-mode`): it tells every page it pr
 
 ## Monitor off
 
-While the monitor is switched off, the kiosk pauses the browser, so it stops using CPU, and resumes it when the monitor comes back on. `enable` sets this up unless given `--no-screen-pause`; `signalk kiosk status` shows which (`screen pause`) and whether the browser is paused right now (`browser now`).
+While the monitor is switched off, the kiosk pauses the browser, so it stops using CPU, and resumes it when the monitor comes back on. `enable` sets this up unless given `--no-screen-pause`; `signalk kiosk status` shows which (`screen pause`) and whether the browser is paused right now (`browser now`: `running`, `paused`, `partly paused` when a browser process started after the watch paused the others, or `not running`).
 
 A monitor switched off with its power button often still tells the box it is connected, so the kiosk asks the monitor itself. `signalk-kiosk-screen.service` sends a DDC/CI request (the monitor control channel in the HDMI or DisplayPort cable) to every connected monitor every 5 seconds with `i2ctransfer`. A monitor that is on acknowledges it; one that is off does not. After three checks in a row in which every monitor that has answered before stays silent, or nothing is connected at all, the service stops the browser's processes with SIGSTOP; the first answer continues them with SIGCONT. A monitor that has never answered — one without DDC/CI — counts as on, so on such a monitor the browser keeps running. A monitor with no DDC bus (DSI panels, most touch displays) counts as on as well.
 

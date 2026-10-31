@@ -1663,9 +1663,10 @@ cmd_restart() {
 # stops it with SIGSTOP and finds it by user and name; these are the names of
 # its BROWSER_NAMES. A stopped process shows state T in ps. A zombie (Z), a
 # browser process that exited and is not yet reaped, keeps its name and is
-# not counted.
+# not counted. A process the browser starts after the watch stopped the others
+# runs until the watch's next round, so some can be stopped and some not.
 browser_state() {
-    local pids states=""
+    local pids states="" total stopped
     if ! command -v pgrep >/dev/null 2>&1 || ! command -v ps >/dev/null 2>&1; then
         echo "unknown (needs pgrep and ps)"
         return
@@ -1676,8 +1677,14 @@ browser_state() {
     fi
     if [[ -z "$states" ]]; then
         echo "not running"
-    elif grep -q '^T' <<<"$states"; then
+        return
+    fi
+    total=$(grep -c . <<<"$states")
+    stopped=$(grep -c '^T' <<<"$states") || true
+    if [[ "$stopped" -eq "$total" ]]; then
         echo "paused (its processes are stopped)"
+    elif [[ "$stopped" -gt 0 ]]; then
+        echo "partly paused ($stopped of $total processes stopped)"
     else
         echo "running"
     fi
