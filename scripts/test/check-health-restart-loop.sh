@@ -77,24 +77,24 @@ run_case() {
             mkdir -p "$QUADLET_DIR"
             export SIM_N="$n"
             # Every probe healthy — the [OK]-while-looping case.
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             health_probe() { printf 'ok 0.1\n'; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             pub_url() { printf '%s' "$1"; }
             # Answer NRestarts; everything else (Result, ExecMainStatus,
             # list-units) yields empty, as `show` does on a missing unit.
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             systemctl() {
                 case "$*" in
                     *NRestarts*) printf '%s\n' "$SIM_N" ;;
                     *) : ;;
                 esac
             }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             podman() { : ; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             timeout() { timeout_stub "$@"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             docker() { : ; }
             eval "$body"
             cmd_health
@@ -155,17 +155,17 @@ run_zero_case() {
             export SIGNALK_URL="http://stub" UPDATER_URL="http://stub" DOCTOR_URL="http://stub"
             unset XDG_RUNTIME_DIR
             mkdir -p "$QUADLET_DIR"
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             health_probe() { printf 'ok 0.1\n'; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             pub_url() { printf '%s' "$1"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             podman() { : ; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             timeout() { timeout_stub "$@"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             docker() { : ; }
             eval "$body"
             cmd_health
@@ -198,15 +198,15 @@ zero_reseeds_stamp() {
             export SIGNALK_URL="http://stub" UPDATER_URL="http://stub" DOCTOR_URL="http://stub"
             unset XDG_RUNTIME_DIR
             mkdir -p "$QUADLET_DIR"
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             health_probe() { printf 'ok 0.1\n'; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             pub_url() { printf '%s' "$1"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             podman() { : ; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             docker() { : ; }
             eval "$body"
             cmd_health
@@ -286,21 +286,21 @@ run_throw_case() {
             unset XDG_RUNTIME_DIR
             mkdir -p "$QUADLET_DIR"
             export SIM_LOG="$log"
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             health_probe() { printf 'ok 0.1\n'; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             pub_url() { printf '%s' "$1"; }
             # No restarts: this failure mode leaves NRestarts at 0, which is
             # the whole point — the restart check must stay silent.
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             podman() { case "$*" in logs*) printf '%s\n' "$SIM_LOG" ;; *) : ;; esac; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             timeout() { timeout_stub "$@"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             docker() { : ; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             signalk_all_containers() { : ; }
             eval "$body"
             cmd_health
@@ -397,26 +397,26 @@ scan_fails_case() {
             unset XDG_RUNTIME_DIR
             mkdir -p "$QUADLET_DIR"
             export SIM_RC="$rc" SIM_MSG="$msg"
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             health_probe() { printf 'ok 0.1\n'; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             pub_url() { printf '%s' "$1"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             systemctl() { case "$*" in *NRestarts*) printf '0\n' ;; *) : ;; esac; }
             # A wedged runtime (no output) or a podman error message, then a
             # non-zero status.
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             podman() {
                 case "$*" in
                     logs*) [[ -n "$SIM_MSG" ]] && printf '%s\n' "$SIM_MSG" >&2; return "$SIM_RC" ;;
                     *) : ;;
                 esac
             }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             timeout() { timeout_stub "$@"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             docker() { : ; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             signalk_all_containers() { : ; }
             eval "$body"
             cmd_health
@@ -469,11 +469,11 @@ start_error_case() {
             unset XDG_RUNTIME_DIR
             mkdir -p "$QUADLET_DIR"
             export SIM_PROBE="$probe" SIM_JOURNAL="$journal"
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             health_probe() { printf '%s 0.1\n' "$SIM_PROBE"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             pub_url() { printf '%s' "$1"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             systemctl() {
                 case "$*" in
                     *NRestarts*) printf '0\n' ;;
@@ -482,7 +482,7 @@ start_error_case() {
                     *) : ;;
                 esac
             }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             journalctl() {
                 [[ "$SIM_JOURNAL" == empty ]] && return 0
                 case " $* " in
@@ -501,13 +501,13 @@ start_error_case() {
                         ;;
                 esac
             }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             podman() { case "$*" in logs*) return 125 ;; *) : ;; esac; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             timeout() { timeout_stub "$@"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             docker() { : ; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             signalk_all_containers() { : ; }
             eval "$body"
             cmd_health

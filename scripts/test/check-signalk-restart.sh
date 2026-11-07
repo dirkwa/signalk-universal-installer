@@ -114,7 +114,7 @@ run_case() {
             # fallback restart — record it so the caller can assert on it.
             # SC2317: these stubs are called from the eval'd cmd_restart below,
             # which shellcheck cannot see, so it reads them as unreachable.
-            # shellcheck disable=SC2317
+            # shellcheck disable=SC2317,SC2329
             systemctl() {
                 if [[ "${2:-}" == "is-active" ]]; then
                     [[ "$SIM_ACTIVE" == yes ]]
@@ -125,7 +125,7 @@ run_case() {
             }
             # Print the status like -w does, THEN exit with the simulated
             # status — both halves, exactly as real curl behaves.
-            # shellcheck disable=SC2317  # called from the eval'd cmd_restart
+            # shellcheck disable=SC2317,SC2329  # called from the eval'd cmd_restart
             curl() { printf '%s' "$SIM_HTTP"; return "$SIM_CURL_RC"; }
             eval "$body"
             cmd_restart

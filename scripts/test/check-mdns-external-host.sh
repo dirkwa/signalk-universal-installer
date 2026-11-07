@@ -57,7 +57,7 @@ if [[ -z "$block" ]]; then
 else
     # The assignments below feed the eval'd block, and info() is called by
     # it - shellcheck cannot see through eval, hence the disables.
-    # shellcheck disable=SC2034,SC2317
+    # shellcheck disable=SC2034,SC2317,SC2329
     resolve() {
         (
             set +u
