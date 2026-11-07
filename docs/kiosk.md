@@ -110,7 +110,7 @@ signalk-kiosk: closed the black tab
 
 The launcher talks to the browser over Chromium's DevTools pipe (`--remote-debugging-pipe`, file descriptors 3 and 4), not a DevTools port. A port on 127.0.0.1 would let every local user, and every container on the host network such as the Signal K server and its plugins, control a browser that is signed in as the kiosk's Signal K user. The pipe runs through two FIFOs that the launcher removes as soon as it has opened them; after that only processes of the `signalk-kiosk` user can reach them, through `/proc/<pid>/fd`. With the pipe, Chromium reports `navigator.webdriver` as true to every page, and some sites with bot protection then show a challenge page; `--disable-blink-features=AutomationControlled` keeps it false.
 
-`stall_fixed_in` in the launcher is empty while the bug is open. Once a Chromium release fixes it, setting it to that major version makes the launcher start that version and later ones without the pipe and the watch. A kiosk gets the new launcher from the next `signalk kiosk enable`, which starts from its defaults (see [Several monitors](#several-monitors)).
+`stall_fixed_in` in the launcher is empty while the bug is open. Once a Chromium release fixes it, setting it to that major version makes the launcher start that version and later ones without the pipe and the watch. `signalk kiosk enable` writes the launcher from the installed `~/.local/bin/signalk-kiosk`, so an existing kiosk gets a new launcher from `signalk update`, which installs the current helper (if it reports `signalk-kiosk mount-missing`, see the top of this page), followed by `signalk kiosk enable`, which starts from its defaults (see [Several monitors](#several-monitors)).
 
 ## Touchscreens
 
