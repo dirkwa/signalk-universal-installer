@@ -812,10 +812,11 @@ chmod +x "$sbin/sleep" "$lbin/cdpbrowser"
 sed "s|^KIOSK_BROWSER=.*|KIOSK_BROWSER=$lbin/cdpbrowser|" "$tmp/kiosk.conf" >"$tmp/kiosk-cdp.conf"
 : >"$tmp/server-up"
 
-# run_watch <count>x<percent>...: the launcher on the fake /proc, with thread
-# 101 at <percent> for <count> rounds, then the next pair. The first round only
-# gives the watch its starting ticks. WLAUNCHER runs another launcher.
-run_watch() {
+# run_stall_watch <count>x<percent>...: the launcher on the fake /proc, with
+# thread 101 at <percent> for <count> rounds, then the next pair. The first
+# round only gives the watch its starting ticks. WLAUNCHER runs another
+# launcher.
+run_stall_watch() {
     local spec i
     for spec in "$@"; do
         for (( i = 0; i < ${spec%x*}; i++ )); do echo "${spec#*x}"; done
@@ -834,7 +835,7 @@ hides() { grep -c '^Target.createTarget' "$tmp/cdp-log" 2>/dev/null || true; }
 full_hide="Target.createTarget Target.getTargets Target.closeTarget Target.activateTarget "
 
 # The sample that spans the hide is still at 60%; the one after it decides.
-run_watch 21x60 1x60 1x5
+run_stall_watch 21x60 1x60 1x5
 if [[ "$(methods)" == "$full_hide" ]]; then
     ok "Compositor thread at 60% for 10 minutes: a new tab over the page, closed again, the page shown"
 else
@@ -854,7 +855,7 @@ else
     miss "after a reset: $(cat "$tmp/stall-stderr" "$tmp/stall-events" 2>/dev/null)"
 fi
 
-run_watch 23x60
+run_stall_watch 23x60
 if [[ "$(methods)" == "$full_hide" ]] \
     && grep -q 'still 60%: another cause, next check in 6h' "$tmp/stall-stderr" \
     && grep -qx backoff "$tmp/stall-events" 2>/dev/null; then
@@ -865,28 +866,28 @@ fi
 
 # Thread 101 runs at 60% through the 6h wait. Counted against one 30s step,
 # those ticks would bring the next 10-minute average far over 25%.
-run_watch 23x60 22x5
+run_stall_watch 23x60 22x5
 if [[ "$(hides)" == 1 && "$(grep -c backoff "$tmp/stall-events" 2>/dev/null)" == 1 ]]; then
     ok "after the 6h wait the samples start afresh: no second hide at 5%"
 else
     miss "after the backoff: $(hides) hides, $(cat "$tmp/stall-events" 2>/dev/null)"
 fi
 
-run_watch 30x10
+run_stall_watch 30x10
 if [[ ! -s "$tmp/cdp-log" && ! -s "$tmp/stall-stderr" ]]; then
     ok "Compositor thread at 10%, and other threads at a full core: nothing happens"
 else
     miss "hid the page at 10%: $(methods) $(cat "$tmp/stall-stderr")"
 fi
 
-run_watch 1x10 10x40 15x5
+run_stall_watch 1x10 10x40 15x5
 if [[ ! -s "$tmp/cdp-log" ]]; then
     ok "5 minutes at 40% in a 10-minute window averaging 22%: nothing happens"
 else
     miss "hid the page on a 5-minute peak: $(methods)"
 fi
 
-run_watch 1x10 10x40 10x15
+run_stall_watch 1x10 10x40 10x15
 if [[ "$(hides)" == 1 ]]; then
     ok "10 minutes averaging 27%, half of them at 15%: the page is hidden"
 else
@@ -894,7 +895,7 @@ else
 fi
 
 : >"$tmp/stall-paused"
-run_watch 30x60
+run_stall_watch 30x60
 if [[ ! -s "$tmp/cdp-log" ]]; then
     ok "browser stopped by the screen watch: no DevTools command"
 else
@@ -906,7 +907,7 @@ find "$fproc" -mindepth 1 -maxdepth 1 ! -name 100 ! -name 200 -exec rm -rf {} +
 # The screen watch stops the browser right as it opens the black tab: the
 # launcher waits until the browser runs again before it lists the targets.
 : >"$tmp/stall-pause-on-create"
-run_watch 21x60 1x60 1x5
+run_stall_watch 21x60 1x60 1x5
 if [[ "$(methods)" == "Target.createTarget wait wait wait Target.getTargets Target.closeTarget Target.activateTarget " ]] \
     && grep -q 'now 5% (frame metrics reset' "$tmp/stall-stderr"; then
     ok "browser paused in the middle of a hide: the black tab is closed once it runs again"
@@ -919,7 +920,7 @@ find "$fproc" -mindepth 1 -maxdepth 1 ! -name 100 ! -name 200 -exec rm -rf {} +
 # getTargets after the black tab opened gets no reply: the tab stays open,
 # and the next sample closes it.
 : >"$tmp/stall-mute"
-run_watch 21x60 3x5
+run_stall_watch 21x60 3x5
 if [[ "$(methods)" == "Target.createTarget Target.getTargets Target.getTargets Target.closeTarget Target.activateTarget " ]] \
     && ! [[ -e "$tmp/cdp-tab" ]] \
     && grep -q 'the black tab may still be open: closing it at every sample' "$tmp/stall-stderr" \
@@ -931,7 +932,7 @@ fi
 rm -f "$tmp/stall-mute"
 
 : >"$tmp/stall-twopages"
-run_watch 21x60 1x60 1x5
+run_stall_watch 21x60 1x60 1x5
 if [[ "$(methods)" == "Target.createTarget Target.getTargets Target.closeTarget " ]] \
     && grep -q 'now 5% (frame metrics reset' "$tmp/stall-stderr"; then
     ok "two pages: the black tab is closed and neither page is activated"
@@ -944,7 +945,7 @@ rm -f "$tmp/stall-twopages"
 # getTargets reply, which arrives in two parts 1.5s apart: the late reply is
 # skipped by its id, the split one is put together, and the black tab closed.
 : >"$tmp/stall-noreply"
-run_watch 21x60 2x5
+run_stall_watch 21x60 2x5
 if [[ "$(methods)" == "$full_hide" ]] && ! [[ -e "$tmp/cdp-tab" ]] \
     && grep -q 'hiding the page failed, next try in 6h' "$tmp/stall-stderr"; then
     ok "no reply to createTarget: the black tab is closed anyway and the page shown, logged as failed"
@@ -956,7 +957,7 @@ rm -f "$tmp/stall-noreply"
 # The browser stub exits at the end of the plan while the watch sleeps (20s
 # in the stub): the launcher stops that sleep and exits with the browser.
 started=$SECONDS
-run_watch 3x10
+run_stall_watch 3x10
 if (( SECONDS - started < 10 )); then
     ok "the launcher exits with the browser, without waiting for the watch's sleep"
 else
@@ -967,13 +968,13 @@ for v in 150 160; do
     sed "s/^stall_fixed_in=\$/stall_fixed_in=$v/" "$launcher" >"$tmp/launcher-fixed-$v"
     chmod +x "$tmp/launcher-fixed-$v"
 done
-WLAUNCHER="$tmp/launcher-fixed-150" run_watch 1x10
+WLAUNCHER="$tmp/launcher-fixed-150" run_stall_watch 1x10
 if [[ -s "$tmp/browser-args" ]] && ! grep -q -- --remote-debugging-pipe "$tmp/browser-args"; then
     ok "browser 155, fixed in 150: started without the pipe"
 else
     miss "fixed version: $(tr '\n' ' ' <"$tmp/browser-args" 2>/dev/null)"
 fi
-WLAUNCHER="$tmp/launcher-fixed-160" run_watch 1x10
+WLAUNCHER="$tmp/launcher-fixed-160" run_stall_watch 1x10
 if grep -qx -- --remote-debugging-pipe "$tmp/browser-args" 2>/dev/null; then
     ok "browser 155, fixed in 160: started with the pipe"
 else
