@@ -30,7 +30,7 @@ tmp=$(mktemp -d)
 HELPER_ABS="$(cd "$(dirname "$HELPER")" && pwd)/$(basename "$HELPER")"
 
 # Invoked via trap; shellcheck cannot see that call, hence SC2317.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 cleanup() {
     local wt
     # Drop any worktree this test added before removing its directory.

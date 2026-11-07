@@ -224,13 +224,17 @@ fi
 #    waits for it — so the guard must use -k. The stub below ignores SIGTERM
 #    for exactly that reason; do NOT simplify it to a bare `sleep`, which
 #    dies on SIGTERM and would make this pass with no guard at all (the same
-#    trap documented in check-podman-timeout-guards.sh).
+#    trap documented in check-podman-timeout-guards.sh). It sleeps in 1s
+#    steps, as the stubs there do: the KILL reaches the stub, not
+#    necessarily its children (Ubuntu 26.04's uutils timeout signals only
+#    the command), and a `sleep 300` child would keep the output pipe open
+#    for 300s after the stub itself was killed.
 if command -v timeout >/dev/null 2>&1; then
     mkdir -p "$workdir/wedged"
     cat >"$workdir/wedged/podman" <<'STUB'
 #!/usr/bin/env bash
 trap '' TERM
-sleep 300
+i=0; while [ $i -lt 300 ]; do sleep 1; i=$((i+1)); done
 STUB
     chmod +x "$workdir/wedged/podman"
     start=$(date +%s)
