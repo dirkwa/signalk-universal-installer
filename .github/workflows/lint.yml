@@ -103,6 +103,9 @@ jobs:
       - name: bug-report container discovery
         run: bash scripts/test/check-bug-report-containers.sh
 
+      - name: install from stdin
+        run: bash scripts/test/check-install-stdin.sh
+
       - name: journald drop-in idempotency
         run: bash scripts/test/check-journald-idempotent.sh
 
