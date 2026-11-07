@@ -19,6 +19,15 @@
 #      starts the browser anyway once the wait runs out, and with token sign-in
 #      starts it on a private start page instead of passing the token on the
 #      command line.
+#      The frame-metrics watch, run against a fake /proc and a browser stub
+#      that answers DevTools commands on fds 3 and 4: hides the page behind a
+#      black tab when the busiest Compositor thread averages 25% of a core over
+#      10 minutes, closes that tab even when the reply to opening it is lost,
+#      after a pause in the middle, and at the next sample when closing it got
+#      no reply, waits 6 hours when the hide does not halve the load and starts
+#      its samples afresh after that, ignores other threads and shorter peaks,
+#      starts no hide while the browser is paused, and starts the browser
+#      without the pipe from the version that has the Chromium bug fixed.
 #   5. enable/disable end to end in a temp root, with every system command and
 #      the Signal K server stubbed: packages, the kiosk's Signal K user and its
 #      token, signalk-autologin installed or switched to token sign-in only, the
@@ -58,7 +67,7 @@ sysbin="$tmp/sysbin"
 mkdir -p "$sysbin"
 for t in bash sh cat sed grep head tail tr od mktemp rm rmdir install mkdir \
          readlink basename dirname env jq printf sort uname cut wc touch chmod ln sha256sum \
-         sleep; do
+         sleep mkfifo getconf; do
     real=$(command -v "$t") || { echo "[ERR] test needs $t" >&2; exit 2; }
     ln -s "$real" "$sysbin/$t"
 done
@@ -674,6 +683,302 @@ else
     miss "plain redirect: last arg $(tail -1 "$tmp/browser-args" 2>/dev/null)"
 fi
 rm -f "$tmp/redirect-http"
+
+# ── 4a. frame-metrics watch ───────────────────────────────────────────────
+echo "frame-metrics watch"
+run_launcher "$tmp/dev/noinput" 2
+args=$(cat "$tmp/browser-args" 2>/dev/null || true)
+for f in --remote-debugging-pipe --disable-blink-features=AutomationControlled; do
+    if grep -qx -- "$f" <<<"$args"; then
+        ok "browser started with $f"
+    else
+        miss "no $f: $(tr '\n' ' ' <<<"$args")"
+    fi
+done
+
+# A fake /proc: renderer 100 with a Compositor thread (101) and a main thread
+# (102), and GPU process 200 whose thread 201 is also called Compositor. The
+# watch must count 101 only.
+fproc="$tmp/proc"
+mkdir -p "$fproc/100/task/101" "$fproc/100/task/102" "$fproc/200/task/201"
+printf 'chromium\0--type=renderer\0--lang=en-GB\0' >"$fproc/100/cmdline"
+printf 'chromium\0--type=gpu-process\0' >"$fproc/200/cmdline"
+echo Compositor >"$fproc/100/task/101/comm"
+echo CrRendererMain >"$fproc/100/task/102/comm"
+echo Compositor >"$fproc/200/task/201/comm"
+# The watch's 30s sleep is one round: thread 101 runs line <round> of
+# $tmp/stall-plan percent of a core (3000 ticks at 100 per second are 100%),
+# 102 and 201 a full core. An empty line ends the run. The 6h backoff is
+# recorded, and thread 101 runs at the current line's percentage through it.
+# The launcher's 5s wait for a paused browser is logged as "wait", and the
+# third one resumes the browser. The sleep at the end of the plan really
+# sleeps, 20s, so a launcher that does not stop its watch's sleep is slow to
+# exit.
+sbin="$tmp/sbin"
+mkdir -p "$sbin"
+realsleep=$(readlink "$sysbin/sleep")
+cat >"$sbin/sleep" <<EOF
+#!/bin/bash
+stat() { printf '%s (%s) S 1 1 1 0 -1 0 0 0 0 0 %s 0 0 0 20 0\n' "\$1" "\$2" "\$3"; }
+r=\$(cat "$tmp/stall-round")
+case "\$1" in
+30)
+    r=\$(( r + 1 ))
+    echo "\$r" >"$tmp/stall-round"
+    pct=\$(sed -n "\${r}p" "$tmp/stall-plan")
+    # The end of the plan: the browser stub exits, and this sleep runs on
+    # until the launcher's TERM to the watch stops it.
+    if [[ -z "\$pct" ]]; then : >"$tmp/stall-done"; exec "$realsleep" 20; fi
+    t=\$(( \$(cat "$tmp/stall-ticks") + pct * 30 ))
+    stat 102 CrRendererMain "\$(( r * 3000 ))" >"$fproc/100/task/102/stat"
+    stat 201 Compositor "\$(( r * 3000 ))" >"$fproc/200/task/201/stat"
+    ;;
+21600)
+    echo backoff >>"$tmp/stall-events"
+    t=\$(( \$(cat "$tmp/stall-ticks") + \$(sed -n "\${r}p" "$tmp/stall-plan") * 21600 ))
+    ;;
+5)
+    # The launcher's wait for a paused browser: the third one resumes it.
+    echo wait >>"$tmp/cdp-log"
+    if (( \$(grep -c '^wait' "$tmp/cdp-log") >= 3 )); then rm -f "$fproc/\$(cat "$tmp/cdp-pid")/stat"; fi
+    exit 0 ;;
+*) exit 0 ;;
+esac
+echo "\$t" >"$tmp/stall-ticks"
+stat 101 Compositor "\$t" >"$fproc/100/task/101/stat"
+exit 0
+EOF
+# Answers DevTools commands on fd 3 with replies on fd 4, as Chromium does
+# with --remote-debugging-pipe, and logs each "<method> <params>". The tab
+# createTarget opens is listed by getTargets until closeTarget. With
+# $tmp/stall-paused it writes a stopped state for itself into the fake /proc
+# at start, as the screen watch's SIGSTOP leaves it, and with
+# $tmp/stall-pause-on-create when it gets createTarget. $tmp/stall-twopages
+# lists a second page, and $tmp/stall-mute leaves the first getTargets
+# unanswered. $tmp/stall-noreply opens the tab without answering
+# createTarget, sends that reply late, right before the next getTargets
+# reply, and splits that one into two writes 1.5s apart. A read that times
+# out keeps its part of a message for the next one.
+cat >"$lbin/cdpbrowser" <<EOF
+#!/bin/bash
+if [[ "\$1" == --version ]]; then echo "Chromium 155.0.8059.79 built on Debian"; exit 0; fi
+printf '%s\n' "\$@" >"$tmp/browser-args"
+echo "\$\$" >"$tmp/cdp-pid"
+stopped() { mkdir -p "$fproc/\$\$"; printf '%s (chromium) T 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0\n' "\$\$" >"$fproc/\$\$/stat"; }
+[[ -e "$tmp/stall-paused" ]] && stopped
+[[ " \$* " == *" --remote-debugging-pipe "* ]] || exit 0
+buf=
+until [[ -e "$tmp/stall-done" ]]; do
+    IFS= read -r -d '' -t 1 part <&3
+    rc=\$?
+    buf+=\$part
+    (( rc == 0 )) || continue
+    msg=\$buf
+    buf=
+    method=\$(jq -r .method <<<"\$msg")
+    echo "\$method \$(jq -c .params <<<"\$msg")" >>"$tmp/cdp-log"
+    case "\$method" in
+    Target.getTargets)
+        if [[ -e "$tmp/stall-mute" ]]; then rm -f "$tmp/stall-mute"; continue; fi
+        if [[ -n "\${late:-}" ]]; then printf '%s\0' "\$late" >&4; late=; split=1; fi
+        infos='{"targetId":"UI","type":"browser_ui","url":"chrome://omnibox-popup.top-chrome/"}'
+        infos+=',{"targetId":"PAGE","type":"page","url":"http://127.0.0.1:80/@signalk/app-dock/"}'
+        [[ -e "$tmp/stall-twopages" ]] && infos+=',{"targetId":"PAGE2","type":"page","url":"http://127.0.0.1:80/other/"}'
+        [[ -e "$tmp/cdp-tab" ]] && infos+=",\$(cat "$tmp/cdp-tab")"
+        result="{\"targetInfos\":[\$infos]}" ;;
+    Target.createTarget)
+        jq -c '{targetId: "BLANK", type: "page", url: .params.url}' <<<"\$msg" >"$tmp/cdp-tab"
+        [[ -e "$tmp/stall-pause-on-create" ]] && stopped
+        if [[ -e "$tmp/stall-noreply" ]]; then
+            late="{\"id\":\$(jq -r .id <<<"\$msg"),\"result\":{\"targetId\":\"BLANK\"}}"
+            continue
+        fi
+        result='{"targetId":"BLANK"}' ;;
+    Target.closeTarget) rm -f "$tmp/cdp-tab"; result='{"success":true}' ;;
+    *) result='{}' ;;
+    esac
+    reply=\$(printf '{"id":%s,"result":%s}' "\$(jq -r .id <<<"\$msg")" "\$result")
+    if [[ -n "\${split:-}" ]]; then
+        printf '%s' "\${reply:0:20}" >&4
+        "$realsleep" 1.5
+        printf '%s\0' "\${reply:20}" >&4
+        split=
+    else
+        printf '%s\0' "\$reply" >&4
+    fi
+done
+EOF
+chmod +x "$sbin/sleep" "$lbin/cdpbrowser"
+sed "s|^KIOSK_BROWSER=.*|KIOSK_BROWSER=$lbin/cdpbrowser|" "$tmp/kiosk.conf" >"$tmp/kiosk-cdp.conf"
+: >"$tmp/server-up"
+
+# run_watch <count>x<percent>...: the launcher on the fake /proc, with thread
+# 101 at <percent> for <count> rounds, then the next pair. The first round only
+# gives the watch its starting ticks. WLAUNCHER runs another launcher.
+run_watch() {
+    local spec i
+    for spec in "$@"; do
+        for (( i = 0; i < ${spec%x*}; i++ )); do echo "${spec#*x}"; done
+    done >"$tmp/stall-plan"
+    echo 0 >"$tmp/stall-round"
+    echo 0 >"$tmp/stall-ticks"
+    rm -f "$tmp/stall-done" "$tmp/stall-events" "$tmp/cdp-log" "$tmp/cdp-tab" "$tmp/cdp-pid" "$tmp/browser-args"
+    timeout 90 env PATH="$sbin:$lbin:$sysbin" HOME="$tmp" KIOSK_CONF="$tmp/kiosk-cdp.conf" \
+        KIOSK_TOKEN_FILE="$tmp/kiosk.token" KIOSK_PROFILE="$profile" KIOSK_SYSFS="$sysfs" \
+        KIOSK_DEV_INPUT="$tmp/dev/noinput" KIOSK_WAIT_STEP=2 KIOSK_STALL_STEP=30 \
+        KIOSK_PROC="$fproc" "${WLAUNCHER:-$launcher}" 2>"$tmp/stall-stderr" \
+        || echo "launcher exited with $?" >>"$tmp/stall-stderr"
+}
+methods() { cut -d' ' -f1 "$tmp/cdp-log" 2>/dev/null | tr '\n' ' '; }
+hides() { grep -c '^Target.createTarget' "$tmp/cdp-log" 2>/dev/null || true; }
+full_hide="Target.createTarget Target.getTargets Target.closeTarget Target.activateTarget "
+
+# The sample that spans the hide is still at 60%; the one after it decides.
+run_watch 21x60 1x60 1x5
+if [[ "$(methods)" == "$full_hide" ]]; then
+    ok "Compositor thread at 60% for 10 minutes: a new tab over the page, closed again, the page shown"
+else
+    miss "DevTools commands: $(methods)"
+fi
+if grep -qx 'Target.createTarget {"url":"data:text/html,<meta name=color-scheme content=dark><title>signalk-kiosk-hide</title><body style=background:black>"}' "$tmp/cdp-log" \
+    && grep -qx 'Target.closeTarget {"targetId":"BLANK"}' "$tmp/cdp-log" \
+    && grep -qx 'Target.activateTarget {"targetId":"PAGE"}' "$tmp/cdp-log"; then
+    ok "the new tab is black with no # in its URL, closed by its id, and the page (not the browser UI) is activated"
+else
+    miss "DevTools params: $(cat "$tmp/cdp-log" 2>/dev/null)"
+fi
+if grep -q 'at 60% of a core; hid the page for 0.2s, now 5% (frame metrics reset' "$tmp/stall-stderr" \
+    && [[ "$(wc -l <"$tmp/stall-stderr")" -eq 1 && ! -e "$tmp/stall-events" ]]; then
+    ok "the thread at 5% a minute after the hide: one line logs the reset, no backoff"
+else
+    miss "after a reset: $(cat "$tmp/stall-stderr" "$tmp/stall-events" 2>/dev/null)"
+fi
+
+run_watch 23x60
+if [[ "$(methods)" == "$full_hide" ]] \
+    && grep -q 'still 60%: another cause, next check in 6h' "$tmp/stall-stderr" \
+    && grep -qx backoff "$tmp/stall-events" 2>/dev/null; then
+    ok "the thread stays at 60% after the hide: logged as another cause, the watch waits 6h"
+else
+    miss "no effect: $(methods) / $(cat "$tmp/stall-stderr" "$tmp/stall-events" 2>/dev/null)"
+fi
+
+# Thread 101 runs at 60% through the 6h wait. Counted against one 30s step,
+# those ticks would bring the next 10-minute average far over 25%.
+run_watch 23x60 22x5
+if [[ "$(hides)" == 1 && "$(grep -c backoff "$tmp/stall-events" 2>/dev/null)" == 1 ]]; then
+    ok "after the 6h wait the samples start afresh: no second hide at 5%"
+else
+    miss "after the backoff: $(hides) hides, $(cat "$tmp/stall-events" 2>/dev/null)"
+fi
+
+run_watch 30x10
+if [[ ! -s "$tmp/cdp-log" && ! -s "$tmp/stall-stderr" ]]; then
+    ok "Compositor thread at 10%, and other threads at a full core: nothing happens"
+else
+    miss "hid the page at 10%: $(methods) $(cat "$tmp/stall-stderr")"
+fi
+
+run_watch 1x10 10x40 15x5
+if [[ ! -s "$tmp/cdp-log" ]]; then
+    ok "5 minutes at 40% in a 10-minute window averaging 22%: nothing happens"
+else
+    miss "hid the page on a 5-minute peak: $(methods)"
+fi
+
+run_watch 1x10 10x40 10x15
+if [[ "$(hides)" == 1 ]]; then
+    ok "10 minutes averaging 27%, half of them at 15%: the page is hidden"
+else
+    miss "no hide at a 27% average: $(methods)"
+fi
+
+: >"$tmp/stall-paused"
+run_watch 30x60
+if [[ ! -s "$tmp/cdp-log" ]]; then
+    ok "browser stopped by the screen watch: no DevTools command"
+else
+    miss "sent DevTools commands to a stopped browser: $(methods)"
+fi
+rm -f "$tmp/stall-paused"
+find "$fproc" -mindepth 1 -maxdepth 1 ! -name 100 ! -name 200 -exec rm -rf {} +
+
+# The screen watch stops the browser right as it opens the black tab: the
+# launcher waits until the browser runs again before it lists the targets.
+: >"$tmp/stall-pause-on-create"
+run_watch 21x60 1x60 1x5
+if [[ "$(methods)" == "Target.createTarget wait wait wait Target.getTargets Target.closeTarget Target.activateTarget " ]] \
+    && grep -q 'now 5% (frame metrics reset' "$tmp/stall-stderr"; then
+    ok "browser paused in the middle of a hide: the black tab is closed once it runs again"
+else
+    miss "paused during the hide: $(methods) / $(cat "$tmp/stall-stderr")"
+fi
+rm -f "$tmp/stall-pause-on-create"
+find "$fproc" -mindepth 1 -maxdepth 1 ! -name 100 ! -name 200 -exec rm -rf {} +
+
+# getTargets after the black tab opened gets no reply: the tab stays open,
+# and the next sample closes it.
+: >"$tmp/stall-mute"
+run_watch 21x60 3x5
+if [[ "$(methods)" == "Target.createTarget Target.getTargets Target.getTargets Target.closeTarget Target.activateTarget " ]] \
+    && ! [[ -e "$tmp/cdp-tab" ]] \
+    && grep -q 'the black tab may still be open: closing it at every sample' "$tmp/stall-stderr" \
+    && grep -q 'closed the black tab' "$tmp/stall-stderr" && ! [[ -e "$tmp/stall-events" ]]; then
+    ok "no reply while closing the black tab: the next sample closes it, without the 6h wait"
+else
+    miss "black tab left: $(methods) / tab left: $([[ -e "$tmp/cdp-tab" ]] && echo yes || echo no) / $(cat "$tmp/stall-stderr")"
+fi
+rm -f "$tmp/stall-mute"
+
+: >"$tmp/stall-twopages"
+run_watch 21x60 1x60 1x5
+if [[ "$(methods)" == "Target.createTarget Target.getTargets Target.closeTarget " ]] \
+    && grep -q 'now 5% (frame metrics reset' "$tmp/stall-stderr"; then
+    ok "two pages: the black tab is closed and neither page is activated"
+else
+    miss "two pages: $(methods) / $(cat "$tmp/stall-stderr")"
+fi
+rm -f "$tmp/stall-twopages"
+
+# createTarget's reply comes only after the 15s wait for it, right before the
+# getTargets reply, which arrives in two parts 1.5s apart: the late reply is
+# skipped by its id, the split one is put together, and the black tab closed.
+: >"$tmp/stall-noreply"
+run_watch 21x60 2x5
+if [[ "$(methods)" == "$full_hide" ]] && ! [[ -e "$tmp/cdp-tab" ]] \
+    && grep -q 'hiding the page failed, next try in 6h' "$tmp/stall-stderr"; then
+    ok "no reply to createTarget: the black tab is closed anyway and the page shown, logged as failed"
+else
+    miss "no reply: $(methods) / tab left: $([[ -e "$tmp/cdp-tab" ]] && echo yes || echo no) / $(cat "$tmp/stall-stderr")"
+fi
+rm -f "$tmp/stall-noreply"
+
+# The browser stub exits at the end of the plan while the watch sleeps (20s
+# in the stub): the launcher stops that sleep and exits with the browser.
+started=$SECONDS
+run_watch 3x10
+if (( SECONDS - started < 10 )); then
+    ok "the launcher exits with the browser, without waiting for the watch's sleep"
+else
+    miss "launcher took $(( SECONDS - started ))s to exit after the browser"
+fi
+
+for v in 150 160; do
+    sed "s/^stall_fixed_in=\$/stall_fixed_in=$v/" "$launcher" >"$tmp/launcher-fixed-$v"
+    chmod +x "$tmp/launcher-fixed-$v"
+done
+WLAUNCHER="$tmp/launcher-fixed-150" run_watch 1x10
+if [[ -s "$tmp/browser-args" ]] && ! grep -q -- --remote-debugging-pipe "$tmp/browser-args"; then
+    ok "browser 155, fixed in 150: started without the pipe"
+else
+    miss "fixed version: $(tr '\n' ' ' <"$tmp/browser-args" 2>/dev/null)"
+fi
+WLAUNCHER="$tmp/launcher-fixed-160" run_watch 1x10
+if grep -qx -- --remote-debugging-pipe "$tmp/browser-args" 2>/dev/null; then
+    ok "browser 155, fixed in 160: started with the pipe"
+else
+    miss "unfixed version: $(tr '\n' ' ' <"$tmp/browser-args" 2>/dev/null)"
+fi
 
 # ── 5. enable / disable end to end ────────────────────────────────────────
 echo "enable / disable"

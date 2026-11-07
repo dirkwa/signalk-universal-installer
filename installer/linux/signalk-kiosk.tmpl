@@ -546,7 +546,268 @@ if [[ "$signin" == token && -r "$TOKEN_FILE" ]]; then
     )
     start="file://${start_page}"
 fi
-exec "$browser" "${flags[@]}" "$start"
+
+# Chromium's frame metrics can stop flushing for good
+# (https://issues.chromium.org/issues/582381751): once one frame's
+# presentation is acknowledged more than 300 frames late, a renderer's
+# cc::FrameSorter never reports a sorted frame again, and every animation the
+# page starts and stops leaves a frame tracker that the renderer's Compositor
+# thread walks on every frame. On a chart plotter that thread grows from a few
+# percent of a core to most of one within hours. Hiding the page resets the
+# sorter, and a kiosk never hides its page, so the launcher does it. Every
+# stall_step seconds it takes the CPU use of the busiest Compositor thread
+# among the browser's renderers; when those samples average stall_limit
+# percent of a core or more over stall_window samples, it opens a black tab
+# over the page for 0.2s and closes it again. It talks to the browser over
+# its DevTools pipe (fds 3 and 4, on FIFOs removed once both ends are open),
+# which only processes of the kiosk user can reach, through /proc/<pid>/fd; a
+# DevTools port would be open to every local user and to every container on
+# the host network, the Signal K server included.
+#
+# stall_fixed_in is the first browser major version with that bug fixed;
+# empty while it is open. From that version on the browser starts as before,
+# without the pipe and the watch.
+stall_fixed_in=
+stall_step="${KIOSK_STALL_STEP:-30}"
+stall_window=20
+stall_limit=25
+# After a hide that did not at least halve the Compositor thread's CPU, the
+# load is not this bug; the watch waits 6 hours before it looks again.
+stall_backoff=21600
+proc="${KIOSK_PROC:-/proc}"
+
+if [[ -n "$stall_fixed_in" ]]; then
+    major=$("$browser" --version 2>/dev/null | grep -o '[0-9]\+' | head -1)
+    if (( ${major:-0} >= stall_fixed_in )); then
+        exec "$browser" "${flags[@]}" "$start"
+    fi
+fi
+
+# Ticks the Compositor thread of each of this user's renderers has run, one
+# "<tid> <ticks>" line each. Only builtins per process: the watch runs every
+# stall_step seconds for as long as the kiosk runs. A process can exit between
+# the glob and the read, so 2>/dev/null comes before each < redirection, which
+# bash would otherwise report before it reaches the 2>.
+compositor_ticks() {
+    local p t comm stat
+    local -a args fields
+    for p in "$proc"/[0-9]*; do
+        [[ -O "$p" ]] || continue
+        mapfile -d '' args 2>/dev/null <"$p/cmdline" || continue
+        [[ " ${args[*]} " == *" --type=renderer "* ]] || continue
+        for t in "$p"/task/*; do
+            read -r comm 2>/dev/null <"$t/comm" || continue
+            [[ "$comm" == Compositor ]] || continue
+            read -r stat 2>/dev/null <"$t/stat" || continue
+            # Fields after the ")" that ends the thread name: state is
+            # field 3, utime 14 and stime 15.
+            read -ra fields <<<"${stat##*) }"
+            echo "${t##*/} $(( fields[11] + fields[12] ))"
+        done
+    done
+}
+
+# pause_for <seconds>: a sleep in the background that the watch waits for.
+# The TERM the launcher sends the watch when the browser exits then stops the
+# sleep as well (the trap in stall_watch); a sleep in the foreground would
+# run on after the watch, for up to the 6 hours of stall_backoff.
+pause_for() {
+    sleep "$1" &
+    wait "$!"
+}
+
+# sample: waits stall_step seconds, then sets $busiest to the highest CPU
+# percentage of one core any Compositor thread used in that time.
+declare -A last_ticks=()
+sample() {
+    local tid ticks pct
+    local -A now=()
+    pause_for "$stall_step"
+    busiest=0
+    while read -r tid ticks; do
+        if [[ -n "${last_ticks[$tid]:-}" ]]; then
+            pct=$(( (ticks - last_ticks[$tid]) * 100 / (hz * stall_step) ))
+            (( pct > busiest )) && busiest=$pct
+        fi
+        now[$tid]=$ticks
+    done < <(compositor_ticks)
+    last_ticks=()
+    for tid in "${!now[@]}"; do last_ticks[$tid]=${now[$tid]}; done
+}
+
+# cdp <method> [params] [seconds]: one DevTools command over the pipe; sets
+# $cdp_result to its result, fails when no reply comes within the given
+# seconds (5 by default). Called in the current shell, never in a pipeline,
+# so every command gets the next id and a late reply to an earlier one is
+# skipped. read -t keeps what it has read when it times out; that part of a
+# reply stays in cdp_buf, and the next read, in this call or a later one,
+# completes it. The deadline counts in /proc/uptime seconds, which a clock
+# set by NTP at boot does not move.
+cdp_id=0
+cdp_buf=
+uptime_s() { read -r up _ 2>/dev/null </proc/uptime; up=${up%.*}; }
+cdp() {
+    local params=${2:-'{}'} part rc up end
+    uptime_s
+    end=$(( up + ${3:-5} ))
+    cdp_id=$(( cdp_id + 1 ))
+    cdp_result=
+    printf '%s\0' "$(jq -cn --argjson id "$cdp_id" --arg m "$1" --argjson p "$params" \
+        '{id: $id, method: $m, params: $p}')" >&5
+    while uptime_s; (( up < end )); do
+        IFS= read -r -d '' -t 1 part <&6
+        rc=$?
+        cdp_buf+=$part
+        # 1 is end of file, which fd 6 never reaches while it is open
+        # read-write; above 128 is the timeout.
+        (( rc == 1 )) && return 1
+        (( rc == 0 )) || continue
+        if [[ "$(jq -r '.id // empty' 2>/dev/null <<<"$cdp_buf")" == "$cdp_id" ]]; then
+            cdp_result=$(jq -ce '.result' 2>/dev/null <<<"$cdp_buf")
+            rc=$?
+            cdp_buf=
+            return "$rc"
+        fi
+        cdp_buf=
+    done
+    return 1
+}
+
+# The black tab. No "#" in it: in a URL that starts the fragment, and the
+# page would be white. The tab is told apart from the page by
+# "signalk-kiosk-hide" in its URL.
+hide_url='data:text/html,<meta name=color-scheme content=dark><title>signalk-kiosk-hide</title><body style=background:black>'
+
+# Paused by the screen watch (SIGSTOP): the browser would not answer.
+browser_paused() {
+    local stat
+    read -r stat 2>/dev/null <"$proc/$browser_pid/stat" || return 1
+    [[ "${stat##*) }" == T* ]]
+}
+
+# Closes every black tab and brings the page to the front; fails when a
+# command gets no reply or an error reply. The page is activated only when it is the one other
+# tab: with more, Chromium's choice when the black tab closes stands.
+show_page() {
+    local targets tab
+    local -a tabs pages
+    cdp Target.getTargets || return 1
+    targets=$cdp_result
+    mapfile -t tabs < <(jq -r '.targetInfos[] | select(.type == "page" and (.url | contains("signalk-kiosk-hide"))) | .targetId' <<<"$targets")
+    for tab in "${tabs[@]}"; do
+        cdp Target.closeTarget "$(jq -cn --arg t "$tab" '{targetId: $t}')" || return 1
+    done
+    mapfile -t pages < <(jq -r '.targetInfos[] | select(.type == "page" and (.url | contains("signalk-kiosk-hide") | not)) | .targetId' <<<"$targets")
+    (( ${#pages[@]} == 1 )) || return 0
+    cdp Target.activateTarget "$(jq -cn --arg t "${pages[0]}" '{targetId: $t}')"
+}
+
+# Hides the page behind a black tab for 0.2s and shows it again; fails when
+# createTarget gets no reply within 15s or the tab cannot be closed. The tab
+# can open without its reply arriving in time, and the screen watch can stop
+# the browser in the middle, so show_page runs after every createTarget, once
+# the browser runs again. black_tab stays 1 while show_page has not
+# succeeded since, and the watch then calls it again at every sample.
+black_tab=0
+hide_page() {
+    local rc=0
+    cdp Target.createTarget "$(jq -cn --arg u "$hide_url" '{url: $u}')" 15 || rc=1
+    black_tab=1
+    pause_for 0.2
+    while browser_paused; do pause_for 5; done
+    show_page && black_tab=0
+    (( black_tab == 0 )) || return 1
+    return "$rc"
+}
+
+# Waits out stall_backoff, then takes one sample whose value nobody reads:
+# it moves the starting ticks to the end of the wait, which the next sample
+# would otherwise count against a single stall_step.
+back_off() {
+    pause_for "$stall_backoff"
+    sample
+}
+
+stall_watch() {
+    local -a window=()
+    local sum pct before after
+    trap 'kill "$!" 2>/dev/null; exit 0' TERM
+    hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    sample
+    while :; do
+        sample
+        if (( black_tab )); then
+            if ! browser_paused && show_page; then
+                black_tab=0
+                echo "signalk-kiosk: closed the black tab" >&2
+            fi
+            continue
+        fi
+        window+=("$busiest")
+        (( ${#window[@]} > stall_window )) && window=("${window[@]:1}")
+        (( ${#window[@]} == stall_window )) || continue
+        sum=0
+        for pct in "${window[@]}"; do sum=$(( sum + pct )); done
+        before=$(( sum / stall_window ))
+        (( before >= stall_limit )) || continue
+        browser_paused && continue
+        window=()
+        if ! hide_page; then
+            if (( black_tab )); then
+                echo "signalk-kiosk: Compositor thread at ${before}% of a core; hiding the page failed, and the black tab may still be open: closing it at every sample" >&2
+            else
+                echo "signalk-kiosk: Compositor thread at ${before}% of a core; hiding the page failed, next try in $(( stall_backoff / 3600 ))h" >&2
+                back_off
+            fi
+            continue
+        fi
+        # The first sample spans the hide itself; the second shows the
+        # thread afterwards.
+        sample
+        sample
+        after=$busiest
+        if (( after * 2 <= before )); then
+            echo "signalk-kiosk: Compositor thread at ${before}% of a core; hid the page for 0.2s, now ${after}% (frame metrics reset, crbug 582381751)" >&2
+        else
+            echo "signalk-kiosk: Compositor thread at ${before}% of a core; hid the page for 0.2s, still ${after}%: another cause, next check in $(( stall_backoff / 3600 ))h" >&2
+            back_off
+        fi
+    done
+}
+
+# --remote-debugging-pipe alone sets navigator.webdriver to true, which sites
+# with bot protection answer with a challenge page;
+# --disable-blink-features=AutomationControlled keeps it false.
+pipe=
+if ! pipe=$(mktemp -d) || ! mkfifo -m 600 "${pipe}/in" "${pipe}/out"; then
+    echo "signalk-kiosk: could not create the DevTools pipe's FIFOs; starting the browser without the frame-metrics watch" >&2
+    [[ -n "$pipe" ]] && rm -rf "$pipe"
+    exec "$browser" "${flags[@]}" "$start"
+fi
+# Both FIFOs are opened here before the browser starts, and the browser gets
+# copies of those descriptors: a browser that opened them by path itself
+# could do so only after the rm below had run.
+exec 5<>"${pipe}/in" 6<>"${pipe}/out"
+rm -r "$pipe"
+"$browser" "${flags[@]}" --remote-debugging-pipe --disable-blink-features=AutomationControlled \
+    "$start" 3<&5 4>&6 5>&- 6>&- &
+browser_pid=$!
+stall_watch &
+watch_pid=$!
+trap 'kill -TERM "$browser_pid" 2>/dev/null' TERM HUP INT
+# wait returns early when a trapped signal arrives; the browser is then
+# stopping, and the second wait collects its exit status.
+wait "$browser_pid"
+status=$?
+if kill -0 "$browser_pid" 2>/dev/null; then
+    wait "$browser_pid"
+    status=$?
+fi
+# The watch's TERM trap stops its sleep; waiting for the watch leaves no
+# process of it running after the launcher.
+kill "$watch_pid" 2>/dev/null
+wait "$watch_pid" 2>/dev/null
+exit "$status"
 EOF
 }
 

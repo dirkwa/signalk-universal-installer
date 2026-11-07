@@ -35,7 +35,7 @@ The App Store installs and the sign-in go through the server's admin API with th
 | `/etc/systemd/system/user-<uid>.slice.d/50-signalk-kiosk.conf` | `CPUWeight=50` on the `signalk-kiosk` user's slice, where cage and the browser run (logind's session scope and the kiosk user's own systemd both sit under it). The Signal K server runs in its owner's slice next to it at the default weight of 100, so under CPU contention the browser yields to the server. `enable` also applies the weight to the running slice with `systemctl set-property --runtime`. |
 | `/etc/pam.d/signalk-kiosk` | The PAM stack the unit opens its session with. systemd never calls `pam_authenticate` for a service, so nothing asks for a password; `pam_systemd` registers the session on seat0, which is what lets cage open the display and input devices. |
 | `/etc/udev/rules.d/61-signalk-kiosk-cec.rules` | Makes the Raspberry Pi's HDMI-CEC inputs keyboards instead of pointers (see [Touchscreens](#touchscreens)). Matches nothing on other hardware. |
-| `/usr/local/lib/signalk-kiosk/browser` | The launcher cage runs: waits for the server, clears the crash marker, adds touch flags, writes the sign-in start page, starts the browser. |
+| `/usr/local/lib/signalk-kiosk/browser` | The launcher cage runs: waits for the server, clears the crash marker, adds touch flags, writes the sign-in start page, starts the browser, and watches it for Chromium's frame-metrics stall ([Chromium's frame-metrics stall](#chromiums-frame-metrics-stall)). |
 | `/etc/signalk-kiosk.conf` | The page, browser, sign-in mode and colour scheme the launcher uses, plus what `disable` has to undo (the desktop login unit, whether the kiosk installed or switched on signalk-autologin, whether it created the Signal K user). |
 | `/etc/signalk-kiosk.token` | The kiosk's sign-in token, readable by root and the `signalk-kiosk` group only. |
 | `/var/lib/signalk-kiosk/start.html` | Written by the launcher at every start and readable by the kiosk user only: the page that hands the token to the server (next section). |
@@ -93,6 +93,24 @@ While the browser is paused, the page does nothing: it plays no sounds, so alarm
 | `/var/lib/signalk-kiosk-screen/answered` | The monitors that have answered DDC/CI, one line per connector and EDID. Written by the watch, emptied by `enable`, removed by `disable` and `--no-screen-pause`. |
 
 `enable` also installs `i2c-tools`, which provides `i2ctransfer`. `journalctl -u signalk-kiosk-screen.service` shows each pause and resume.
+
+## Chromium's frame-metrics stall
+
+Chromium has a bug in a renderer's frame metrics ([crbug 582381751](https://issues.chromium.org/issues/582381751), reported on Chromium 138, 152 and 155): once one frame's presentation is acknowledged more than 300 frames late, the renderer's `cc::FrameSorter` never reports a frame again, and every animation the page starts and stops leaves a frame tracker that the renderer's Compositor thread goes through on every frame. On a Raspberry Pi 5 showing Freeboard-SK, that thread rose from 7 % of a core to 69 % within 4 hours, and the renderer's memory by 80 MB. Hiding the page resets the frame metrics. A tab in the background is hidden whenever another tab is in front; the kiosk's page never is.
+
+Every 30 seconds the launcher reads from `/proc` how much CPU the Compositor thread of each of the browser's renderers has used, and keeps the highest. When those values average 25 % of a core or more over 10 minutes, it opens a black tab over the page and closes it again 0.2 seconds later. In a test on a Raspberry Pi 5, the page was hidden for 0.3 to 0.4 seconds and not reloaded. If the busiest Compositor thread still uses more than half of that load a minute later, the load has another cause, and the watch waits 6 hours before it looks again. The launcher starts no hide while the screen watch has paused the browser ([Monitor off](#monitor-off)). When the browser is paused in the middle of one, or the reply to opening the black tab comes too late, the launcher closes the tab once the browser runs again; if closing it gets no reply either, it tries again at every 30-second sample until the tab is closed. `journalctl -u signalk-kiosk.service` shows each hide with the load before and after it:
+
+```
+signalk-kiosk: Compositor thread at <before>% of a core; hid the page for 0.2s, now <after>% (frame metrics reset, crbug 582381751)
+signalk-kiosk: Compositor thread at <before>% of a core; hid the page for 0.2s, still <after>%: another cause, next check in 6h
+signalk-kiosk: Compositor thread at <before>% of a core; hiding the page failed, next try in 6h
+signalk-kiosk: Compositor thread at <before>% of a core; hiding the page failed, and the black tab may still be open: closing it at every sample
+signalk-kiosk: closed the black tab
+```
+
+The launcher talks to the browser over Chromium's DevTools pipe (`--remote-debugging-pipe`, file descriptors 3 and 4), not a DevTools port. A port on 127.0.0.1 would let every local user, and every container on the host network such as the Signal K server and its plugins, control a browser that is signed in as the kiosk's Signal K user. The pipe runs through two FIFOs that the launcher removes as soon as it has opened them; after that only processes of the `signalk-kiosk` user can reach them, through `/proc/<pid>/fd`. With the pipe, Chromium reports `navigator.webdriver` as true to every page, and some sites with bot protection then show a challenge page; `--disable-blink-features=AutomationControlled` keeps it false.
+
+`stall_fixed_in` in the launcher is empty while the bug is open. Once a Chromium release fixes it, setting it to that major version makes the launcher start that version and later ones without the pipe and the watch. A kiosk gets the new launcher from the next `signalk kiosk enable`, which starts from its defaults (see [Several monitors](#several-monitors)).
 
 ## Touchscreens
 
