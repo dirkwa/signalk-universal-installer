@@ -129,7 +129,8 @@ If you skipped that step (sudo unavailable at install time), apply it later:
 
 ```bash
 sudo install -d -m 0755 /etc/systemd/system.conf.d
-printf '[Manager]\nRuntimeWatchdogSec=15\n' | sudo install -m 0644 /dev/stdin /etc/systemd/system.conf.d/50-signalk-watchdog.conf
+printf '[Manager]\nRuntimeWatchdogSec=15\n' | sudo tee /etc/systemd/system.conf.d/50-signalk-watchdog.conf >/dev/null
+sudo chmod 0644 /etc/systemd/system.conf.d/50-signalk-watchdog.conf
 sudo systemctl daemon-reload
 ```
 
@@ -156,7 +157,8 @@ If you skipped that step (sudo unavailable at install time), apply it later:
 ```bash
 sudo install -d -m 0755 /etc/systemd/system/earlyoom.service.d
 printf '[Service]\nExecStart=\nExecStart=/usr/bin/earlyoom -r 3600 -m 10,5 -s 100,100\n' \
-    | sudo install -m 0644 /dev/stdin /etc/systemd/system/earlyoom.service.d/50-signalk.conf
+    | sudo tee /etc/systemd/system/earlyoom.service.d/50-signalk.conf >/dev/null
+sudo chmod 0644 /etc/systemd/system/earlyoom.service.d/50-signalk.conf
 sudo apt-get install -y earlyoom        # dnf install -y earlyoom on Fedora
 sudo systemctl daemon-reload
 sudo systemctl enable earlyoom

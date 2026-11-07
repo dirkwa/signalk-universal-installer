@@ -69,7 +69,7 @@ fi
 #     succeed for the unprivileged user. A bare `$SUDO tee` (root umask 0600)
 #     is what made the plain read fail in the first place (bug #1).
 # shellcheck disable=SC2016
-if grep -qE '\$SUDO install -m 0644 .* "\$JOURNALD_DROPIN"' "$INSTALL_SH"; then
+if grep -qE 'install_stdin -m 0644 "\$JOURNALD_DROPIN"' "$INSTALL_SH"; then
     echo "  [OK]   drop-in is written world-readable (0644)"
 else
     echo "  [MISS] drop-in write does not force 0644 — root umask may leave it 0600 and unreadable"

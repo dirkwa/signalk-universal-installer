@@ -35,6 +35,16 @@ if [[ -z "$STEP" || "$STEP" != *'end of Hardware watchdog'* ]]; then
     exit 2
 fi
 
+# The step writes its files with install_stdin, defined near the top of
+# install.sh.
+INSTALL_STDIN=$(awk '/^install_stdin\(\) \{/{p=1} p{print} p && /^\}/{exit}' "$INSTALL_SH")
+if [[ "$INSTALL_STDIN" != *'install_stdin() {'* ]]; then
+    echo "[ERR] could not extract install_stdin from $INSTALL_SH" >&2
+    exit 2
+fi
+STEP="$INSTALL_STDIN
+$STEP"
+
 mkdir -p "$tmp/bin"
 # systemctl models PID 1: `show` reports $WATCHDOG_ROOT/runtime, and
 # daemon-reload recomputes it from the drop-in, falling back to the value an

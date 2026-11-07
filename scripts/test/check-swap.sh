@@ -34,6 +34,16 @@ if [[ -z "$STEP" || "$STEP" != *'end of Swap'* ]]; then
     exit 2
 fi
 
+# The step writes its files with install_stdin, defined near the top of
+# install.sh.
+INSTALL_STDIN=$(awk '/^install_stdin\(\) \{/{p=1} p{print} p && /^\}/{exit}' "$INSTALL_SH")
+if [[ "$INSTALL_STDIN" != *'install_stdin() {'* ]]; then
+    echo "[ERR] could not extract install_stdin from $INSTALL_SH" >&2
+    exit 2
+fi
+STEP="$INSTALL_STDIN
+$STEP"
+
 mkdir -p "$tmp/bin"
 # Each stub logs its call; apt-get also records whether the zram config was
 # already in place when it ran.
