@@ -93,9 +93,9 @@ run_case() {
             # exactly as real curl behaves on a connection failure. A stub that
             # only printed could not tell the broken form from the correct one,
             # which is why this bug shipped.
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             curl() { printf '%s' "$SIM_HTTP"; return "$SIM_CURL_RC"; }
-            # shellcheck disable=SC2317  # invoked from the eval'd function
+            # shellcheck disable=SC2317,SC2329  # invoked from the eval'd function
             systemctl() { printf '%s\n' "$*" >>"$CALLS"; return 0; }
             eval "$body"
             _signalk_lifecycle pause stop

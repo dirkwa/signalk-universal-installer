@@ -87,9 +87,9 @@ run() {
 
     # Invoked indirectly by the sourced check; shellcheck can't see across
     # that call and flags them unreachable.
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     _staging_dir() { printf '%s\n' "$STUB_DIR"; }
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     _dir_avail_mb() { printf '%s\n' "$STUB_AVAIL"; }
 
     local out err rc

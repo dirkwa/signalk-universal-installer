@@ -126,9 +126,9 @@ if [[ -z "$guarded" ]]; then
 else
     # SC2317: warn() looks unreachable because its only caller is inside the
     # eval'd string.
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     off=$(warn() { printf '%s\n' "$*"; }; eval "$guarded" 2>&1 || true)
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     on=$(warn() { printf '%s\n' "$*"; }; PREFLIGHT_DEFER_REBOOT_NOTICE=1 eval "$guarded" 2>&1 || true)
     if [[ "$off" == *"sudo reboot"* && "$on" != *"sudo reboot"* ]]; then
         ok "preflight's manual 'sudo reboot' prints standalone, is silent when deferred"
