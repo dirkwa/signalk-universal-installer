@@ -302,6 +302,18 @@ else
     SUDO="MISSING"
 fi
 
+# install_stdin <install options...> <dest> — `$SUDO install` of what it reads
+# from stdin. uutils install, Ubuntu's coreutils since 25.10, fails with
+# "install: No such file or directory" when the source is /dev/stdin and
+# <dest> already exists, so the content goes through a temp file.
+install_stdin() {
+    local src rc=0
+    src=$(mktemp) || return 1
+    cat >"$src" && $SUDO install "${@:1:$#-1}" "$src" "${!#}" || rc=$?
+    rm -f "$src"
+    return "$rc"
+}
+
 # Install OS packages portably across the distros this stack runs on. Debian/
 # Ubuntu (the Pi/desktop targets) use apt; Fedora (what `podman machine`'s VM
 # is, used by the macOS and Windows installers) uses dnf. Fedora CoreOS is
@@ -2753,7 +2765,7 @@ else
     else
         $SUDO install -d -m 2755 /var/log/journal
     fi
-    printf '%s\n' "$JOURNALD_DESIRED" | $SUDO install -m 0644 /dev/stdin "$JOURNALD_DROPIN"
+    printf '%s\n' "$JOURNALD_DESIRED" | install_stdin -m 0644 "$JOURNALD_DROPIN"
     $SUDO systemctl restart systemd-journald
     ok "journald persistent + capped applied"
 fi
@@ -2800,7 +2812,7 @@ else
     # The config goes in before the package: its postinst starts zram0 at the
     # package default (half the RAM, up to 4 GiB) when no config exists, and
     # an initialized zram device cannot be reconfigured in place.
-    printf '%s\n' "$ZRAM_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$ZRAM_CONF"
+    printf '%s\n' "$ZRAM_DESIRED" | install_stdin -D -m 0644 "$ZRAM_CONF"
     $SUDO env DEBIAN_FRONTEND=noninteractive \
         apt-get install -y --no-install-recommends systemd-zram-generator
     $SUDO systemctl daemon-reload
@@ -2897,9 +2909,9 @@ if [[ "$(cat "$TIMESYNC_BIN" 2>/dev/null)" == "$TIMESYNC_DESIRED" ]] \
     ok "signalk-timesync already installed (skipping)"
 else
     info "Installing signalk-timesync agent + timer (requires sudo)"
-    if printf '%s\n' "$TIMESYNC_DESIRED" | $SUDO install -m 0755 -o root -g root /dev/stdin "$TIMESYNC_BIN" \
-        && printf '%s\n' "$TIMESYNC_SERVICE" | $SUDO install -m 0644 /dev/stdin /etc/systemd/system/signalk-timesync.service \
-        && printf '%s\n' "$TIMESYNC_TIMER" | $SUDO install -m 0644 /dev/stdin /etc/systemd/system/signalk-timesync.timer \
+    if printf '%s\n' "$TIMESYNC_DESIRED" | install_stdin -m 0755 -o root -g root "$TIMESYNC_BIN" \
+        && printf '%s\n' "$TIMESYNC_SERVICE" | install_stdin -m 0644 /etc/systemd/system/signalk-timesync.service \
+        && printf '%s\n' "$TIMESYNC_TIMER" | install_stdin -m 0644 /etc/systemd/system/signalk-timesync.timer \
         && $SUDO systemctl daemon-reload \
         && $SUDO systemctl enable --now signalk-timesync.timer; then
         ok "signalk-timesync timer enabled (clock: GPS when no NTP; timezone: GPS position)"
@@ -2970,7 +2982,7 @@ elif [[ "$SUDO" = "MISSING" ]]; then
 else
     info "Enabling the hardware watchdog: the Pi resets after 15 s frozen (requires sudo)"
     if $SUDO install -d -m 0755 "$(dirname "$WATCHDOG_DROPIN")" \
-        && printf '%s\n' "$WATCHDOG_DESIRED" | $SUDO install -m 0644 /dev/stdin "$WATCHDOG_DROPIN" \
+        && printf '%s\n' "$WATCHDOG_DESIRED" | install_stdin -m 0644 "$WATCHDOG_DROPIN" \
         && $SUDO systemctl daemon-reload; then
         watchdog_runtime=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null || true)
         if [[ "$watchdog_runtime" == 15s ]]; then
@@ -3058,7 +3070,7 @@ else
     # The drop-in goes in before the package, so the start in Debian's
     # postinst already uses these arguments instead of the packaged ones.
     # $SUDO stays unquoted, as everywhere in this file: the tests set it empty.
-    if printf '%s\n' "$EARLYOOM_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$EARLYOOM_DROPIN" \
+    if printf '%s\n' "$EARLYOOM_DESIRED" | install_stdin -D -m 0644 "$EARLYOOM_DROPIN" \
         && pkg_install earlyoom \
         && $SUDO systemctl daemon-reload \
         && $SUDO systemctl enable earlyoom.service \
@@ -3153,7 +3165,7 @@ elif [[ "$SUDO" = "MISSING" ]]; then
 elif ! command -v pkaction >/dev/null 2>&1 \
     && ! { pkg_install polkitd && $SUDO systemctl reload dbus.service; }; then
     warn "could not set up polkitd; the Updater Console cannot power off or reboot the host"
-elif ! printf '%s\n' "$POWER_RULE_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$POWER_RULE"; then
+elif ! printf '%s\n' "$POWER_RULE_DESIRED" | install_stdin -D -m 0644 "$POWER_RULE"; then
     warn "could not write $POWER_RULE; the Updater Console cannot power off or reboot the host"
 elif ! mkdir -p "$POWER_UNIT_DIR" \
     || ! power_unit poweroff 'Power off' >"$POWER_UNIT_DIR/signalk-poweroff.service" \
@@ -3235,7 +3247,7 @@ if [[ "$(cat "$CONTAINER_STOP_UNIT" 2>/dev/null)" == "$CONTAINER_STOP_DESIRED" ]
     ok "plugin containers stop before the user manager at shutdown (skipping)"
 elif [[ "$SUDO" = "MISSING" ]]; then
     warn "Cannot install signalk-container-stop.service without sudo; shutdown may wait up to 2 min for the plugin containers"
-elif printf '%s\n' "$CONTAINER_STOP_DESIRED" | $SUDO install -D -m 0644 /dev/stdin "$CONTAINER_STOP_UNIT" \
+elif printf '%s\n' "$CONTAINER_STOP_DESIRED" | install_stdin -D -m 0644 "$CONTAINER_STOP_UNIT" \
     && $SUDO systemctl daemon-reload \
     && $SUDO systemctl enable signalk-container-stop.service \
     && $SUDO systemctl start signalk-container-stop.service; then

@@ -369,14 +369,18 @@ apply_config_txt() {
 # ─── root-owned config files ───────────────────────────────────────────
 # write_root_file <path> <mode> <content> — content-compare idempotency,
 # same idiom as install.sh's journald/timesync drop-ins. Returns 0 written,
-# 1 unchanged, 2 write failed.
+# 1 unchanged, 2 write failed. The content goes through a temp file: uutils
+# install, Ubuntu's coreutils since 25.10, fails with "install: No such file
+# or directory" when the source is /dev/stdin and <path> already exists.
 write_root_file() {
-    local path=$1 mode=$2 content=$3
+    local path=$1 mode=$2 content=$3 src rc=0
     if [[ -r "$path" ]] && [[ "$(cat "$path")" == "$content" ]]; then
         return 1
     fi
-    if printf '%s\n' "$content" | run_root install -D -m "$mode" /dev/stdin "$path"; then
-        return 0
+    if src=$(mktemp); then
+        printf '%s\n' "$content" >"$src" && run_root install -D -m "$mode" "$src" "$path" || rc=$?
+        rm -f "$src"
+        (( rc == 0 )) && return 0
     fi
     err "could not write ${path}"
     return 2
