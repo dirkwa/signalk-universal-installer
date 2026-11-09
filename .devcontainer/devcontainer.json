@@ -79,6 +79,12 @@
     // compiling only the test sources. See "Server tests" in
     // dev/CLAUDE.md.
     "TS_NODE_IGNORE": "(?:^|/)node_modules/,(?:^|/)dist/",
+    // npm 11 enables Node's module compile cache on every run and writes
+    // it to os.tmpdir() unless this is set. Where /tmp is a tmpfs (a
+    // provider default, --read-only, --systemd) that cache sits in RAM;
+    // on disk it costs nothing. See "Node's compile cache" in
+    // docs/development.md.
+    "NODE_COMPILE_CACHE": "/home/node/.cache/node-compile-cache",
     // Container runtime access for signalk-container-based plugins.
     // Points at the host socket dir mounted above; the image's
     // containers.conf is repointed to the same path at build time.

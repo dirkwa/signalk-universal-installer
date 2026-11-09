@@ -95,6 +95,24 @@ Toggling the plugin off/on in the admin UI is **not** enough. If your
 plugin is TypeScript, run its build (`npm run build` in the repo) before
 restarting.
 
+### Node's compile cache
+
+If you run npm directly on the host, keep Node's compile cache out of
+`/tmp`. npm (10.9 and later) turns the cache on every time it runs and
+writes it to `/tmp/node-compile-cache` unless `NODE_COMPILE_CACHE` points
+elsewhere. On Debian 13 and Raspberry Pi OS Trixie `/tmp` is a tmpfs, so
+the cache sits in RAM; on a Pi 5 that built plugins and Freeboard it had
+grown to 411 MB and pushed zram swap close to full. Put it on disk by
+adding this line to `~/.profile` and logging in again:
+
+```bash
+export NODE_COMPILE_CACHE="$HOME/.cache/node-compile-cache"
+```
+
+`rm -rf /tmp/node-compile-cache` frees what is already there. Nothing
+breaks without it; Node rebuilds the cache as needed. The dev environment
+(section 3) sets this variable for you.
+
 ---
 
 ## 2. Switching server versions on your live server

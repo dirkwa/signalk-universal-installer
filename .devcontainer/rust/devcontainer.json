@@ -33,6 +33,7 @@
     "PORT": "4001",
     "SIGNALK_NODE_CONFIG_DIR": "/home/node/.signalk",
     "TS_NODE_IGNORE": "(?:^|/)node_modules/,(?:^|/)dist/",
+    "NODE_COMPILE_CACHE": "/home/node/.cache/node-compile-cache",
     // dev.sh defaults to "devpod"; a namespace of its own keeps this dev
     // server's signalk-container siblings apart from the main variant's
     // on the shared host podman socket (1-32 lowercase alphanumerics).
