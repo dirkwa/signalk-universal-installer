@@ -98,20 +98,25 @@ restarting.
 ### Node's compile cache
 
 If you run npm directly on the host, keep Node's compile cache out of
-`/tmp`. npm (10.9 and later) turns the cache on every time it runs and
-writes it to `/tmp/node-compile-cache` unless `NODE_COMPILE_CACHE` points
-elsewhere. On Debian 13 and Raspberry Pi OS Trixie `/tmp` is a tmpfs, so
-the cache sits in RAM; on a Pi 5 that built plugins and Freeboard it had
-grown to 411 MB and pushed zram swap close to full. Put it on disk by
-adding this line to `~/.profile` and logging in again:
+`/tmp`. npm 10.9.1 and later turn the cache on every time npm runs, on any
+Node that has `module.enableCompileCache()`, and Node writes it to
+`/tmp/node-compile-cache` unless `NODE_COMPILE_CACHE` points elsewhere. On
+Debian 13 and Raspberry Pi OS Trixie `/tmp` is a tmpfs, so the cache sits
+in RAM; on a Pi 5 that built plugins and Freeboard it had grown to 411 MB
+and pushed zram swap close to full. Put it on disk by adding this line to
+`~/.profile` and logging in again:
 
 ```bash
 export NODE_COMPILE_CACHE="$HOME/.cache/node-compile-cache"
 ```
 
-`rm -rf /tmp/node-compile-cache` frees what is already there. Nothing
-breaks without it; Node rebuilds the cache as needed. The dev environment
-(section 3) sets this variable for you.
+`rm -rf /tmp/node-compile-cache` frees what is already there, and
+`rm -rf ~/.cache/node-compile-cache` frees the disk copy later; the cache
+keeps entries for every Node version that wrote it. Node rebuilds it as
+needed. With the variable set, every Node process uses the cache, not only
+npm. Node's documentation says cached code can make V8 coverage less
+precise, so run coverage with `NODE_DISABLE_COMPILE_CACHE=1`. The dev
+environment (section 3) sets `NODE_COMPILE_CACHE` for you.
 
 ---
 
