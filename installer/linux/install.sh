@@ -15,6 +15,7 @@
 #   4c. Cgroup delegation: write user@.service.d/delegate.conf if needed
 #   4d. Open-files limit: write user@.service.d/nofile.conf if needed
 #   5. Ensure group memberships (dialout, gpio, netdev, audio)
+#   5b. Warn when a PAM limits entry caps the open-files limit of step 4d
 #   6. Generate auth tokens for updater and doctor
 #   7. Initialize ~/.signalk-doctor/{snapshots,last-good.json}
 #   8. Detect hardware → ~/.signalk-updater/hardware.json
@@ -1364,6 +1365,67 @@ for g in dialout gpio netdev audio halpid; do
     fi
 done
 ok "groups: dialout, gpio, netdev, audio, halpid (ensured if present on host)"
+
+# 5b. PAM limits below the open-files raise (step 4d).
+#
+# The user manager starts through PAM (pam_limits in
+# /usr/lib/pam.d/systemd-user on Debian / Raspberry Pi OS), and systemd runs
+# PAM after it applied the unit's LimitNOFILE. A hard nofile entry in
+# limits.conf or limits.d therefore caps the user manager at that entry
+# whatever nofile.conf says, and systemctl still shows the drop-in's value.
+# The entry is the operator's, so the step names it and leaves it alone. It
+# runs after step 5, so an @group entry for a group added there counts.
+# The awk follows pam_limits.c: limits.conf first, then limits.d/*.conf in
+# C-locale order; a line is cut at "#"; type, item and value are compared
+# lowercased and the value (the rest of the line) is read like strtoul. An
+# entry for the user outranks one for a group the user is in (@group), which
+# outranks *; a hard entry is skipped when a higher-ranked entry already set
+# the hard limit, and a "-" entry's hard half also when one set the soft
+# limit. %-domains only limit logins, and a two-field "<user or @group> -"
+# line makes pam_limits set no limits at all. UID and GID ranges are not matched, and files the
+# installing user cannot read are not checked. PAM_LIMITS_ROOT prefixes the
+# paths for scripts/test/check-nofile-pam-limits.sh.
+section "PAM open-files limits"
+PAM_LIMITS_ROOT="${PAM_LIMITS_ROOT:-}"
+NOFILE_PAM_CAP=$(
+    shopt -s nullglob
+    LC_ALL=C
+    files=()
+    for f in "$PAM_LIMITS_ROOT/etc/security/limits.conf" "$PAM_LIMITS_ROOT"/etc/security/limits.d/*.conf; do
+        [[ -f "$f" && -r "$f" ]] && files+=("$f")
+    done
+    (( ${#files[@]} )) || exit 0
+    awk -v user="$USER" -v groups=" $(id -Gn "$USER" 2>/dev/null) " -v want=1048576 '
+        BEGIN { soft = hard = 99 }
+        { sub(/#.*/, "") }
+        { rank = -1 }
+        $1 == user { rank = 0 }
+        $1 ~ /^@/ && index(groups, " " substr($1, 2) " ") { rank = 1 }
+        $1 == "*" { rank = 2 }
+        rank < 0 { next }
+        NF == 2 && $2 ~ /^-/ && rank < 2 { nolimits = 1; exit }
+        NF < 4 || tolower($3) != "nofile" { next }
+        { type = tolower($2); v = tolower($4); inf = 0 }
+        type != "soft" && type != "hard" && type != "-" { next }
+        (NF == 4 && (v == "-" || v == "unlimited" || v == "infinity")) || v ~ /^-[0-9]/ { inf = 1 }
+        !inf {
+            if (!match(v, /^[+]?[0-9]+/)) next
+            v = substr(v, RSTART, RLENGTH); sub(/^[+]/, "", v)
+        }
+        type != "hard" { if (soft < rank) next; soft = rank }
+        type != "soft" && hard >= rank { hard = rank; value = inf ? "unlimited" : v; where = FILENAME ":" FNR }
+        END {
+            if (!nolimits && value != "" && value != "unlimited" && value + 0 < want)
+                print where " (" value ")"
+        }' "${files[@]}" || true
+)
+if [[ -n "$NOFILE_PAM_CAP" ]]; then
+    warn "The nofile entry at $NOFILE_PAM_CAP caps the open-files limit of $USER below 1048576; QuestDB will report its limit as capped by the host."
+    warn "pam_limits applies it after the user@.service drop-in, so the drop-in cannot lift it. Raise the entry to 1048576 or remove it, then reboot."
+else
+    ok "No PAM limits entry caps the open-files limit"
+fi
+# ── end of PAM open-files limits ──
 
 # 6. Tokens
 section "Authentication tokens"

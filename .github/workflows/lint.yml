@@ -119,6 +119,9 @@ jobs:
       - name: app.slice CPU priority drop-in
         run: bash scripts/test/check-cpu-priority-dropin.sh
 
+      - name: PAM limits below the open-files raise
+        run: bash scripts/test/check-nofile-pam-limits.sh
+
       - name: swap (zram + dphys-swapfile)
         run: bash scripts/test/check-swap.sh
 
