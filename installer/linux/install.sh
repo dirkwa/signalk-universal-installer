@@ -14,8 +14,8 @@
 #   4b. Enable user podman.socket (engine containers bind-mount it)
 #   4c. Cgroup delegation: write user@.service.d/delegate.conf if needed
 #   4d. Open-files limit: write user@.service.d/nofile.conf if needed
-#   4e. Warn when a PAM limits entry caps the open-files limit below it
 #   5. Ensure group memberships (dialout, gpio, netdev, audio)
+#   5b. Warn when a PAM limits entry caps the open-files limit of step 4d
 #   6. Generate auth tokens for updater and doctor
 #   7. Initialize ~/.signalk-doctor/{snapshots,last-good.json}
 #   8. Detect hardware → ~/.signalk-updater/hardware.json
@@ -1336,14 +1336,45 @@ EOF
     USER_SERVICE_OVERRIDES+="  • $NOFILE_CONF (open-files limit 1048576)"$'\n'
 fi
 
-# 4e. PAM limits below the open-files raise.
+# 5. Groups
+section "Group memberships"
+# `audio` is what makes rootless /dev/snd passthrough work end-to-end:
+# device nodes keep their HOST group (root:audio), and the managed audio
+# container (wyoming-satellite) reaches them via the calling user's own
+# supplementary groups (crun keep-original-groups), not via a uid map.
+# `halpid` exists only after `signalk halpi2 apply` installed the Hat Labs
+# daemon; its socket is root:halpid 0660 and the signalk-halpi plugin reaches
+# it through this membership (GroupAdd=keep-groups). Silently absent elsewhere.
+#
+# `input` is deliberately NOT in this list, unlike `audio`. GroupAdd=keep-groups
+# is server-wide, so adding it would carry `input` into signalk-server itself,
+# and a bind of /dev/input then yields readable event nodes -- every keystroke
+# on the host. Verified: `:ro` blocks writes to the mount, not open() on a node.
+# Excluding it here is only half the story: keep-groups carries membership the
+# user already had, from a desktop distro or a local admin. That case is
+# handled at render time -- render-server-quadlet.sh withholds the /dev/input
+# view entirely when the service user is in `input`.
+# signalk-container's probe only ever readdirs and stats, and both work WITHOUT
+# the group (stat reports the overflow gid, which the probe resolves by udev
+# convention). A consumer container that genuinely needs to read an encoder
+# gets its own group from signalk-container, scoped to that container.
+for g in dialout gpio netdev audio halpid; do
+    if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
+        info "Adding $USER to $g (requires sudo)"
+        $SUDO /usr/sbin/usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
+    fi
+done
+ok "groups: dialout, gpio, netdev, audio, halpid (ensured if present on host)"
+
+# 5b. PAM limits below the open-files raise (step 4d).
 #
 # The user manager starts through PAM (pam_limits in
 # /usr/lib/pam.d/systemd-user on Debian / Raspberry Pi OS), and systemd runs
 # PAM after it applied the unit's LimitNOFILE. A hard nofile entry in
 # limits.conf or limits.d therefore caps the user manager at that entry
 # whatever nofile.conf says, and systemctl still shows the drop-in's value.
-# The entry is the operator's, so the step names it and leaves it alone.
+# The entry is the operator's, so the step names it and leaves it alone. It
+# runs after step 5, so an @group entry for a group added there counts.
 # The awk follows pam_limits.c: limits.conf first, then limits.d/*.conf in
 # C-locale order; a line is cut at "#"; type, item and value are compared
 # lowercased and the value (the rest of the line) is read like strtoul. An
@@ -1395,36 +1426,6 @@ else
     ok "No PAM limits entry caps the open-files limit"
 fi
 # ── end of PAM open-files limits ──
-
-# 5. Groups
-section "Group memberships"
-# `audio` is what makes rootless /dev/snd passthrough work end-to-end:
-# device nodes keep their HOST group (root:audio), and the managed audio
-# container (wyoming-satellite) reaches them via the calling user's own
-# supplementary groups (crun keep-original-groups), not via a uid map.
-# `halpid` exists only after `signalk halpi2 apply` installed the Hat Labs
-# daemon; its socket is root:halpid 0660 and the signalk-halpi plugin reaches
-# it through this membership (GroupAdd=keep-groups). Silently absent elsewhere.
-#
-# `input` is deliberately NOT in this list, unlike `audio`. GroupAdd=keep-groups
-# is server-wide, so adding it would carry `input` into signalk-server itself,
-# and a bind of /dev/input then yields readable event nodes -- every keystroke
-# on the host. Verified: `:ro` blocks writes to the mount, not open() on a node.
-# Excluding it here is only half the story: keep-groups carries membership the
-# user already had, from a desktop distro or a local admin. That case is
-# handled at render time -- render-server-quadlet.sh withholds the /dev/input
-# view entirely when the service user is in `input`.
-# signalk-container's probe only ever readdirs and stats, and both work WITHOUT
-# the group (stat reports the overflow gid, which the probe resolves by udev
-# convention). A consumer container that genuinely needs to read an encoder
-# gets its own group from signalk-container, scoped to that container.
-for g in dialout gpio netdev audio halpid; do
-    if getent group "$g" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$g"; then
-        info "Adding $USER to $g (requires sudo)"
-        $SUDO /usr/sbin/usermod -aG "$g" "$USER" || warn "could not add $USER to $g"
-    fi
-done
-ok "groups: dialout, gpio, netdev, audio, halpid (ensured if present on host)"
 
 # 6. Tokens
 section "Authentication tokens"
