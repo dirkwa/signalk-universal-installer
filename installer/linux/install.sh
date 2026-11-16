@@ -14,6 +14,7 @@
 #   4b. Enable user podman.socket (engine containers bind-mount it)
 #   4c. Cgroup delegation: write user@.service.d/delegate.conf if needed
 #   4d. Open-files limit: write user@.service.d/nofile.conf if needed
+#   4d-bis. Open-files limit of podman.service: write podman.service.d/zz-nofile.conf
 #   5. Ensure group memberships (dialout, gpio, netdev, audio)
 #   5b. Warn when a PAM limits entry caps the open-files limit of step 4d
 #   6. Generate auth tokens for updater and doctor
@@ -1335,6 +1336,50 @@ EOF
     USER_SERVICE_RELOGIN_HINT=1
     USER_SERVICE_OVERRIDES+="  • $NOFILE_CONF (open-files limit 1048576)"$'\n'
 fi
+
+# 4d-bis. Open-files limit for podman.service itself.
+#
+# signalk-container creates the managed containers (QuestDB) through the
+# podman API, i.e. through podman.service, and a rootless container never
+# gets more open files than that service has. Rootless Podman before 5.5
+# also drops the container's own nofile request (containers/podman#25881),
+# so there the container gets exactly the service's limit. Without a
+# LimitNOFILE of its own, podman.service takes the user manager's
+# DefaultLimitNOFILE, which /etc/systemd/user.conf or a user.conf.d file
+# can set below 1048576. On one Pi with Podman 5.4.2, podman.service had
+# LimitNOFILE=65535 without any drop-in of its own, so QuestDB ran at
+# 65535 while user@.service and signalk-server had 1048576. Setting the
+# limit on the unit overrides any DefaultLimitNOFILE. systemd lowers it
+# to the user manager's own limit when that is lower, which step 4d raises.
+# Drop-ins apply in name order and the last assignment wins: the zz- prefix
+# puts this one after override.conf, which `systemctl --user edit` writes.
+PODMAN_NOFILE_CONF="$PODMAN_LIMITS_DIR/zz-nofile.conf"
+PODMAN_NOFILE_IN_PLACE=0
+if [[ -f "$PODMAN_NOFILE_CONF" ]] && grep -qx 'LimitNOFILE=1048576' "$PODMAN_NOFILE_CONF"; then
+    ok "podman.service LimitNOFILE already raised ($PODMAN_NOFILE_CONF present)"
+    PODMAN_NOFILE_IN_PLACE=1
+elif mkdir -p "$PODMAN_LIMITS_DIR" 2>/dev/null \
+    && printf '[Service]\nLimitNOFILE=1048576\n' > "$PODMAN_NOFILE_CONF"; then
+    systemctl --user daemon-reload && PODMAN_NOFILE_IN_PLACE=1
+    ok "Installed $PODMAN_NOFILE_CONF"
+    # A running podman.service keeps the limit it started with.
+    USER_SERVICE_RELOGIN_HINT=1
+    USER_SERVICE_OVERRIDES+="  • $PODMAN_NOFILE_CONF (podman.service open-files limit 1048576)"$'\n'
+else
+    warn "Could not write $PODMAN_NOFILE_CONF; QuestDB may be capped at podman.service's open-files limit."
+fi
+# With the drop-in loaded, only a drop-in that sorts after it can still
+# lower the value. `systemctl show` prints the merged unit setting, so this
+# check does not depend on a re-login.
+PODMAN_NOFILE=""
+if (( PODMAN_NOFILE_IN_PLACE )); then
+    PODMAN_NOFILE=$(systemctl --user show podman.service -p LimitNOFILE --value 2>/dev/null || true)
+fi
+if [[ "$PODMAN_NOFILE" =~ ^[0-9]+$ ]] && (( PODMAN_NOFILE < 1048576 )); then
+    warn "podman.service gets LimitNOFILE=$PODMAN_NOFILE from a drop-in that overrides $PODMAN_NOFILE_CONF; QuestDB will report its limit as capped by the host."
+    warn "Find it with: systemctl --user cat podman.service — raise it to 1048576 or remove it, then reboot."
+fi
+# ── end of podman.service open-files limit ──
 
 # 5. Groups
 section "Group memberships"
@@ -3602,8 +3647,8 @@ fi
 if (( USER_SERVICE_RELOGIN_HINT )); then
     cat <<EOF
 
-The following systemd user@.service overrides were installed:
-${USER_SERVICE_OVERRIDES}These take effect on NEW user-bus sessions — log out and back in (or reboot)
-so a fresh user@.service starts and rootless containers pick up the changes.
+The following systemd overrides were installed:
+${USER_SERVICE_OVERRIDES}Reboot so that user@.service and podman.service start afresh; with linger
+enabled (step 4), logging out and back in leaves both running.
 EOF
 fi
