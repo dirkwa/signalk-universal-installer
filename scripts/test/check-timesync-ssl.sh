@@ -42,17 +42,25 @@ class Redirect(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(302)
         self.send_header("Location", f"https://127.0.0.1:{https_port}{self.path}")
+        self.send_header("Content-Length", "0")
         self.end_headers()
     def log_message(self, *a): pass
 
 class Api(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.headers.get("Authorization") != f"Bearer {token}":
-            self.send_response(401); self.end_headers(); return
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         body = json.dumps({"value": "2026-11-16T20:00:00.000Z",
                            "timestamp": "2026-11-16T20:00:00.000Z"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        # With a length, curl does not read to EOF, so a server that closes
+        # without a TLS close_notify does not fail it (curl on OpenSSL 3.2+
+        # reports that as "unexpected eof"). signalk-server sends one too.
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
     def log_message(self, *a): pass
@@ -87,11 +95,13 @@ grep -q '^api()' "$tmp/api.sh" || { echo "[ERR] could not extract api() from $TM
 . "$tmp/api.sh"
 export TOKEN
 
-if out=$(api navigation/datetime) && [[ "$out" == *'"value": "2026-11-16T20:00:00.000Z"'* ]]; then
+rc=0
+out=$(api navigation/datetime) || rc=$?
+if (( rc == 0 )) && [[ "$out" == *'"value": "2026-11-16T20:00:00.000Z"'* ]]; then
     echo "  [OK]   api() follows the HTTPS redirect with the token"
     echo "[PASS] timesync SSL checks"
 else
-    echo "  [MISS] api() got no datetime through the HTTPS redirect (output: ${out:-<none>})"
+    echo "  [MISS] api() got no datetime through the HTTPS redirect (curl exit $rc, output: ${out:-<none>})"
     echo "[FAIL] timesync SSL checks"
     exit 1
 fi
