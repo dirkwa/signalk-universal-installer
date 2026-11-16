@@ -173,6 +173,9 @@ jobs:
       - name: timesync restart gating
         run: bash scripts/test/check-timesync-restart.sh
 
+      - name: timesync reads GPS data with SSL enabled
+        run: bash scripts/test/check-timesync-ssl.sh
+
       - name: timesync timer re-enabled on re-run
         run: bash scripts/test/check-timesync-enable.sh
 

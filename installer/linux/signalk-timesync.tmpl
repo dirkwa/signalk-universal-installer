@@ -80,8 +80,14 @@ restart_server() {
         systemctl --user restart signalk-server.service
 }
 
+# With SSL enabled, signalk-server's HTTP port only redirects to
+# https://127.0.0.1:<sslport>. Following it needs --location-trusted (curl
+# drops the Authorization header when the port or scheme changes) and -k
+# (the server's certificate is self-signed). The redirect is built from our
+# own Host header, so the token only ever goes to this host's server.
 api() {
-    curl -fsS -m 5 -H "Authorization: Bearer $TOKEN" \
+    curl -fsSk -m 5 --location-trusted --max-redirs 1 \
+        -H "Authorization: Bearer $TOKEN" \
         "$SK_URL/signalk/v1/api/vessels/self/$1" 2>/dev/null
 }
 
