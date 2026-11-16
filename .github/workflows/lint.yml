@@ -173,6 +173,9 @@ jobs:
       - name: timesync restart gating
         run: bash scripts/test/check-timesync-restart.sh
 
+      - name: timesync timer re-enabled on re-run
+        run: bash scripts/test/check-timesync-enable.sh
+
       - name: resolv-watch DNS self-heal
         run: bash scripts/test/check-resolv-watch.sh
 
