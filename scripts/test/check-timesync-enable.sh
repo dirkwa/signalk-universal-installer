@@ -34,18 +34,21 @@ awk '/^section "Time & timezone sync/ { on = 1 } /^# 17c\./ { on = 0 } on' "$INS
 grep -q 'TIMESYNC_TIMER=' "$step" || { echo "[ERR] could not extract step 17b" >&2; exit 2; }
 mkdir -p "$tmp/bin" "$tmp/units" "$tmp/path"
 
-# Stub systemctl: is-enabled/is-active answer from $tmp/state, enable records
-# itself and switches the state on.
+# Stub systemctl: is-enabled answers from $tmp/enabled, is-active from
+# $tmp/active; enable records itself and switches both on.
 cat >"$tmp/path/systemctl" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
-    is-enabled|is-active) [[ "\$(cat "$tmp/state")" == on ]] ;;
-    enable) echo "\$*" >>"$tmp/calls"; echo on >"$tmp/state" ;;
+    is-enabled) [[ "\$(cat "$tmp/enabled")" == on ]] ;;
+    is-active) [[ "\$(cat "$tmp/active")" == on ]] ;;
+    enable) echo "\$*" >>"$tmp/calls"; echo on >"$tmp/enabled"; echo on >"$tmp/active" ;;
     daemon-reload) echo daemon-reload >>"$tmp/calls" ;;
     *) exit 1 ;;
 esac
 EOF
 chmod +x "$tmp/path/systemctl"
+
+timer() { echo "$1" >"$tmp/enabled"; echo "$2" >"$tmp/active"; }
 
 run_step() {
     : >"$tmp/calls"
@@ -71,7 +74,7 @@ EOF
 chmod +x "$tmp/sudo"
 
 echo "[i] fresh install writes the files and enables the timer"
-echo off >"$tmp/state"
+timer off off
 run_step
 check "agent and units written" "agent and units not written" \
     test -s "$tmp/bin/signalk-timesync" -a -s "$tmp/units/signalk-timesync.timer"
@@ -85,13 +88,16 @@ check "no systemctl change" "systemctl changed the timer" test ! -s "$tmp/calls"
 check "no sudo" "sudo used on a no-op run" test ! -s "$tmp/sudo-calls"
 check "reports skipping" "no skip message" grep -q 'already installed' "$tmp/out"
 
-echo "[i] re-run after the timer was switched off enables it again"
-echo off >"$tmp/state"
-run_step
-check "timer enabled again" "switched-off timer left off" \
-    grep -q 'enable --now signalk-timesync.timer' "$tmp/calls"
-check "files not rewritten" "unchanged files were rewritten" \
-    test "$(grep -c daemon-reload "$tmp/calls" || true)" = 0
+for state in "off off:switched off" "on off:enabled but stopped" "off on:running but disabled"; do
+    echo "[i] re-run with the timer ${state#*:} enables it again"
+    # shellcheck disable=SC2086  # two words on purpose
+    timer ${state%%:*}
+    run_step
+    check "timer enabled again" "timer left ${state#*:}" \
+        grep -q 'enable --now signalk-timesync.timer' "$tmp/calls"
+    check "files not rewritten" "unchanged files were rewritten" \
+        test "$(grep -c daemon-reload "$tmp/calls" || true)" = 0
+done
 
 if (( fail )); then
     echo "[FAIL] timesync enable checks failed"
