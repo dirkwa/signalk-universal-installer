@@ -236,8 +236,8 @@ signalk timesync — host clock + timezone from the boat's GPS
 Clock: stepped from SignalK navigation.datetime only while the host has
 no NTP sync (offline passages, RTC-less cold boot). Timezone: follows
 navigation.position via tz-lookup. Disable via /etc/default/signalk-timesync
-(SIGNALK_TIMESYNC=off, or SIGNALK_TIMESYNC_TZ=off for clock-only), or
-stop the timer: sudo systemctl disable --now signalk-timesync.timer
+(SIGNALK_TIMESYNC=off, or SIGNALK_TIMESYNC_TZ=off for clock-only). A timer
+stopped with systemctl is enabled again by the next installer run.
 
 Mid-passage zone changes don't reach an already-running signalk-server
 (its zone is frozen at container-create). To auto-recreate it on a zone

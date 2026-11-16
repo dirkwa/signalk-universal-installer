@@ -3020,7 +3020,19 @@ WantedBy=timers.target'
 if [[ "$(cat "$TIMESYNC_BIN" 2>/dev/null)" == "$TIMESYNC_DESIRED" ]] \
     && [[ "$(cat /etc/systemd/system/signalk-timesync.service 2>/dev/null)" == "$TIMESYNC_SERVICE" ]] \
     && [[ "$(cat /etc/systemd/system/signalk-timesync.timer 2>/dev/null)" == "$TIMESYNC_TIMER" ]]; then
-    ok "signalk-timesync already installed (skipping)"
+    # Matching files say nothing about the timer's state: one switched off
+    # with `systemctl disable` stays off, and the clock no longer follows GPS.
+    # The documented off switch is SIGNALK_TIMESYNC=off in
+    # /etc/default/signalk-timesync, which the agent itself reads.
+    if systemctl is-enabled --quiet signalk-timesync.timer 2>/dev/null \
+        && systemctl is-active --quiet signalk-timesync.timer 2>/dev/null; then
+        ok "signalk-timesync already installed (skipping)"
+    elif $SUDO systemctl enable --now signalk-timesync.timer; then
+        ok "signalk-timesync timer was off; enabled it again"
+    else
+        warn "signalk-timesync timer is off and could not be enabled; host clock/timezone won't follow GPS."
+        warn "Re-run the installer with sudo available to enable it."
+    fi
 else
     info "Installing signalk-timesync agent + timer (requires sudo)"
     if printf '%s\n' "$TIMESYNC_DESIRED" | install_stdin -m 0755 -o root -g root "$TIMESYNC_BIN" \
