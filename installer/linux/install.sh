@@ -1358,9 +1358,11 @@ PODMAN_NOFILE_IN_PLACE=0
 if [[ -f "$PODMAN_NOFILE_CONF" ]] && grep -qx 'LimitNOFILE=1048576' "$PODMAN_NOFILE_CONF"; then
     ok "podman.service LimitNOFILE already raised ($PODMAN_NOFILE_CONF present)"
     # A run whose daemon-reload failed left the file on disk but not loaded;
-    # NeedDaemonReload is "yes" until a reload picks it up.
-    if [[ "$(systemctl --user show podman.service -p NeedDaemonReload --value 2>/dev/null || true)" != yes ]] \
-        || systemctl --user daemon-reload; then
+    # NeedDaemonReload is "yes" until a reload picks it up. A failed query
+    # counts as unknown, so it reloads too.
+    PODMAN_NEED_RELOAD=$(systemctl --user show podman.service -p NeedDaemonReload --value 2>/dev/null) \
+        || PODMAN_NEED_RELOAD=unknown
+    if [[ "$PODMAN_NEED_RELOAD" == no ]] || systemctl --user daemon-reload; then
         PODMAN_NOFILE_IN_PLACE=1
     fi
 elif mkdir -p "$PODMAN_LIMITS_DIR" 2>/dev/null \

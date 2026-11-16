@@ -11,7 +11,8 @@
 #      1048576 or "infinity" keeps it quiet.
 #   5. When daemon-reload fails, the step does not blame a drop-in.
 #   6. A re-run after a failed reload (NeedDaemonReload=yes) reloads, then
-#      checks; without a successful reload it still blames nothing.
+#      checks; without a successful reload it still blames nothing. A failed
+#      NeedDaemonReload query is treated the same way.
 # Whether the running podman.service and its containers get the limit needs
 # a live user session and is verified manually.
 # Run from the repo root.
@@ -49,6 +50,7 @@ cat > "$tmp/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
 if [[ "$*" == *" show podman.service -p NeedDaemonReload "* ]]; then
+    [[ -n "${NEED_RELOAD_FAILS:-}" ]] && exit 1
     echo "${NEED_RELOAD:-no}"
 elif [[ "$*" == *" show podman.service "* ]]; then
     echo "$SHOW_VALUE"
@@ -135,5 +137,11 @@ if [[ "$out" == *"warn: podman.service gets"* ]]; then miss "blamed a drop-in al
 out=$(NEED_RELOAD=yes run_step "$home" 65535)
 if grep -qx -- '--user daemon-reload' "$STUB_LOG"; then ok "reloads the pending drop-in"; else miss "no daemon-reload for a pending drop-in"; fi
 if [[ "$out" == *"warn: podman.service gets LimitNOFILE=65535"* ]]; then ok "checks the value once loaded"; else miss "no check after the reload: $out"; fi
+
+echo "== NeedDaemonReload query fails"
+out=$(NEED_RELOAD_FAILS=1 RELOAD_FAILS=1 run_step "$home" 65535)
+if [[ "$out" == *"warn: podman.service gets"* ]]; then miss "blamed a drop-in although its load state is unknown: $out"; else ok "no drop-in blamed when the query and the reload fail"; fi
+out=$(NEED_RELOAD_FAILS=1 run_step "$home" 65535)
+if grep -qx -- '--user daemon-reload' "$STUB_LOG"; then ok "reloads when the query fails"; else miss "no daemon-reload after a failed query"; fi
 
 exit "$fail"
