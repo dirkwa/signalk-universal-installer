@@ -173,6 +173,9 @@ jobs:
       - name: timesync restart gating
         run: bash scripts/test/check-timesync-restart.sh
 
+      - name: timesync reads GPS data with SSL enabled
+        run: bash scripts/test/check-timesync-ssl.sh
+
       - name: resolv-watch DNS self-heal
         run: bash scripts/test/check-resolv-watch.sh
 
