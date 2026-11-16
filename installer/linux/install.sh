@@ -1357,7 +1357,12 @@ PODMAN_NOFILE_CONF="$PODMAN_LIMITS_DIR/zz-nofile.conf"
 PODMAN_NOFILE_IN_PLACE=0
 if [[ -f "$PODMAN_NOFILE_CONF" ]] && grep -qx 'LimitNOFILE=1048576' "$PODMAN_NOFILE_CONF"; then
     ok "podman.service LimitNOFILE already raised ($PODMAN_NOFILE_CONF present)"
-    PODMAN_NOFILE_IN_PLACE=1
+    # A run whose daemon-reload failed left the file on disk but not loaded;
+    # NeedDaemonReload is "yes" until a reload picks it up.
+    if [[ "$(systemctl --user show podman.service -p NeedDaemonReload --value 2>/dev/null || true)" != yes ]] \
+        || systemctl --user daemon-reload; then
+        PODMAN_NOFILE_IN_PLACE=1
+    fi
 elif mkdir -p "$PODMAN_LIMITS_DIR" 2>/dev/null \
     && printf '[Service]\nLimitNOFILE=1048576\n' > "$PODMAN_NOFILE_CONF"; then
     systemctl --user daemon-reload && PODMAN_NOFILE_IN_PLACE=1

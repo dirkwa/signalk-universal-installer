@@ -10,6 +10,8 @@
 #      drop-in sorting after zz-nofile.conf), the step warns; a numeric
 #      1048576 or "infinity" keeps it quiet.
 #   5. When daemon-reload fails, the step does not blame a drop-in.
+#   6. A re-run after a failed reload (NeedDaemonReload=yes) reloads, then
+#      checks; without a successful reload it still blames nothing.
 # Whether the running podman.service and its containers get the limit needs
 # a live user session and is verified manually.
 # Run from the repo root.
@@ -46,7 +48,9 @@ mkdir -p "$tmp/bin"
 cat > "$tmp/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
-if [[ "$*" == *" show podman.service "* ]]; then
+if [[ "$*" == *" show podman.service -p NeedDaemonReload "* ]]; then
+    echo "${NEED_RELOAD:-no}"
+elif [[ "$*" == *" show podman.service "* ]]; then
     echo "$SHOW_VALUE"
 fi
 if [[ "$*" == "--user daemon-reload" && -n "${RELOAD_FAILS:-}" ]]; then
@@ -124,5 +128,12 @@ home="$tmp/noreload"
 mkdir -p "$home"
 out=$(RELOAD_FAILS=1 run_step "$home" 65535)
 if [[ "$out" == *"warn: podman.service gets"* ]]; then miss "blamed a drop-in although the reload failed: $out"; else ok "no drop-in blamed"; fi
+
+echo "== re-run after the failed reload"
+out=$(NEED_RELOAD=yes RELOAD_FAILS=1 run_step "$home" 65535)
+if [[ "$out" == *"warn: podman.service gets"* ]]; then miss "blamed a drop-in although it is still not loaded: $out"; else ok "no drop-in blamed while the reload keeps failing"; fi
+out=$(NEED_RELOAD=yes run_step "$home" 65535)
+if grep -qx -- '--user daemon-reload' "$STUB_LOG"; then ok "reloads the pending drop-in"; else miss "no daemon-reload for a pending drop-in"; fi
+if [[ "$out" == *"warn: podman.service gets LimitNOFILE=65535"* ]]; then ok "checks the value once loaded"; else miss "no check after the reload: $out"; fi
 
 exit "$fail"
