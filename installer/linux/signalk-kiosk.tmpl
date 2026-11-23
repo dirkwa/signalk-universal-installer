@@ -12,7 +12,10 @@
 # the "autologin" — nothing prompts for a password. This works the same on a
 # box with no desktop at all (Pi OS Lite, a Debian server) as on one with a
 # desktop; on the latter the display manager is disabled while the kiosk is
-# enabled and re-enabled by `disable`.
+# enabled and re-enabled by `disable`. A box that boots to graphical.target
+# boots to multi-user.target while the kiosk is enabled: graphical.target
+# starts display-manager.service, and lightdm's postinst links that alias to
+# lightdm.service again on every lightdm upgrade, undoing the disable.
 #
 # The server runs with security enabled, so a fresh kiosk browser would stop
 # at a login form on a screen that may have no keyboard. `enable` therefore
@@ -420,6 +423,7 @@ conf_get() {
 render_conf() {
     local url="$1" browser="$2" base="$3" signin="$4" sk_type="$5"
     local prev_dm="$6" autologin="$7" user_created="$8" scheme="${9:-}" screen_pause="${10:-}"
+    local prev_target="${11:-}"
     cat <<EOF
 # Written by \`signalk kiosk enable\`; rewritten on every enable.
 # ${LAUNCHER} reads the KIOSK_URL, KIOSK_BROWSER, KIOSK_BASE, KIOSK_SIGNIN and
@@ -434,6 +438,7 @@ KIOSK_COLOR_SCHEME=${scheme}
 KIOSK_SCREEN_PAUSE=${screen_pause}
 KIOSK_SK_USER_TYPE=${sk_type}
 KIOSK_PREV_DISPLAY_MANAGER=${prev_dm}
+KIOSK_PREV_DEFAULT_TARGET=${prev_target}
 KIOSK_AUTOLOGIN_CHANGED=${autologin}
 KIOSK_SK_USER_CREATED=${user_created}
 EOF
@@ -1502,6 +1507,12 @@ display_manager_unit() {
     return 0
 }
 
+# The target the box boots to, as `systemctl get-default` prints it; empty
+# when systemctl fails.
+default_target() {
+    systemctl get-default 2>/dev/null || true
+}
+
 # A path is served by this server and can be signed into, and so is a full
 # URL that spells this server's own address another way (localhost, no port,
 # no path): it is rewritten onto the base, which every later check compares
@@ -1522,7 +1533,7 @@ resolve_url() {
 cmd_enable() {
     local want_url="" url_defaulted=0 browser=chromium autologin=1 sk_type=admin scheme=dark screen_pause=on
     local base bin pkgs=() dock_status
-    local prev_dm dm_now url signin=none prev_signin prev_type changed user_created token tls_origin kiosk_uid
+    local prev_dm dm_now prev_target target_now url signin=none prev_signin prev_type changed user_created token tls_origin kiosk_uid
     while (( $# )); do
         case "$1" in
             --url)          want_url="${2:?--url needs a path or URL}"; shift 2 ;;
@@ -1735,10 +1746,18 @@ cmd_enable() {
     prev_dm=$(conf_get KIOSK_PREV_DISPLAY_MANAGER)
     dm_now=$(display_manager_unit)
     [[ -n "$prev_dm" ]] || prev_dm="$dm_now"
+    # Recorded once as well: after the first enable the box boots to
+    # multi-user.target, so a second enable finds nothing to record and keeps
+    # what the first one recorded.
+    prev_target=$(conf_get KIOSK_PREV_DEFAULT_TARGET)
+    target_now=$(default_target)
+    if [[ -z "$prev_target" && "$target_now" == graphical.target ]]; then
+        prev_target=graphical.target
+    fi
 
     render_launcher | install_file 0755 "$LAUNCHER_FILE"
     render_conf "$url" "$bin" "$base" "$signin" "$sk_type" "$prev_dm" "$changed" "$user_created" "$scheme" \
-        "$screen_pause" | install_file 0644 "$CONF_FILE"
+        "$screen_pause" "$prev_target" | install_file 0644 "$CONF_FILE"
     render_pam | install_file 0644 "$PAM_FILE"
     kiosk_uid=$(kiosk_uid)
     remove_user_slice_dropins
@@ -1786,6 +1805,16 @@ cmd_enable() {
         run_root systemctl disable "$dm_now"
         ok "disabled the desktop login (${dm_now}); \`signalk kiosk disable\` re-enables it"
     fi
+    # Disabling is not enough on its own: lightdm's postinst links
+    # display-manager.service to lightdm.service again on every upgrade, and
+    # graphical.target starts it. multi-user.target does not.
+    if [[ "$target_now" == graphical.target ]]; then
+        if run_root systemctl set-default multi-user.target; then
+            ok "the box boots to multi-user.target, which starts no desktop login; \`signalk kiosk disable\` puts graphical.target back"
+        else
+            warn "could not make multi-user.target the boot target: if a package update enables the desktop login again, it takes the screen at the next boot"
+        fi
+    fi
     run_root systemctl enable "$KIOSK_UNIT"
     ok "${KIOSK_UNIT} enabled — the box boots into the kiosk"
     # prev_dm, not dm_now: disabling the display manager does not stop it, so
@@ -1820,7 +1849,7 @@ report_kiosk_state() {
 }
 
 cmd_disable() {
-    local purge=0 prev_dm prev_signin changed user_created base token had_unit=0 kiosk_uid
+    local purge=0 prev_dm prev_target target_left="" prev_signin changed user_created base token had_unit=0 kiosk_uid
     while (( $# )); do
         case "$1" in
             --purge) purge=1; shift ;;
@@ -1830,6 +1859,7 @@ cmd_disable() {
     refuse_root
     need_debian_family
     prev_dm=$(conf_get KIOSK_PREV_DISPLAY_MANAGER)
+    prev_target=$(conf_get KIOSK_PREV_DEFAULT_TARGET)
     changed=$(conf_get KIOSK_AUTOLOGIN_CHANGED)
     user_created=$(conf_get KIOSK_SK_USER_CREATED)
     prev_signin=$(conf_get KIOSK_SIGNIN)
@@ -1861,6 +1891,14 @@ cmd_disable() {
     fi
     # A failure here must not skip the sign-in cleanup below, which revokes
     # the kiosk's token.
+    if [[ -n "$prev_target" ]]; then
+        if run_root systemctl set-default "$prev_target"; then
+            ok "the box boots to ${prev_target} again"
+        else
+            warn "could not make ${prev_target} the boot target again"
+            target_left="$prev_target"
+        fi
+    fi
     if [[ -n "$prev_dm" ]] && run_root systemctl enable --now "$prev_dm"; then
         ok "desktop login re-enabled (${prev_dm})"
     elif [[ -n "$prev_dm" ]] || (( had_unit )); then
@@ -1890,16 +1928,17 @@ cmd_disable() {
                 fi
             fi
         fi
-        # Whatever is not undone stays recorded, so that disable run again
-        # finishes the job.
-        if [[ -n "$changed" || "$user_created" == 1 ]]; then
-            warn "left for now:"
-            [[ "$user_created" != 1 ]] || warn "  the Signal K user ${SK_KIOSK_USER}"
-            [[ -z "$changed" ]] || warn "  ${AUTOLOGIN_ID}, switched on"
-            render_conf "" "" "" none "" "" "$changed" "$user_created" \
-                | install_file 0644 "$CONF_FILE"
-            warn "run \`signalk kiosk disable\` again to put them back"
-        fi
+    fi
+    # Whatever is not undone stays recorded, so that disable run again
+    # finishes the job.
+    if [[ -n "$changed" || "$user_created" == 1 || -n "$target_left" ]]; then
+        warn "left for now:"
+        [[ "$user_created" != 1 ]] || warn "  the Signal K user ${SK_KIOSK_USER}"
+        [[ -z "$changed" ]] || warn "  ${AUTOLOGIN_ID}, switched on"
+        [[ -z "$target_left" ]] || warn "  the boot target, not ${target_left} yet"
+        render_conf "" "" "" none "" "" "$changed" "$user_created" "" "" "$target_left" \
+            | install_file 0644 "$CONF_FILE"
+        warn "run \`signalk kiosk disable\` again to put them back"
     fi
 
     if (( purge )) && getent passwd "$KIOSK_USER" >/dev/null 2>&1; then
@@ -1952,7 +1991,7 @@ browser_state() {
 }
 
 cmd_status() {
-    local enabled active
+    local enabled active dm prev_dm fix
     print_scan
     section "Kiosk"
     if [[ ! -f "$UNIT_FILE" ]]; then
@@ -1984,8 +2023,19 @@ cmd_status() {
     else
         printf '  %-12s %s\n' "sign-in" "none — the page opens signed out"
     fi
-    if [[ -n "$(conf_get KIOSK_PREV_DISPLAY_MANAGER)" ]]; then
-        printf '  %-12s %s\n' "desktop" "$(conf_get KIOSK_PREV_DISPLAY_MANAGER) disabled while the kiosk is on"
+    # A kiosk enabled by a helper that left the boot target at
+    # graphical.target: an upgrade of the display manager enables it again.
+    # enable starts from its defaults, so the hint asks for the options; it
+    # says itself when a running desktop needs a reboot.
+    dm=$(display_manager_unit)
+    prev_dm=$(conf_get KIOSK_PREV_DISPLAY_MANAGER)
+    fix="run \`signalk kiosk enable\` again with the options it was enabled with"
+    if [[ "$(default_target)" == graphical.target && -n "$dm" ]]; then
+        printf '  %-12s %s\n' "desktop" "${dm} is enabled and the box boots to graphical.target, so the desktop login starts at boot and holds the screen (${fix})"
+    elif [[ "$(default_target)" == graphical.target && -n "$prev_dm" ]]; then
+        printf '  %-12s %s\n' "desktop" "${prev_dm} is disabled, but the box boots to graphical.target: an upgrade that enables ${prev_dm} again gives it the screen at the next boot (${fix})"
+    elif [[ -n "$prev_dm" ]]; then
+        printf '  %-12s %s\n' "desktop" "${prev_dm} does not start at boot while the kiosk is on"
     fi
     [[ "$active" == active ]] || echo "  logs: journalctl -u ${KIOSK_UNIT} -b"
 }
