@@ -65,7 +65,7 @@ JWT="eyJhbGciOiJIUzI1NiJ9.eyJpZCI6InNpZ25hbGsta2lvc2sifQ.c2lnbmF0dXJl"
 # ── hermetic PATH ─────────────────────────────────────────────────────────
 sysbin="$tmp/sysbin"
 mkdir -p "$sysbin"
-for t in bash sh cat sed grep head tail tr od mktemp rm rmdir install mkdir \
+for t in bash sh cat sed grep head tail tr od mktemp rm rmdir install mkdir mv \
          readlink basename dirname env jq printf sort uname cut wc touch chmod ln sha256sum \
          sleep mkfifo getconf; do
     real=$(command -v "$t") || { echo "[ERR] test needs $t" >&2; exit 2; }
@@ -993,6 +993,8 @@ root="$tmp/root"
 home="$tmp/home"
 ebin="$tmp/ebin"
 state="$tmp/state"
+# The helper's TMPDIR, so a temp file it leaves can be seen.
+tmpdir="$tmp/tmpdir"
 conf="$root/etc/signalk-kiosk.conf"
 tokfile="$root/etc/signalk-kiosk.token"
 startpage="$root/var/lib/signalk-kiosk/start.html"
@@ -1015,6 +1017,32 @@ chmod +x "$ebin/udevadm"
 cat >"$ebin/sudo" <<'EOF'
 #!/bin/bash
 exec "$@"
+EOF
+# coreutils install deletes its destination, creates it empty with mode 0600,
+# then copies. install-fails holds a path: an install to that path, or to a
+# name that starts with it, stops after the create and exits 1, which leaves
+# what a copy stopped before its first byte leaves.
+cat >"$ebin/install" <<'EOF'
+#!/bin/bash
+dest="${*: -1}"
+if [[ -s "$STUB_STATE/install-fails" && "$dest" == "$(cat "$STUB_STATE/install-fails")"* ]]; then
+    mkdir -p -- "${dest%/*}"
+    rm -f -- "$dest"
+    (umask 077 && : >"$dest")
+    exit 1
+fi
+PATH="${PATH#"$STUB_EBIN:"}"
+exec install "$@"
+EOF
+# mv-fails holds a path: renaming a file whose name starts with it fails.
+cat >"$ebin/mv" <<'EOF'
+#!/bin/bash
+src="${*: -2:1}"
+if [[ -s "$STUB_STATE/mv-fails" && "$src" == "$(cat "$STUB_STATE/mv-fails")"* ]]; then
+    exit 1
+fi
+PATH="${PATH#"$STUB_EBIN:"}"
+exec mv "$@"
 EOF
 # run_helper keeps the helper's 1s wait step, so every wait loop still ends at
 # its limit (a step of 0 would spin forever on a condition that never holds);
@@ -1105,9 +1133,10 @@ cat >"$ebin/apt-cache" <<'EOF'
 [[ "$*" == "show chromium" ]] && exit 0
 [[ "$*" == "show rpi-chromium-mods" && -e "$STUB_STATE/pi-os" ]]
 EOF
+# getent-fails: no passwd entry, so no uid, even for a user useradd created.
 cat >"$ebin/getent" <<'EOF'
 #!/bin/bash
-[[ -e "$STUB_STATE/user-exists" ]] || exit 2
+[[ -e "$STUB_STATE/user-exists" && ! -e "$STUB_STATE/getent-fails" ]] || exit 2
 home=$(cat "$STUB_STATE/kiosk-home" 2>/dev/null || echo /var/lib/signalk-kiosk)
 echo "signalk-kiosk:x:999:999::${home}:/usr/sbin/nologin"
 EOF
@@ -1285,7 +1314,7 @@ EOF
 chmod +x "$ebin"/*
 
 run_helper() {
-    PATH="$ebin:$sysbin5" HOME="$home" KIOSK_ROOT="$root" KIOSK_SYSFS="$sysfs" \
+    PATH="$ebin:$sysbin5" HOME="$home" TMPDIR="$tmpdir" KIOSK_ROOT="$root" KIOSK_SYSFS="$sysfs" \
         KIOSK_DEV_INPUT="$tmp/dev/input" SIGNALK_URL="http://127.0.0.1:80/signalk" \
         SIGNALK_CLI="$ebin/signalk" KIOSK_NPM_REGISTRY="https://registry.test" \
         KIOSK_WAIT_STEP=1 NO_COLOR=1 \
@@ -1297,9 +1326,9 @@ run_helper() {
 # lightdm, booting to graphical.target), the installer's admin token, one
 # admin user on the server, and nothing of the kiosk's.
 reset_box() {
-    rm -rf "$root" "$home" "$state"
+    rm -rf "$root" "$home" "$state" "$tmpdir"
     rm -f "$ebin/cage" "$ebin/chromium" "$ebin/jq"
-    mkdir -p "$root/etc/systemd/system" "$home/.signalk" "$home/.signalk-doctor" "$state"
+    mkdir -p "$root/etc/systemd/system" "$home/.signalk" "$home/.signalk-doctor" "$state" "$tmpdir"
     printf '%s\n' "$ADMIN_TOKEN" >"$home/.signalk-doctor/signalk-token"
     echo '[{"userId":"admin","type":"admin"}]' >"$state/users.json"
     ln -s /lib/systemd/system/lightdm.service "$root/etc/systemd/system/display-manager.service"
@@ -1351,6 +1380,16 @@ out_has() {
         ok "$2"
     else
         miss "$2 — output lacks: $1"
+    fi
+}
+# no_temp_left <description>: the helper left nothing in its TMPDIR.
+no_temp_left() {
+    local left
+    left=$(find "$tmpdir" -mindepth 1 2>/dev/null | head -5 | tr '\n' ' ')
+    if [[ -z "$left" ]]; then
+        ok "$1"
+    else
+        miss "$1 — left: $left"
     fi
 }
 no_unexpected_requests() {
@@ -2001,6 +2040,173 @@ if [[ -e "$conf" ]]; then
     miss "the record is still there after the second disable: $(grep -v '^#' "$conf" | tr '\n' '|')"
 else
     ok "the record is gone once the second disable is done"
+fi
+
+echo "  an enable that stops while it copies the conf"
+reset_box
+run_helper enable >/dev/null 2>&1 || true
+printf '%s' "$conf" >"$state/install-fails"
+if out=$(run_helper enable --light 2>&1); then
+    miss "enable exits 0 although the copy of the conf failed"
+else
+    ok "enable stops when the copy of the conf fails"
+fi
+rm -f "$state/install-fails"
+if [[ -e "$conf.new" ]]; then
+    ok "the stopped copy leaves its .new file"
+else
+    miss "no ${conf#"$root"}.new after the stopped copy"
+fi
+conf_has 'KIOSK_COLOR_SCHEME=dark' "the conf the first enable wrote is still there"
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target' "the boot target stays recorded"
+conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service' "the desktop login stays recorded"
+conf_has 'KIOSK_SK_USER_CREATED=1' "the Signal K user stays recorded"
+no_temp_left "the stopped copy's temp file is removed"
+printf '%s' "$conf" >"$state/mv-fails"
+if run_helper enable --light >/dev/null 2>&1; then
+    miss "enable exits 0 although the rename of the conf failed"
+else
+    ok "enable stops when the rename of the conf fails"
+fi
+rm -f "$state/mv-fails"
+conf_has 'KIOSK_COLOR_SCHEME=dark' "the conf stays as it was when the rename fails"
+no_temp_left "the failed rename's temp file is removed"
+run_enable --light
+conf_has 'KIOSK_COLOR_SCHEME=light' "the next enable writes the conf"
+leftover=$(find "$root" -name '*.new')
+if [[ -z "$leftover" ]]; then
+    ok "no .new file is left once enable is done"
+else
+    miss "left behind: $(tr '\n' '|' <<<"$leftover")"
+fi
+
+echo "  disable after enables that stopped while they copied"
+reset_box
+run_helper enable >/dev/null 2>&1 || true
+# Every file enable writes, in the reverse of enable's order: each enable stops
+# before the file the one before it stopped at, so that file's .new stays.
+written=(etc/modules-load.d/signalk-kiosk-i2c.conf
+         etc/systemd/system/signalk-kiosk-screen.service
+         usr/local/lib/signalk-kiosk/screen-watch
+         etc/udev/rules.d/61-signalk-kiosk-cec.rules
+         etc/systemd/system/signalk-kiosk.service
+         etc/systemd/system/user-999.slice.d/50-signalk-kiosk.conf
+         etc/pam.d/signalk-kiosk
+         etc/signalk-kiosk.conf
+         usr/local/lib/signalk-kiosk/browser
+         etc/signalk-kiosk.token)
+for f in "${written[@]}"; do
+    printf '%s' "$root/$f" >"$state/install-fails"
+    if run_helper enable >/dev/null 2>&1; then
+        miss "enable exits 0 although the copy of /$f failed"
+    fi
+done
+rm -f "$state/install-fails"
+missing="" empty=""
+for f in "${written[@]}"; do
+    [[ -e "$root/$f.new" ]] || missing+=" /$f.new"
+    [[ -s "$root/$f" ]] || empty+=" /$f"
+done
+if [[ -z "$missing" ]]; then
+    ok "the stopped copies left their .new files"
+else
+    miss "no .new file after the stopped copy:$missing"
+fi
+if [[ -z "$empty" ]]; then
+    ok "the stopped copies kept the files they were to replace"
+else
+    miss "missing or empty after the stopped copy:$empty"
+fi
+no_temp_left "the stopped copies' temp files are removed"
+if out=$(run_helper disable 2>&1); then
+    ok "disable exits 0"
+else
+    miss "disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
+fi
+leftover=$(find "$root" -name '*.new')
+if [[ -z "$leftover" ]]; then
+    ok "disable removes the .new files"
+else
+    miss "left behind: $(tr '\n' '|' <<<"$leftover")"
+fi
+left=""
+for d in /usr/local/lib/signalk-kiosk /etc/systemd/system/user-999.slice.d; do
+    [[ ! -e "$root$d" ]] || left+=" $d"
+done
+if [[ -z "$left" ]]; then
+    ok "disable removes the launcher's and the slice drop-in's directories"
+else
+    miss "directories left:$left"
+fi
+
+echo "  sign-in switched off after a stopped copy of the token"
+reset_box
+run_helper enable >/dev/null 2>&1 || true
+printf '%s' "$tokfile" >"$state/install-fails"
+if run_helper enable >/dev/null 2>&1; then
+    miss "enable exits 0 although the copy of the token failed"
+fi
+rm -f "$state/install-fails"
+if [[ -e "$tokfile.new" ]]; then
+    ok "the stopped copy leaves token.new"
+else
+    miss "no token.new after the stopped copy"
+fi
+run_enable --no-autologin
+if [[ ! -e "$tokfile" && ! -e "$tokfile.new" ]]; then
+    ok "an enable without sign-in removes the token and its .new"
+else
+    miss "token files left: $(find "$root/etc" -maxdepth 1 -name 'signalk-kiosk.token*' | tr '\n' ' ')"
+fi
+
+echo "  a disable that stops while it rewrites the conf"
+reset_box
+run_helper enable >/dev/null 2>&1 || true
+: >"$state/server-down"
+printf '%s' "$conf" >"$state/install-fails"
+if run_helper disable >/dev/null 2>&1; then
+    miss "disable exits 0 although the copy of the conf failed"
+else
+    ok "disable stops when the copy of the conf fails"
+fi
+rm -f "$state/install-fails" "$state/server-down"
+if [[ -e "$conf.new" ]]; then
+    ok "the stopped rewrite leaves conf.new"
+else
+    miss "no conf.new after the stopped rewrite"
+fi
+conf_has 'KIOSK_SK_USER_CREATED=1' "the Signal K user stays recorded"
+conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed' "the plugin install stays recorded"
+no_temp_left "the stopped rewrite's temp file is removed"
+rm -f "$state/user-calls"
+if out=$(run_helper disable 2>&1); then
+    ok "disable again exits 0"
+else
+    miss "second disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
+fi
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == DELETE ]]; then
+    ok "the second disable deletes the kiosk's Signal K user"
+else
+    miss "Signal K user calls: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
+fi
+if [[ ! -e "$conf" && ! -e "$conf.new" ]]; then
+    ok "the second disable removes the conf and its .new"
+else
+    miss "conf files left: $(find "$root/etc" -maxdepth 1 -name 'signalk-kiosk.conf*' | tr '\n' ' ')"
+fi
+
+echo "  enable without a uid for the kiosk user"
+reset_box
+mkdir -p "$root/etc/systemd/system/user-998.slice.d"
+printf '[Slice]\nCPUWeight=50\n' >"$root/etc/systemd/system/user-998.slice.d/50-signalk-kiosk.conf"
+: >"$state/getent-fails"
+out=$(run_helper enable 2>&1) || true
+rm -f "$state/getent-fails"
+out_has "no uid for signalk-kiosk" "warns that the kiosk runs without its lower CPU weight"
+if [[ ! -e "$root/etc/systemd/system/user-998.slice.d" ]]; then
+    ok "removes every uid's drop-in"
+else
+    miss "user-998.slice.d is still there"
 fi
 
 echo "  Raspberry Pi OS, a page on another host"

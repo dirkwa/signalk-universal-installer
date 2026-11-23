@@ -164,13 +164,32 @@ fi
 run_root() { "${SUDO[@]}" "$@"; }
 
 # Write stdin to a root-owned file. Staged through a temp file so a failed
-# sudo leaves the destination untouched rather than truncated.
+# sudo leaves the destination untouched rather than truncated. `install`
+# deletes its destination before it copies, so it copies to <dest>.new, and
+# `mv` renames that onto <dest> in the same directory: a run stopped before
+# the rename leaves the old <dest> in place, and <dest>.new until the next
+# install_file for <dest> or remove_written. When `install` or `mv` fails,
+# the temp file is removed as well: for the token it holds the token.
 install_file() {
-    local mode="$1" dest="$2" tmp
+    local mode="$1" dest="$2" tmp rc=0
     tmp=$(mktemp)
     cat >"$tmp"
-    run_root install -D -m "$mode" "$tmp" "$dest"
+    if run_root install -D -m "$mode" "$tmp" "${dest}.new"; then
+        run_root mv -f "${dest}.new" "$dest" || rc=$?
+    else
+        rc=$?
+    fi
     rm -f "$tmp"
+    return "$rc"
+}
+
+# Remove files install_file writes, each with its <file>.new.
+remove_written() {
+    local f paths=()
+    for f in "$@"; do
+        paths+=("$f" "${f}.new")
+    done
+    run_root rm -f "${paths[@]}"
 }
 
 # ─── Signal K endpoints ────────────────────────────────────────────────
@@ -1423,13 +1442,14 @@ user_slice_dropin() {
 }
 
 # Every uid's: a kiosk user removed by --purge and created again can have
-# another uid.
+# another uid. With a uid, all but that uid's, which enable then rewrites.
 remove_user_slice_dropins() {
-    local f
-    for f in "${KIOSK_ROOT}"/etc/systemd/system/user-*.slice.d/"${SLICE_DROPIN}"; do
-        [[ -e "$f" ]] || continue
-        run_root rm -f "$f"
-        run_root rmdir "${f%/*}" 2>/dev/null || true
+    local keep="${1:-}" d
+    for d in "${KIOSK_ROOT}"/etc/systemd/system/user-*.slice.d; do
+        [[ -z "$keep" || "$d" != "${KIOSK_ROOT}/etc/systemd/system/user-${keep}.slice.d" ]] || continue
+        [[ -e "${d}/${SLICE_DROPIN}" || -e "${d}/${SLICE_DROPIN}.new" ]] || continue
+        remove_written "${d}/${SLICE_DROPIN}"
+        run_root rmdir "$d" 2>/dev/null || true
     done
 }
 
@@ -1454,7 +1474,7 @@ remove_screen_watch() {
     if [[ -f "$SCREEN_UNIT_FILE" ]]; then
         run_root systemctl disable --now "$SCREEN_UNIT" || true
     fi
-    run_root rm -f "$SCREEN_UNIT_FILE" "$SCREEN_WATCH_FILE" "$I2C_MODULE_FILE"
+    remove_written "$SCREEN_UNIT_FILE" "$SCREEN_WATCH_FILE" "$I2C_MODULE_FILE"
     run_root rm -rf "$SCREEN_STATE_DIR"
 }
 
@@ -1724,7 +1744,8 @@ cmd_enable() {
     if [[ "$signin" != token ]]; then
         # Both files hold the token. The browser profile keeps its session
         # cookie regardless; deleting the user is what signs the kiosk out.
-        run_root rm -f "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
+        remove_written "$TOKEN_FILE"
+        run_root rm -f "${KIOSK_ROOT}$(kiosk_home)/start.html"
         # The session cookie goes whoever the user is: deleting a user revokes
         # it, but restoring a found user's type, or leaving one alone, does not.
         if [[ "$prev_signin" == token ]]; then
@@ -1760,11 +1781,12 @@ cmd_enable() {
         "$screen_pause" "$prev_target" | install_file 0644 "$CONF_FILE"
     render_pam | install_file 0644 "$PAM_FILE"
     kiosk_uid=$(kiosk_uid)
-    remove_user_slice_dropins
     # Never with an empty uid: user-.slice.d/ would weight every user's slice.
     if [[ "$kiosk_uid" =~ ^[0-9]+$ ]]; then
+        remove_user_slice_dropins "$kiosk_uid"
         render_user_slice_dropin | install_file 0644 "$(user_slice_dropin "$kiosk_uid")"
     else
+        remove_user_slice_dropins
         warn "no uid for ${KIOSK_USER}; the kiosk runs without its lower CPU weight"
     fi
     run_root rm -f "$OLD_SLICE_FILE"
@@ -1883,8 +1905,8 @@ cmd_disable() {
     # conf rewrite below fails and set -e stops the run, and a second disable
     # would find nothing to put back. It is removed at the end, or rewritten
     # with what is left.
-    run_root rm -f "$UNIT_FILE" "$OLD_SLICE_FILE" "$PAM_FILE" "$LAUNCHER_FILE" \
-        "$UDEV_RULE_FILE" "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
+    remove_written "$UNIT_FILE" "$PAM_FILE" "$LAUNCHER_FILE" "$UDEV_RULE_FILE" "$TOKEN_FILE"
+    run_root rm -f "$OLD_SLICE_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
     reload_udev_input
     run_root rmdir "${LAUNCHER_FILE%/*}" 2>/dev/null || true
     run_root systemctl daemon-reload
@@ -1944,7 +1966,7 @@ cmd_disable() {
             | install_file 0644 "$CONF_FILE"
         warn "run \`signalk kiosk disable\` again to put them back"
     else
-        run_root rm -f "$CONF_FILE"
+        remove_written "$CONF_FILE"
     fi
 
     if (( purge )) && getent passwd "$KIOSK_USER" >/dev/null 2>&1; then
