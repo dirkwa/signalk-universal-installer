@@ -1879,7 +1879,11 @@ cmd_disable() {
     fi
     kiosk_uid=$(kiosk_uid)
     remove_user_slice_dropins
-    run_root rm -f "$UNIT_FILE" "$OLD_SLICE_FILE" "$PAM_FILE" "$CONF_FILE" "$LAUNCHER_FILE" \
+    # Not the conf: removed here, it would be gone when daemon-reload or the
+    # conf rewrite below fails and set -e stops the run, and a second disable
+    # would find nothing to put back. It is removed at the end, or rewritten
+    # with what is left.
+    run_root rm -f "$UNIT_FILE" "$OLD_SLICE_FILE" "$PAM_FILE" "$LAUNCHER_FILE" \
         "$UDEV_RULE_FILE" "$TOKEN_FILE" "${KIOSK_ROOT}$(kiosk_home)/start.html"
     reload_udev_input
     run_root rmdir "${LAUNCHER_FILE%/*}" 2>/dev/null || true
@@ -1939,6 +1943,8 @@ cmd_disable() {
         render_conf "" "" "" none "" "" "$changed" "$user_created" "" "" "$target_left" \
             | install_file 0644 "$CONF_FILE"
         warn "run \`signalk kiosk disable\` again to put them back"
+    else
+        run_root rm -f "$CONF_FILE"
     fi
 
     if (( purge )) && getent passwd "$KIOSK_USER" >/dev/null 2>&1; then

@@ -1025,7 +1025,8 @@ exit 0
 EOF
 # Disabling a unit does not stop it: lightdm runs until a test marks the box
 # rebooted with it disabled (lightdm-stopped). The boot target is the
-# default.target link under STUB_ROOT; set-default-fails makes set-default fail.
+# default.target link under STUB_ROOT; set-default-fails makes set-default fail,
+# and daemon-reload-fails makes daemon-reload fail.
 cat >"$ebin/systemctl" <<'EOF'
 #!/bin/bash
 echo "systemctl $*" >>"$STUB_STATE/calls"
@@ -1033,6 +1034,8 @@ case "$*" in
     get-default)
         t=$(readlink "$STUB_ROOT/etc/systemd/system/default.target") || exit 1
         basename "$t" ;;
+    daemon-reload)
+        [[ ! -e "$STUB_STATE/daemon-reload-fails" ]] || exit 1 ;;
     "set-default "*)
         [[ ! -e "$STUB_STATE/set-default-fails" ]] || exit 1
         ln -sfn "/lib/systemd/system/$2" "$STUB_ROOT/etc/systemd/system/default.target" ;;
@@ -1953,6 +1956,52 @@ fi
 rm -f "$state/set-default-fails"
 conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target' "the boot target stays recorded with no sign-in step left"
 out_has 'again to put them back' "says how to finish"
+
+echo "  a disable that stops before it is done"
+reset_box
+run_helper enable >/dev/null 2>&1 || true
+: >"$state/daemon-reload-fails"
+: >"$state/calls"
+if out=$(run_helper disable 2>&1); then
+    miss "disable exits 0 although daemon-reload failed"
+else
+    ok "disable stops when daemon-reload fails"
+fi
+rm -f "$state/daemon-reload-fails"
+call_made 'systemctl daemon-reload' "the run got as far as daemon-reload"
+if [[ ! -e "$root/etc/systemd/system/signalk-kiosk.service" ]]; then
+    ok "the kiosk files were removed before the stop"
+else
+    miss "the kiosk unit is still there: the run stopped before the removal"
+fi
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target' "the boot target stays recorded"
+conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service' "the desktop login stays recorded"
+conf_has 'KIOSK_SK_USER_CREATED=1' "the Signal K user stays recorded"
+conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed' "the plugin install stays recorded"
+: >"$state/calls"
+rm -f "$state/user-calls"
+if out=$(run_helper disable 2>&1); then
+    ok "disable again exits 0"
+else
+    miss "second disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
+fi
+call_made 'systemctl set-default graphical.target' "the second disable sets the boot target back"
+call_made 'systemctl enable --now lightdm.service' "the second disable gives the desktop login back"
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == DELETE ]]; then
+    ok "the second disable deletes the kiosk's Signal K user"
+else
+    miss "Signal K user calls: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
+fi
+if jq -e '.enabled == false' "$cfgf" >/dev/null 2>&1; then
+    ok "the second disable switches signalk-autologin off"
+else
+    miss "plugin config after the second disable: $(cat "$cfgf" 2>/dev/null)"
+fi
+if [[ -e "$conf" ]]; then
+    miss "the record is still there after the second disable: $(grep -v '^#' "$conf" | tr '\n' '|')"
+else
+    ok "the record is gone once the second disable is done"
+fi
 
 echo "  Raspberry Pi OS, a page on another host"
 reset_box
