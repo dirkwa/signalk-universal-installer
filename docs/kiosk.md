@@ -25,7 +25,7 @@ signalk kiosk disable          # put the boot back and revoke the kiosk's sign-i
 4. Sets up the sign-in (next section): the Signal K user `signalk-kiosk`, its token, and the signalk-autologin plugin. Skip with `--no-autologin`.
 5. Restarts the server when step 3 or 4 installed something, since the server loads a newly installed package only when it starts.
 6. Writes the files in the table below and enables `signalk-kiosk.service`, and the service that pauses the browser while the monitor is off ([Monitor off](#monitor-off)).
-7. Disables the desktop login if the box has one, and starts the kiosk — immediately on a box without a desktop, at the next reboot on one with a desktop still running.
+7. Disables the desktop login if the box has one, makes `multi-user.target` the boot target on a box that boots to `graphical.target`, and starts the kiosk — immediately on a box without a desktop, at the next reboot on one with a desktop still running. Disabling alone does not last: lightdm's package scripts link `display-manager.service` to `lightdm.service` again on every lightdm upgrade, and `graphical.target` starts that unit. `multi-user.target` does not. A unit that only `graphical.target` starts no longer starts at boot; on Raspberry Pi OS Trixie with the desktop those are `accounts-daemon` and `udisks2`, which D-Bus starts when a program asks for them.
 
 The App Store installs and the sign-in go through the server's admin API with the installer's admin token, `~/.signalk-doctor/signalk-token`. Without that file, `enable` still sets up the kiosk, which then opens its page signed out.
 
@@ -36,7 +36,7 @@ The App Store installs and the sign-in go through the server's admin API with th
 | `/etc/pam.d/signalk-kiosk` | The PAM stack the unit opens its session with. systemd never calls `pam_authenticate` for a service, so nothing asks for a password; `pam_systemd` registers the session on seat0, which is what lets cage open the display and input devices. |
 | `/etc/udev/rules.d/61-signalk-kiosk-cec.rules` | Makes the Raspberry Pi's HDMI-CEC inputs keyboards instead of pointers (see [Touchscreens](#touchscreens)). Matches nothing on other hardware. |
 | `/usr/local/lib/signalk-kiosk/browser` | The launcher cage runs: waits for the server, clears the crash marker, adds touch flags, writes the sign-in start page, starts the browser, and watches it for Chromium's frame-metrics stall ([Chromium's frame-metrics stall](#chromiums-frame-metrics-stall)). |
-| `/etc/signalk-kiosk.conf` | The page, browser, sign-in mode and colour scheme the launcher uses, plus what `disable` has to undo (the desktop login unit, whether the kiosk installed or switched on signalk-autologin, whether it created the Signal K user). |
+| `/etc/signalk-kiosk.conf` | The page, browser, sign-in mode and colour scheme the launcher uses, plus what `disable` has to undo (the desktop login unit, the boot target before `enable`, whether the kiosk installed or switched on signalk-autologin, whether it created the Signal K user). |
 | `/etc/signalk-kiosk.token` | The kiosk's sign-in token, readable by root and the `signalk-kiosk` group only. |
 | `/var/lib/signalk-kiosk/start.html` | Written by the launcher at every start and readable by the kiosk user only: the page that hands the token to the server (next section). |
 
@@ -155,12 +155,14 @@ loginctl list-sessions                      # the kiosk session should be on sea
 
 "waiting for http://127.0.0.1…" lines in the journal mean the server was not answering yet — check `signalk health`.
 
+The screen shows the desktop login, or stays black while the journal repeats `Timeout waiting session to become active` every 15 seconds: the display manager holds seat0, so cage cannot open the display. This happens after an upgrade of the display manager on a kiosk enabled by a helper that left the boot target at `graphical.target`; a current helper's `signalk kiosk status` says so on its `desktop` line. Run `signalk update` first, which installs the current helper (if it reports `signalk-kiosk mount-missing`, see the top of this page), then `signalk kiosk enable` with the options the kiosk was enabled with, then reboot.
+
 The kiosk is signed out although `status` says `sign-in token`: the Signal K user `signalk-kiosk` was deleted or signalk-autologin was switched off. `signalk kiosk enable` sets both up again.
 
 ## Undo
 
 ```bash
-signalk kiosk disable           # desktop login (or the tty1 console) back, Signal K user deleted
+signalk kiosk disable           # boot target and desktop login (or the tty1 console) back, Signal K user deleted
 signalk kiosk disable --purge   # also removes the signalk-kiosk system user and its browser profile
 ```
 

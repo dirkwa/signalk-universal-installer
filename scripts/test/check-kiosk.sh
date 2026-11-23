@@ -1024,11 +1024,21 @@ cat >"$ebin/sleep" <<'EOF'
 exit 0
 EOF
 # Disabling a unit does not stop it: lightdm runs until a test marks the box
-# rebooted with it disabled (lightdm-stopped).
+# rebooted with it disabled (lightdm-stopped). The boot target is the
+# default.target link under STUB_ROOT; set-default-fails makes set-default fail,
+# and daemon-reload-fails makes daemon-reload fail.
 cat >"$ebin/systemctl" <<'EOF'
 #!/bin/bash
 echo "systemctl $*" >>"$STUB_STATE/calls"
 case "$*" in
+    get-default)
+        t=$(readlink "$STUB_ROOT/etc/systemd/system/default.target") || exit 1
+        basename "$t" ;;
+    daemon-reload)
+        [[ ! -e "$STUB_STATE/daemon-reload-fails" ]] || exit 1 ;;
+    "set-default "*)
+        [[ ! -e "$STUB_STATE/set-default-fails" ]] || exit 1
+        ln -sfn "/lib/systemd/system/$2" "$STUB_ROOT/etc/systemd/system/default.target" ;;
     "disable lightdm.service")
         rm -f "$STUB_ROOT/etc/systemd/system/display-manager.service" ;;
     "enable --now lightdm.service")
@@ -1284,8 +1294,8 @@ run_helper() {
 }
 
 # A box with a desktop installed and running (display-manager.service →
-# lightdm), the installer's admin token, one admin user on the server, and
-# nothing of the kiosk's.
+# lightdm, booting to graphical.target), the installer's admin token, one
+# admin user on the server, and nothing of the kiosk's.
 reset_box() {
     rm -rf "$root" "$home" "$state"
     rm -f "$ebin/cage" "$ebin/chromium" "$ebin/jq"
@@ -1293,6 +1303,7 @@ reset_box() {
     printf '%s\n' "$ADMIN_TOKEN" >"$home/.signalk-doctor/signalk-token"
     echo '[{"userId":"admin","type":"admin"}]' >"$state/users.json"
     ln -s /lib/systemd/system/lightdm.service "$root/etc/systemd/system/display-manager.service"
+    ln -s /lib/systemd/system/graphical.target "$root/etc/systemd/system/default.target"
 }
 
 # An installed signalk-autologin <version> the server has loaded, with <config>.
@@ -1417,6 +1428,8 @@ else
     ok "the token is neither printed nor in the conf file"
 fi
 call_made 'systemctl disable lightdm.service' "disables the running desktop login"
+call_made 'systemctl set-default multi-user.target' \
+    "boots to multi-user.target, which does not start display-manager.service"
 call_made 'systemctl enable signalk-kiosk.service' "enables the kiosk unit"
 call_not_made 'systemctl restart signalk-kiosk.service' \
     "desktop still running: the kiosk waits for the reboot instead of fighting it"
@@ -1426,6 +1439,7 @@ conf_has 'KIOSK_SIGNIN=token'
 conf_has 'KIOSK_SK_USER_TYPE=admin'
 conf_has "KIOSK_BROWSER=$ebin/chromium" "conf: browser path resolved after the install"
 conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service'
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target'
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed'
 conf_has 'KIOSK_SK_USER_CREATED=1'
 conf_has 'KIOSK_COLOR_SCHEME=dark' "conf: dark by default"
@@ -1508,6 +1522,8 @@ else
     ok "--readwrite: no admin warning"
 fi
 conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service' "re-enable keeps the recorded display manager"
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target' "re-enable keeps the recorded boot target"
+call_not_made 'systemctl set-default multi-user.target' "already multi-user.target: the boot target is left alone"
 conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed' "re-enable keeps the recorded plugin install"
 conf_has 'KIOSK_SK_USER_CREATED=1' "re-enable keeps the recorded Signal K user"
 call_not_made 'signalk restart' "plugin already loaded: no server restart"
@@ -1616,6 +1632,7 @@ fi
 call_made 'systemctl disable --now signalk-kiosk.service' "stops and disables the kiosk unit"
 call_made 'systemctl disable --now signalk-kiosk-screen.service' "stops and disables the screen watch"
 call_made 'systemctl enable --now lightdm.service' "gives the desktop login back"
+call_made 'systemctl set-default graphical.target' "boots to graphical.target again"
 call_made 'systemctl set-property --runtime user-999.slice CPUWeight=100' \
     "puts the running kiosk user's slice back to the default weight"
 for f in etc/systemd/system/signalk-kiosk.service etc/systemd/system/user-999.slice.d \
@@ -1729,10 +1746,10 @@ if [[ -e "$conf" ]]; then
 else
     ok "the record is gone once the cleanup is done"
 fi
-if grep -q 'getty@tty1\|lightdm' "$state/calls"; then
-    miss "the second disable touched tty1 or the desktop: $(grep 'getty\|lightdm' "$state/calls" | tr '\n' '|')"
+if grep -q 'getty@tty1\|lightdm\|set-default' "$state/calls"; then
+    miss "the second disable touched tty1, the desktop or the boot target: $(grep 'getty\|lightdm\|set-default' "$state/calls" | tr '\n' '|')"
 else
-    ok "the second disable leaves tty1 and the desktop alone"
+    ok "the second disable leaves tty1, the desktop and the boot target alone"
 fi
 
 echo "  re-enable while the server is down"
@@ -1818,6 +1835,173 @@ else
     miss "plugin config after disable: $(cat "$cfgf" 2>/dev/null)"
 fi
 call_made 'userdel --remove signalk-kiosk' "still removes the kiosk system user"
+
+echo "  a lightdm upgrade on a kiosk enabled before the boot target was set"
+reset_box
+run_helper enable >/dev/null 2>&1 || true
+# What an enable that left the boot target alone wrote, then lightdm's
+# postinst linking the alias again.
+sed -i '/^KIOSK_PREV_DEFAULT_TARGET=/d' "$conf"
+ln -sfn /lib/systemd/system/graphical.target "$root/etc/systemd/system/default.target"
+status_out=$(run_helper status 2>&1)
+if grep -qF 'lightdm.service is disabled, but the box boots to graphical.target: an upgrade that enables lightdm.service again gives it the screen at the next boot' <<<"$status_out"; then
+    ok "status: before the upgrade, warns that one would give the desktop login the screen"
+else
+    miss "status desktop line before the upgrade: $(grep 'desktop' <<<"$status_out")"
+fi
+ln -sfn /lib/systemd/system/lightdm.service "$root/etc/systemd/system/display-manager.service"
+status_out=$(run_helper status 2>&1)
+if grep -qF 'lightdm.service is enabled and the box boots to graphical.target, so the desktop login starts at boot and holds the screen' <<<"$status_out" \
+    && grep -qF ' again with the options it was enabled with)' <<<"$status_out"; then
+    ok "status: says the desktop login enabled again holds the screen, and to re-run enable with its options"
+else
+    miss "status desktop line: $(grep 'desktop' <<<"$status_out")"
+fi
+: >"$state/calls"
+run_enable
+call_made 'systemctl disable lightdm.service' "disables the desktop login again"
+call_made 'systemctl set-default multi-user.target' "sets the boot target the earlier enable left alone"
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target' "records graphical.target for disable"
+# The next lightdm upgrade links the alias again.
+ln -sfn /lib/systemd/system/lightdm.service "$root/etc/systemd/system/display-manager.service"
+status_out=$(run_helper status 2>&1)
+if grep -qE '^  desktop +lightdm\.service does not start at boot while the kiosk is on$' <<<"$status_out"; then
+    ok "status: on multi-user.target the linked desktop login does not start"
+else
+    miss "status desktop line: $(grep 'desktop' <<<"$status_out")"
+fi
+
+echo "  a box without a desktop, booting to multi-user.target"
+reset_box
+rm -f "$root/etc/systemd/system/display-manager.service"
+ln -sfn /lib/systemd/system/multi-user.target "$root/etc/systemd/system/default.target"
+run_enable
+call_not_made 'systemctl set-default multi-user.target' "already multi-user.target: the boot target is left alone"
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=' "no boot target recorded for disable"
+call_made 'systemctl restart signalk-kiosk.service' "no desktop: starts the kiosk at once"
+: >"$state/calls"
+if out=$(run_helper disable 2>&1); then
+    ok "disable exits 0"
+else
+    miss "disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
+fi
+if grep -q 'set-default\|lightdm' "$state/calls"; then
+    miss "disable touched the boot target or a desktop: $(grep 'set-default\|lightdm' "$state/calls" | tr '\n' '|')"
+else
+    ok "disable leaves the boot target alone and starts no desktop"
+fi
+call_made 'systemctl start getty@tty1.service' "tty1 gets the console login"
+
+echo "  the boot target cannot be set"
+reset_box
+: >"$state/set-default-fails"
+run_enable
+rm -f "$state/set-default-fails"
+out_has 'could not make multi-user.target the boot target' "warns that the box still boots to graphical.target"
+call_made 'systemctl enable signalk-kiosk.service' "still enables the kiosk unit"
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target' "records graphical.target although set-default failed"
+: >"$state/calls"
+run_enable
+call_made 'systemctl set-default multi-user.target' "a re-enable tries the boot target again"
+
+echo "  disable cannot set the boot target back"
+reset_box
+run_helper enable >/dev/null 2>&1 || true
+: >"$state/set-default-fails"
+: >"$state/calls"
+rm -f "$state/user-calls"
+if out=$(run_helper disable 2>&1); then
+    ok "disable exits 0"
+else
+    miss "disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
+fi
+rm -f "$state/set-default-fails"
+out_has 'could not make graphical.target the boot target again' "warns that the boot target stays"
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == DELETE ]]; then
+    ok "still deletes the kiosk's Signal K user"
+else
+    miss "Signal K user calls: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
+fi
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target' "the boot target stays recorded for a second disable"
+conf_has 'KIOSK_SK_USER_CREATED=' "the deleted Signal K user is not recorded"
+out_has 'again to put them back' "says how to finish"
+: >"$state/calls"
+if out=$(run_helper disable 2>&1); then
+    ok "disable again exits 0"
+else
+    miss "second disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
+fi
+call_made 'systemctl set-default graphical.target' "the second disable sets the boot target back"
+if [[ -e "$conf" ]]; then
+    miss "the record is still there after the second disable: $(grep -v '^#' "$conf" | tr '\n' '|')"
+else
+    ok "the record is gone once the boot target is back"
+fi
+if grep -q 'getty@tty1\|lightdm' "$state/calls"; then
+    miss "the second disable touched tty1 or the desktop: $(grep 'getty\|lightdm' "$state/calls" | tr '\n' '|')"
+else
+    ok "the second disable leaves tty1 and the desktop alone"
+fi
+
+echo "  disable without a sign-in to undo cannot set the boot target back"
+reset_box
+run_helper enable --no-autologin >/dev/null 2>&1 || true
+: >"$state/set-default-fails"
+: >"$state/calls"
+if out=$(run_helper disable 2>&1); then
+    ok "disable exits 0"
+else
+    miss "disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
+fi
+rm -f "$state/set-default-fails"
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target' "the boot target stays recorded with no sign-in step left"
+out_has 'again to put them back' "says how to finish"
+
+echo "  a disable that stops before it is done"
+reset_box
+run_helper enable >/dev/null 2>&1 || true
+: >"$state/daemon-reload-fails"
+: >"$state/calls"
+if out=$(run_helper disable 2>&1); then
+    miss "disable exits 0 although daemon-reload failed"
+else
+    ok "disable stops when daemon-reload fails"
+fi
+rm -f "$state/daemon-reload-fails"
+call_made 'systemctl daemon-reload' "the run got as far as daemon-reload"
+if [[ ! -e "$root/etc/systemd/system/signalk-kiosk.service" ]]; then
+    ok "the kiosk files were removed before the stop"
+else
+    miss "the kiosk unit is still there: the run stopped before the removal"
+fi
+conf_has 'KIOSK_PREV_DEFAULT_TARGET=graphical.target' "the boot target stays recorded"
+conf_has 'KIOSK_PREV_DISPLAY_MANAGER=lightdm.service' "the desktop login stays recorded"
+conf_has 'KIOSK_SK_USER_CREATED=1' "the Signal K user stays recorded"
+conf_has 'KIOSK_AUTOLOGIN_CHANGED=installed' "the plugin install stays recorded"
+: >"$state/calls"
+rm -f "$state/user-calls"
+if out=$(run_helper disable 2>&1); then
+    ok "disable again exits 0"
+else
+    miss "second disable failed: $(tail -5 <<<"$out" | tr '\n' '|')"
+fi
+call_made 'systemctl set-default graphical.target' "the second disable sets the boot target back"
+call_made 'systemctl enable --now lightdm.service' "the second disable gives the desktop login back"
+if [[ "$(cat "$state/user-calls" 2>/dev/null)" == DELETE ]]; then
+    ok "the second disable deletes the kiosk's Signal K user"
+else
+    miss "Signal K user calls: $(tr '\n' '|' <"$state/user-calls" 2>/dev/null)"
+fi
+if jq -e '.enabled == false' "$cfgf" >/dev/null 2>&1; then
+    ok "the second disable switches signalk-autologin off"
+else
+    miss "plugin config after the second disable: $(cat "$cfgf" 2>/dev/null)"
+fi
+if [[ -e "$conf" ]]; then
+    miss "the record is still there after the second disable: $(grep -v '^#' "$conf" | tr '\n' '|')"
+else
+    ok "the record is gone once the second disable is done"
+fi
 
 echo "  Raspberry Pi OS, a page on another host"
 reset_box
